@@ -1,2 +1,8 @@
 # Code_study
-Starting from C, move to Python and math , ending for LLM
+
+本仓库根目录用于当前需要下载的通用文档、模板和任务包。
+
+- 根目录：当前有效交付文件
+- `archive/`：历史学习资料和旧文件
+
+不得向本仓库上传公司数据、代码、DBC、视频、截图或内部文档。
