@@ -1,8 +1,22 @@
 # Code_study
 
-本仓库根目录用于当前需要下载的通用文档、模板和任务包。
+This repository is my personal workspace for studying programming, numerical
+methods, and engineering software.
 
-- 根目录：当前有效交付文件
-- `archive/`：历史学习资料和旧文件
+Current topics include:
 
-不得向本仓库上传公司数据、代码、DBC、视频、截图或内部文档。
+- C and C++ fundamentals
+- Git and software development workflows
+- Python for data processing and analysis
+- MATLAB and Simulink
+- Vehicle dynamics and control fundamentals
+- System identification and time-series analysis
+
+## Repository structure
+
+- The repository root contains the materials currently being studied.
+- `archive/` contains older exercises, notes, references, and completed study
+  materials.
+
+The repository is intended for personal study notes, public references, and
+general-purpose examples.
