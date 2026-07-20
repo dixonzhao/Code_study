@@ -1,0 +1,259 @@
+Python GUI Pipeline Review Exercise 01
+TASK_ID: T001
+STATUS: Approved for inspection only
+
+======================================================================
+1. Goal
+======================================================================
+
+Review the four existing Python GUI programs in the current company workspace
+and create a factual Program Inventory.
+
+The four program roles are:
+
+P001 - CAN Header Catalog
+P002 - MATLAB-format CAN DBC Decoder / Time-order Decoder
+P003 - CAN Analysis CSV Cleaner
+P004 - Stage Residual Analyzer / Excel Report Generator
+
+This task is an inspection task only.
+
+Do not modify source code.
+Do not refactor.
+Do not recommend new algorithms.
+Do not create a new Analyzer.
+Do not change mathematical definitions.
+
+
+======================================================================
+2. Working Rules
+======================================================================
+
+1. Follow the previously supplied collaboration protocol.
+2. Inspect only files that the user explicitly identifies as P001-P004.
+3. Base every statement on the actual current source code, GUI labels, constants,
+   function definitions, and file I/O operations.
+4. If information cannot be confirmed, write "UNKNOWN". Do not guess.
+5. Distinguish current behavior from comments, planned behavior, and unused code.
+6. Do not copy large code blocks into the result.
+7. Function and class names may be listed, but function bodies must not be copied.
+8. Do not upload or transmit company source code, data, DBC, screenshots, or logs.
+9. Save the result only inside the company environment as:
+
+   T001_program_inventory_audit_result.txt
+
+
+======================================================================
+3. Inspection Procedure
+======================================================================
+
+For each of P001-P004, inspect the program and report the fields in Section 4.
+
+Then inspect how the four programs are used together and report:
+
+- actual execution order;
+- manual steps between programs;
+- input/output filename relationships;
+- overlapping responsibilities;
+- missing interface definitions;
+- any behavior that cannot be determined from code alone.
+
+Pay special attention to the following operations:
+
+- delimiter and header detection;
+- CAN ID and Channel selection;
+- DBC loading and signal decoding;
+- endian, signedness, scale, and offset handling;
+- time or Framecount sorting;
+- horizontal signal expansion;
+- forward fill;
+- invalid-value and missing-value handling;
+- column selection and dtype conversion;
+- raw discrepancy calculation;
+- Stage 1 and Stage 2 baseline calculation;
+- final residual calculation;
+- threshold and candidate flag calculation;
+- persistence or consecutive-row handling;
+- Event Hint window merging;
+- Excel sheet generation.
+
+Do not determine whether these methods are mathematically correct in T001.
+Only determine where they exist and what the current code actually does.
+
+
+======================================================================
+4. Required Output Format
+======================================================================
+
+Use the following format exactly.
+
+---------------------------------------------------------------------
+T001_PROGRAM_INVENTORY_AUDIT_RESULT
+DATE:
+COPILOT_STATUS: COMPLETE / PARTIAL / BLOCKED
+SOURCE_CODE_CHANGED: NO
+---------------------------------------------------------------------
+
+[P001]
+ROLE_NAME: CAN Header Catalog
+EXACT_FILENAME:
+VERSION:
+GUI_WINDOW_TITLE:
+ONE_SENTENCE_PURPOSE:
+INPUT_FILE_TYPES:
+OUTPUT_FILE_TYPES:
+MAIN_CLASSES:
+MAIN_FUNCTIONS:
+SORTING: NONE / YES / UNKNOWN
+FORWARD_FILL: NONE / YES / UNKNOWN
+INVALID_OR_MISSING_VALUE_HANDLING: NONE / YES / UNKNOWN
+CONFIGURATION_INPUTS:
+OBSERVED_RESPONSIBILITIES:
+OUT_OF_SCOPE_BEHAVIOR_FOUND:
+UNUSED_OR_PLANNED_CODE_FOUND:
+UNKNOWN_ITEMS:
+
+[P002]
+ROLE_NAME: MATLAB-format CAN DBC Decoder / Time-order Decoder
+EXACT_FILENAME:
+VERSION:
+GUI_WINDOW_TITLE:
+ONE_SENTENCE_PURPOSE:
+INPUT_FILE_TYPES:
+OUTPUT_FILE_TYPES:
+MAIN_CLASSES:
+MAIN_FUNCTIONS:
+SORT_KEYS_AND_PRIORITY:
+HORIZONTAL_EXPANSION_METHOD:
+FORWARD_FILL_RULE:
+FORWARD_FILL_LIMIT_OR_SIGNAL_AGE:
+RAW_UPDATE_INDICATOR_PRESERVED: YES / NO / UNKNOWN
+INVALID_OR_MISSING_VALUE_HANDLING:
+DBC_CHANNEL_SELECTION_RULE:
+OUTPUT_COLUMNS_OR_COLUMN_GROUPS:
+OBSERVED_RESPONSIBILITIES:
+OUT_OF_SCOPE_BEHAVIOR_FOUND:
+UNUSED_OR_PLANNED_CODE_FOUND:
+UNKNOWN_ITEMS:
+
+[P003]
+ROLE_NAME: CAN Analysis CSV Cleaner
+EXACT_FILENAME:
+VERSION:
+GUI_WINDOW_TITLE:
+ONE_SENTENCE_PURPOSE:
+INPUT_FILE_TYPES:
+OUTPUT_FILE_TYPES:
+MAIN_CLASSES:
+MAIN_FUNCTIONS:
+SORT_KEYS_AND_PRIORITY:
+FORWARD_FILL_RULE:
+INVALID_VALUE_RULES:
+MISSING_VALUE_RULES:
+DTYPE_CONVERSION_RULES:
+COLUMN_SELECTION_RULES:
+FRAMECOUNT_OR_TIMESTAMP_MODIFIED: YES / NO / UNKNOWN
+DATA_QUALITY_REPORT_GENERATED: YES / NO / UNKNOWN
+OBSERVED_RESPONSIBILITIES:
+OUT_OF_SCOPE_BEHAVIOR_FOUND:
+UNUSED_OR_PLANNED_CODE_FOUND:
+UNKNOWN_ITEMS:
+
+[P004]
+ROLE_NAME: Stage Residual Analyzer / Excel Report Generator
+EXACT_FILENAME:
+VERSION:
+GUI_WINDOW_TITLE:
+ONE_SENTENCE_PURPOSE:
+INPUT_FILE_TYPES:
+OUTPUT_FILE_TYPES:
+MAIN_CLASSES:
+MAIN_FUNCTIONS:
+REFERENCE_TARGET_SELECTION:
+RAW_DISCREPANCY_FORMULA_AS_IMPLEMENTED:
+STAGE1_BASELINE_FORMULA_AS_IMPLEMENTED:
+STAGE2_BASELINE_FORMULA_AS_IMPLEMENTED:
+FINAL_RESIDUAL_SELECTION_RULE:
+THRESHOLD_FORMULA_AS_IMPLEMENTED:
+CANDIDATE_FLAG_FORMULA_AS_IMPLEMENTED:
+PERSISTENCE_RULE_AS_IMPLEMENTED:
+EVENT_HINT_MERGE_RULE_AS_IMPLEMENTED:
+EVENT_HINT_OUTPUT_FIELDS:
+EXCEL_SHEET_NAMES:
+PEARSON_IMPLEMENTED: YES / NO
+SPEARMAN_IMPLEMENTED: YES / NO
+NMI_IMPLEMENTED: YES / NO
+LAG_SCAN_IMPLEMENTED: YES / NO
+EVIDENCE_SCORE_IMPLEMENTED: YES / NO
+ONE_DIMENSIONAL_RISK_IMPLEMENTED: YES / NO
+TWO_DIMENSIONAL_RISK_IMPLEMENTED: YES / NO
+OBSERVED_RESPONSIBILITIES:
+OUT_OF_SCOPE_BEHAVIOR_FOUND:
+UNUSED_OR_PLANNED_CODE_FOUND:
+UNKNOWN_ITEMS:
+
+[PIPELINE]
+ACTUAL_EXECUTION_ORDER:
+MANUAL_STEPS_BETWEEN_PROGRAMS:
+P001_OUTPUT_USED_BY:
+P002_OUTPUT_USED_BY:
+P003_OUTPUT_USED_BY:
+P004_OUTPUT_USED_BY:
+FILENAME_DEPENDENCIES:
+CONFIGURATION_DEPENDENCIES:
+
+[RESPONSIBILITY_OVERLAP]
+DECODER_AND_CLEANER_SORTING_OVERLAP:
+DECODER_AND_CLEANER_FORWARD_FILL_OVERLAP:
+DECODER_AND_CLEANER_MISSING_VALUE_OVERLAP:
+ANALYZER_AND_EVENT_PROCESSING_OVERLAP:
+OTHER_OVERLAP:
+
+[INTERFACE_GAPS]
+MISSING_REQUIRED_COLUMN_DEFINITION:
+MISSING_UNIT_DEFINITION:
+MISSING_DTYPE_DEFINITION:
+MISSING_VALIDITY_DEFINITION:
+MISSING_TIME_OR_FRAMECOUNT_DEFINITION:
+MISSING_FORWARD_FILL_TRACEABILITY:
+OTHER_INTERFACE_GAPS:
+
+[COPILOT_SUMMARY]
+1. CURRENT_PIPELINE_IN_ONE_LINE:
+2. THREE_MOST_IMPORTANT_CONFIRMED_OVERLAPS_OR_GAPS:
+3. ITEMS_REQUIRING_USER_BUSINESS_CONFIRMATION:
+4. ITEMS_REQUIRING_FUTURE_TECHNICAL_DECISION:
+5. INSPECTION_LIMITATIONS:
+
+---------------------------------------------------------------------
+END_OF_T001_RESULT
+---------------------------------------------------------------------
+
+
+======================================================================
+5. Completion Criteria
+======================================================================
+
+T001 is complete only when:
+
+1. All four explicitly selected programs have been inspected.
+2. Exact filenames and current program roles are recorded.
+3. Actual input/output relationships are recorded.
+4. Decoder/Cleaner responsibility overlap is recorded without changing code.
+5. Stage Analyzer formulas and Event Hint implementation locations are recorded
+   as current implementation facts, without judging or redesigning them.
+6. Unknown information is marked UNKNOWN instead of guessed.
+7. The result file is saved as T001_program_inventory_audit_result.txt.
+8. No source code has been modified.
+
+
+======================================================================
+6. Short Instruction to Copilot
+======================================================================
+
+Please inspect the four Python GUI programs selected by the user and complete
+this task exactly as written. Do not modify code. Save the completed report as
+T001_program_inventory_audit_result.txt and provide the user with a short
+completion message.
+
+End of Task Packet
