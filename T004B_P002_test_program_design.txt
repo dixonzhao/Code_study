@@ -5,36 +5,36 @@ T004B - P002 CHARACTERIZATION TEST PROGRAM DESIGN
 
 一、用户准备
 
-1. 在P002所在目录新建空文件：
+1. 在公司Copilot Web Chat中新开一个对话。
 
-t004b_p002_characterization_test.py
-
-2. 在同一个VS Code窗口同时打开：
+2. 向Copilot Chat同时提供两个附件：
 
 - matlab_can_time_order_decoder_gui.py
-- t004b_p002_characterization_test.py
 - 本设计书
 
 3. 给Copilot以下指令：
 
-根据T004B程序设计书和当前打开的P002源码，把完整测试程序直接写入
-t004b_p002_characterization_test.py。
+把matlab_can_time_order_decoder_gui.py作为只读实现参考。
+严格按照T004B程序设计书生成完整测试程序，并以可下载Python文件
+t004b_p002_characterization_test.py返回。
 必须调用真实P002实现，不得复制或重新实现Decoder算法。
-不要运行程序，不要预测测试结果，不要在Chat中粘贴代码。
-写完当前Python文件后只回复CODE_WRITTEN。
+不要运行程序，不要预测测试结果，不要直接返回Packet。
+不要只在Chat中粘贴代码块；必须生成可下载的.py文件附件。
 
 
 二、Copilot唯一交付物
 
-Copilot只负责写入：
+Copilot只负责生成并返回可下载文件：
 
 t004b_p002_characterization_test.py
 
 禁止Copilot：
 
 - 修改P002；
+- 把修改后的P002作为交付物；
 - 在Chat中直接返回Packet；
 - 声称测试已经运行；
+- 只返回代码文本而不生成Python文件；
 - 使用公司真实CSV或DBC；
 - 复制P002算法到测试脚本并测试复制品；
 - 跳过Case后仍返回PASS；
@@ -297,13 +297,14 @@ C-x
 
 九、用户运行步骤
 
-看到Copilot回复CODE_WRITTEN后：
+Copilot生成可下载Python文件后：
 
-1. 确认t004b_p002_characterization_test.py不为空；
-2. 确认P002文件未被Copilot修改；
-3. 在VS Code Terminal运行：
+1. 下载t004b_p002_characterization_test.py；
+2. 把它放入原始P002所在目录；
+3. 确认原始P002仍保持原文件名且没有被替换；
+4. 在公司允许的Terminal中进入该目录并运行：
 
 python t004b_p002_characterization_test.py
 
-4. 只回传Terminal的T004B1-5 Packet；
-5. 如果程序崩溃且没有Packet，只回传最后一行Error Type和Traceback末尾一行。
+5. 只回传Terminal的T004B1-5 Packet；
+6. 如果程序崩溃且没有Packet，只回传最后一行Error Type和Traceback末尾一行。
