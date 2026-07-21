@@ -10,6 +10,19 @@ MODE - IMPLEMENT TESTS, DO NOT MODIFY P001-P004
 4. 只返回Machine Packet，不生成自然语言报告。
 
 
+执行角色（必须严格遵守）：
+
+1. Copilot只负责生成一个Python脚本：
+   t004_characterization_tests.py
+2. Copilot不得声称已经复制文件、计算Hash、运行测试或得到最终Packet。
+3. 用户负责把脚本保存在P001-P004所在目录，并在VS Code Terminal实际运行。
+4. baseline freeze、SHA-256、Synthetic Input创建、测试执行和Packet计算全部由脚本在运行时完成。
+5. 最终Packet只能来自Python Terminal的真实运行输出，不能由Copilot Chat根据源码推测。
+6. 如果Copilot无法让某个Case调用真实程序Core，脚本必须为该Case输出NOT_TESTED/NOT_TESTABLE Code。
+
+Copilot完成本任务时只需要创建或更新上述Python脚本。不要在Chat中生成自然语言总结或伪造测试结果。
+
+
 程序：
 
 P001 can_header_catalog_gui.py
@@ -29,9 +42,9 @@ P004 sre_cam_stage_residual_error_analyzer_v4_5_3_jp_compact_excel_notes.py
 - 无法直接测试必须返回NOT_TESTABLE，不得猜测PASS。
 
 
-PHASE 1 - BASELINE FREEZE
+PHASE 1 - BASELINE FREEZE（由生成的Python脚本在运行时执行）
 
-在四个程序所在目录创建本地子目录：
+脚本以自身所在目录作为P001-P004目录，并在运行时创建本地子目录：
 
 baseline_freeze_T004
 
@@ -45,11 +58,17 @@ baseline_freeze_T004
 6. T004结束时再次计算原文件Hash，确认测试期间没有修改原程序。
 
 
-PHASE 2 - TEST HARNESS
+PHASE 2 - TEST HARNESS（由Copilot生成，用户实际运行）
 
 创建：
 
 t004_characterization_tests.py
+
+用户执行命令：
+
+python t004_characterization_tests.py
+
+如公司环境使用其他Python Launcher，用户可按实际环境改用对应启动命令，但不得修改测试逻辑。
 
 要求：
 
@@ -61,6 +80,14 @@ t004_characterization_tests.py
 - 单个Case失败不能阻止其他Case继续执行；
 - 在脚本内部记录每个Case的实际观察Code；
 - 最后只在Terminal输出T004 Block Packet。
+- 除最终Packet外，调试信息应写入公司电脑本地的T004_TEST_LOG.txt，不在Terminal输出长报告。
+- 出现致命错误、无法生成Packet时，Terminal只输出以下之一：
+  T004E-IMPORT
+  T004E-FREEZE
+  T004E-P002
+  T004E-P003
+  T004E-P004
+  T004E-PACKET
 
 
 PHASE 3 - SYNTHETIC CASES
@@ -350,7 +377,8 @@ C-x
 
 Rules:
 
-- 在Copilot Chat中只输出以上10行；
+- 上述10行必须由t004_characterization_tests.py真实运行后在Terminal输出；
+- Copilot Chat不得自行填写或预测这些Code；
 - 使用连字符，不使用冒号；
 - 每个A Block正好4个单字符Code；
 - 不输出解释、逗号、空格、Markdown或自然语言报告；
