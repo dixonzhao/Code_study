@@ -1,0 +1,229 @@
+软件学习与工程整理日报
+
+日期：2026-07-21
+主题：既有数据处理程序盘点、接口验证及统一指挥链准备
+
+
+一、当日目标
+
+当日没有继续盲目增加Analyzer功能，而是集中恢复对既有多程序系统的完整认识，建立可重复的信息传递和只读检查方式，并找出重构及后续功能开发前必须先解决的基础问题。
+
+本次工作没有传输公司数据、DBC、程序源文件、截图或内部文档。以下内容来自人工确认的信息、压缩后的机器检查结果，以及不修改输入的只读验证程序。
+
+
+二、已完成工作
+
+1. 开发环境与单向交付通道
+
+- 准备专用Mac环境，用于技术规划、文档整理和通用检查程序生成。
+- 确认个人设备到执行环境之间可以通过GitHub完成单向文件下载。
+- 整理Code_study仓库，将当前交付物与历史学习文件分开。
+- 建立滚动交付规则：新的临时文件上传时，删除上一次已经完成传递的临时文件。
+
+
+2. 低带宽信息传递协议
+
+- 设计并实际测试Request Capsule / Return Capsule通信方式。
+- 将检查结果压缩为四字符回答块，每四项换行，使用无需Shift的连字符，并增加校验位。
+- 将原本需要人工阅读大段源码或CSV的工作，逐步改为由只读Python脚本检查并返回压缩结果。
+- 完成多轮协议磨合，证明该方式可以在减少手工输入量的同时，提高信息回传密度并降低抄写错误。
+
+当日完成的主要探测批次包括：T002、T003、T004、T005、T006、T007、T008、BC010及CDV002。
+
+
+3. 既有程序Inventory
+
+将目前四个既有程序暂时整理为以下职责：
+
+- P001：在目标Signal尚不清楚时，用于发现可用CAN ID、Channel和Signal的可选Header Catalog工具；
+- P002：负责Raw CAN/DBC解码、Signal横向展开、时间排序及Forward Fill；
+- P003：负责列筛选、再次排序、类型转换、清洗及缺失值处理，当前实践中通常需要使用；
+- P004：负责Stage Baseline、Residual分析、变量关联筛查、High-risk条件、Event Hint及报告输出。
+
+确认目前不存在Code-level Orchestrator。四个GUI程序分别启动，文件路径和参数由用户在程序之间手动传递。
+
+
+4. 实际执行链恢复
+
+根据程序职责、静态检查结果和人工业务确认，当前执行链暂定为：
+
+可选Signal/Header盘点
+→ P002 DBC解码与横向展开
+→ P003清洗及Framecount顺序整理
+→ P004 Stage Residual分析
+→ 工程师人工复核
+
+确认存在以下人工步骤：
+
+- 手动选择Raw CSV和对应DBC；
+- 手动选择CAN ID、Channel和Signal Filter；
+- 手动将P002输出作为P003输入；
+- 手动配置排序、保留列、填充值和类型处理；
+- 手动将P003输出作为P004输入；
+- 手动指定Frame、暂定Reference、Target、Stage、Threshold和Event参数；
+- 手动确认输出文件位置并检查分析报告。
+
+
+5. 既有程序静态检查与职责分析
+
+通过只读Python Probe对既有程序进行了静态检查，确认以下重叠和缺口：
+
+- P001与P002重复实现了部分CSV Header识别、DBC读取、CAN ID/Channel选择及Signal Filter逻辑；
+- P002、P003和P004均可能改变或重新定义行顺序；
+- P002执行Unlimited Forward Fill；
+- P003默认还可能将剩余Blank/NaN填为0，形成第二次Imputation；
+- 缺失值来源、原始更新时间、是否Forward-filled及Signal Age没有传递给P004；
+- P004已从Stage Residual分析扩张到关联筛查、风险条件及Event Hint处理；
+- 四个程序之间目前没有Shared Schema Registry或正式Input/Output Contract。
+
+以上为架构观察结果。当日没有修改公司环境中既有程序的正式行为。
+
+
+6. 业务规则和数据契约确认
+
+当日确认以下事实：
+
+- P001主要在新任务或目标Signal不明确时使用，并不是每次运行的强制步骤；
+- 当前数据通常需要经过P003，因为分析和视频联动以Framecount为基准；
+- Framecount是当前唯一可信并能与视频对应的对齐轴；
+- 其他Raw Time字段不能在未经单独验证时作为权威时间轴；
+- Blank、0和特定边界值的含义随Signal而变化，不能设置一条全局无效值规则；
+- 部分Signal存在各自的无效Sentinel Value；
+- Radar仅是暂定工程Reference，不是Ground Truth。
+
+
+7. Canonical Dataset只读验证
+
+设计并测试了高性能只读Validator。程序只读取用户选择的列，使用Chunk处理，并生成Manifest、Fingerprint及Input Unchanged检查，不修改输入文件。
+
+对当前Partial Decoded Dataset进行CDV002验证后，确认：
+
+- 输入文件读取成功；
+- Framecount非缺失率很高且基本为整数；
+- 同一Framecount存在重复行，这与多个Signal在同一Frame内更新的结构一致；
+- 当前检查数据中每个Framecount大约对应6至20行；
+- 当前输入顺序中的Framecount单调；
+- 最大Framecount Gap不大于5；
+- 没有Framecount倒退；
+- 没有Framecount为0；
+- 暂选Radar Distance和Camera Distance可以转为Numeric；
+- 同一Framecount内存在多值冲突，因此需要明确的Frame-level Aggregation Contract；
+- 数据中存在Missing、Zero、边界值候选以及Validity/Status候选列；
+- Manifest、Summary、Fingerprint及Input Unchanged检查均成功。
+
+CDV002结果：结构验证PASS WITH WARNING。
+
+该结果只证明被检查文件的结构可以继续调查，不证明当前选择的单一Camera列在业务上就是正确Target。
+
+
+8. 发现Camera Target选择关键问题
+
+确认Camera Distance在记录中后段不是始终来自一个固定Channel。系统逻辑会在Camera Channel 1与Channel 3之间切换当前目标。
+
+因此以下旧假设失效：
+
+固定Camera Distance列 = 全程Camera Target
+
+正确顺序必须调整为：
+
+Camera Candidate Channels
+→ Target Selection / Association
+→ Selected Camera Distance
+→ Camera–Radar Discrepancy
+
+禁止使用以下未经验证的替代规则：
+
+- 始终固定选择Channel 1；
+- 始终固定选择Channel 3；
+- 哪个非0就选择哪个；
+- 选择更接近Radar的一路。
+
+其中“选择更接近Radar的一路”会把待调查的Discrepancy主动压小，形成循环定义，因此不能作为正式Target Selection逻辑。
+
+
+9. Camera Target Switch Profiler原型
+
+设计了只读Camera Target Switch Profiler，并使用合成数据完成本地测试。当前原型支持：
+
+- 按Framecount分组；
+- 同时输入两路Camera Distance Candidate；
+- 可选输入Reference ID及两路Candidate ID；
+- 检查每帧可用性和同帧多值冲突；
+- 在ID语义完整时进行ID-supported selection；
+- 检测A→B、B→A及A→B→A往返切换；
+- 输出切换点前后的Discrepancy Jump；
+- 明确区分UNKNOWN、UNMATCHED和AMBIGUOUS；
+- 输出Input Fingerprint并确认输入没有被修改。
+
+程序明确禁止按Camera与Radar距离接近程度选择Candidate。
+
+
+三、当日形成的技术决策
+
+1. 在Program Inventory、Program Responsibility和Interface Contract明确前，停止继续扩张Analyzer功能。
+
+2. 当前统一使用Framecount作为对齐基准；其他时间字段暂不作为正式排序或同步依据。
+
+3. 不再使用全局Blank-to-zero作为正式缺失值策略。无效值规则必须按Signal定义。
+
+4. Radar只作为Provisional Reference；正式报告不得把Camera–Radar Discrepancy直接称为Camera Error。
+
+5. Camera Target必须被定义为Target Selection / Association的输出，而不是固定源列。
+
+6. Target Selection必须位于Discrepancy计算之前。
+
+7. 优先使用只读自动Probe和压缩Return Capsule，避免人工打开超大CSV逐项查找。
+
+8. 后续大文件工具应尽量利用可用CPU和内存，但涉及行顺序、Event连续性和动态模型的步骤必须保持Deterministic。
+
+
+四、识别出的主要风险
+
+- Unlimited Forward Fill可能制造人工持续性，并污染后续Lag或SysID结果；
+- Blank-to-zero可能把Unknown/Invalid转换为看似有效的物理量；
+- 多个程序重复排序可能改变Event连续性和Lag解释；
+- 同一Framecount多值需要正式Aggregation Rule；
+- 固定Camera Target列会在Channel切换处制造伪异常；
+- P004职责已经混合Stage Modeling、Screening和Event Processing；
+- 静态源码检查不能替代公司环境中的端到端运行验证。
+
+
+五、当日交付与可追溯证据
+
+- 完成低带宽Request/Return Capsule协议并通过多轮测试；
+- 完成现有四程序Inventory；
+- 恢复当前人工执行链及文件依赖；
+- 形成Sorting、Imputation、Missingness Provenance和Analyzer Scope重叠清单；
+- 完成P002/P003/P004等程序的只读静态Probe；
+- 完成Partial Decoded Dataset结构Profiling；
+- 完成高性能Canonical Dataset Validator；
+- 获得CDV002验证结果及完整Manifest；
+- 发现固定Camera Target假设错误；
+- 形成Target Selection必须先于Discrepancy的正式技术判断；
+- 完成Camera Target Switch Profiler原型及合成切换测试。
+
+
+六、没有声称完成的工作
+
+- 尚未重构公司环境中的正式程序；
+- 尚未批准最终Target Selection算法；
+- 尚未完成Root Cause判断；
+- 尚未完成Full Recording端到端验证；
+- 尚未把Event Hint升级为正式Event Detection；
+- 尚未上传或转移任何公司数据、DBC、程序源文件或内部资料。
+
+
+七、下一步动作
+
+1. 使用批准的Partial Decoded Dataset运行Camera Target Switch Profiler。
+
+2. 确认现有ID/Status Signal是否确实表达系统当前Target Selection逻辑。
+
+3. 根据检查结果定义Canonical One-row-per-Framecount Dataset Contract，再决定P002/P003/P004的重构顺序。
+
+
+八、当日总结
+
+当日工作的主要成果不是新增一个功能，而是将一组职责重叠、依赖人工操作的GUI程序，恢复成具有证据支持的Program Inventory和Execution Chain。通过先进行静态检查和数据结构验证，在大规模重构前识别了排序、缺失值、Forward Fill、同帧多值及Target Selection等关键风险。
+
+其中最重要的发现是：Camera Target并非全程固定列。及时否定这一假设，避免了后续Discrepancy、Baseline、Residual和Event分析继续建立在错误Target定义之上。
