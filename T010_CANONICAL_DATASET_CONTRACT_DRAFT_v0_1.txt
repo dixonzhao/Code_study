@@ -1,0 +1,700 @@
+T010 - CANONICAL DATASET CONTRACT DRAFT v0.1
+
+Status: FORMAL DESIGN DRAFT - NOT YET IMPLEMENTED
+Date: 2026-07-21
+Owner: Project Technical Lead
+Applies to: future P002 Core, P003 replacement Core, P004 Core, Event Processor, and later SysID
+
+
+1. PURPOSE
+
+This contract prevents decoded CAN updates, missing values, imputed values, invalid measurements, Framecount alignment, and analysis rows from being mixed without traceability.
+
+It replaces the current implicit handoff:
+
+P002 Wide CSV
+-> Unlimited Forward Fill
+-> P003 generic Blank/NaN to Zero
+-> P004 treats rows as measurements
+
+with two explicit data layers:
+
+Layer A: Decoded Update Table
+
+Layer B: Canonical Frame Table
+
+Reason for two layers:
+
+- CAN Signals update asynchronously.
+- Video review and current engineering output use Framecount.
+- A raw CAN update row is not an equally sampled analysis time step.
+- Row adjacency is not Framecount continuity.
+- SysID later requires an explicitly defined sampling grid.
+- Imputation must remain distinguishable from a real update.
+
+
+2. NON-NEGOTIABLE RULES
+
+R1 Framecount is the current authoritative video/alignment axis.
+
+R2 DateTime and Time[us] may be retained as provenance but cannot define the current formal analysis order.
+
+R3 Missing, No Update, Invalid, Unavailable, and True Zero are different states.
+
+R4 No program may blanket-convert unknown/missing values to zero.
+
+R5 No program may perform unlimited Forward Fill without an explicit per-signal rule and age output.
+
+R6 Every analysis value must be traceable to an original update or an approved carry/aggregation rule.
+
+R7 Invalid or missing Framecount must never be silently replaced with zero.
+
+R8 Event continuity must use Framecount/segment rules, not only adjacent DataFrame rows.
+
+R9 P004 must consume a validated Canonical Frame Table, not define generic cleaning policy.
+
+R10 Legacy output may be supported temporarily through adapters, but legacy semantics do not become the new formal contract.
+
+
+3. LAYER A - DECODED UPDATE TABLE
+
+3.1 Grain
+
+One row represents one decoded Signal update originating from one Raw CAN source row/message.
+
+If one CAN Message contains multiple Signals, each decoded Signal update may become a separate Layer A row sharing the same source message identity.
+
+Layer A is an update/event table. It is not the final analysis sampling grid.
+
+
+3.2 Required columns
+
+schema_version
+
+- string;
+- initial value: canonical_update_v0.1.
+
+run_id
+
+- string generated per decode run;
+- must not expose a company file path;
+- links table and manifest.
+
+source_file_id
+
+- local run-safe identifier or fingerprint;
+- no raw path in analysis export unless explicitly approved.
+
+source_row_id
+
+- integer;
+- original input row identity before sorting/filtering;
+- never recalculated after sort.
+
+source_message_id
+
+- stable identity for all Signals decoded from the same CAN Message update.
+
+channel
+
+- integer or canonical string;
+- required.
+
+can_id
+
+- canonical hexadecimal string such as 0x000;
+- do not lose original numeric representation.
+
+dlc
+
+- integer;
+- nullable only if source truly lacks it.
+
+signal_name
+
+- DBC Signal name.
+
+signal_key
+
+- collision-safe identifier;
+- recommended composition: channel + can_id + signal_name.
+
+decoded_value
+
+- numeric or approved categorical value;
+- nullable.
+
+unit
+
+- DBC Unit when available;
+- nullable but explicitly present.
+
+decode_valid
+
+- boolean;
+- true only when required bytes and DBC decode are valid.
+
+invalid_reason
+
+- controlled string;
+- examples: NONE, INCOMPLETE_BYTES, DBC_PARSE_ERROR, OUT_OF_RANGE, SIGNAL_SENTINEL, UNKNOWN.
+
+is_original_update
+
+- always true in Layer A;
+- distinguishes Layer A from carried values in Layer B.
+
+framecount_context
+
+- nullable integer;
+- Framecount assigned to this update by the approved alignment rule;
+- not silently zero-filled.
+
+frame_segment_id
+
+- integer/string segment identifier;
+- changes on approved reset/wrap/file boundary rule.
+
+datetime_raw
+
+- optional provenance only;
+- not authoritative.
+
+time_us_raw
+
+- optional provenance only;
+- not authoritative.
+
+
+3.3 Layer A prohibited behavior
+
+- no generic Forward Fill;
+- no generic Zero Fill;
+- no dropping invalid updates without a validation count;
+- no loss of source_row_id;
+- no silent Signal collision;
+- no conversion of invalid Framecount to zero;
+- no use as equally sampled SysID input.
+
+
+4. LAYER B - CANONICAL FRAME TABLE
+
+4.1 Grain
+
+One row represents one valid Framecount within one frame_segment_id.
+
+Primary key:
+
+frame_segment_id + Framecount
+
+Layer B is the formal input for:
+
+- P004 discrepancy/baseline/residual analysis;
+- Framecount-aware Event Candidate processing;
+- video review export;
+- later fixed-grid time-series/SysID experiments, after sampling assumptions are confirmed.
+
+
+4.2 Required identity columns
+
+schema_version
+
+- initial value: canonical_frame_v0.1.
+
+run_id
+
+- links to manifest and Layer A.
+
+frame_segment_id
+
+- required.
+
+Framecount
+
+- required integer;
+- never missing in valid Layer B rows;
+- never silently imputed.
+
+frame_sequence_index
+
+- zero/one-based monotonically increasing index within segment;
+- does not replace Framecount.
+
+frame_gap_from_previous
+
+- integer difference from previous Framecount in same segment;
+- first row nullable.
+
+frame_contiguous
+
+- boolean according to configured expected increment/gap rule.
+
+frame_source_count
+
+- number of Layer A updates assigned to this frame.
+
+frame_quality_status
+
+- controlled value: VALID, WARNING, INVALID.
+
+frame_quality_reason
+
+- controlled reason list/string.
+
+
+4.3 Per-signal column group
+
+For every selected analysis Signal with canonical key S, Layer B should expose:
+
+S
+
+- selected physical value;
+- nullable.
+
+S__updated
+
+- boolean;
+- true when an original valid update for S belongs to this Framecount.
+
+S__carried
+
+- boolean;
+- true only when S comes from an earlier Framecount by an approved carry rule.
+
+S__age_frames
+
+- integer age since the last original valid update;
+- 0 for an original update;
+- nullable when no prior valid update exists.
+
+S__valid
+
+- boolean after decode, Signal-specific invalid rule, and age rule.
+
+S__invalid_reason
+
+- controlled string.
+
+S__source_row_id
+
+- source_row_id of the selected original update;
+- for carried values, points to the originating update.
+
+S__update_count_in_frame
+
+- number of original updates for S assigned to this frame.
+
+S__conflict
+
+- boolean;
+- true when multiple valid updates in the same frame disagree beyond the configured rule/tolerance.
+
+
+4.4 Signal metadata
+
+Signal metadata belongs in the run manifest/schema registry, not repeated as ordinary data rows:
+
+- signal_key;
+- display_name;
+- channel;
+- can_id;
+- DBC signal_name;
+- dtype;
+- unit;
+- valid range if approved;
+- sentinel invalid values;
+- carry allowed;
+- maximum carry age in frames;
+- same-frame aggregation rule;
+- role eligibility: frame/reference/target/stage/feature/status.
+
+
+5. FRAMECOUNT CONTRACT
+
+5.1 Valid Framecount
+
+Provisional definition:
+
+- integer-like;
+- inside the source/system-supported range;
+- assigned to a frame segment;
+- not produced by generic missing-value fill.
+
+5.2 Invalid Framecount rows
+
+Rows without a valid Framecount must:
+
+- remain available in Layer A with invalid/alignment reason;
+- not enter valid Layer B until an explicit alignment rule assigns them;
+- be counted in the validation report.
+
+5.3 Duplicate Framecount
+
+Duplicate Framecount is expected at Layer A because multiple CAN updates may occur within one video frame.
+
+Layer B must contain one row per Framecount/segment.
+
+Per-Signal same-frame selection is not a generic DataFrame drop_duplicates rule. It is a configured aggregation/selection rule and must preserve count/source/conflict metadata.
+
+5.4 Gap and continuity
+
+Every Layer B row records frame_gap_from_previous.
+
+Event Processor must split or flag candidate windows when the gap exceeds the approved Event gap threshold.
+
+5.5 Wrap/reset
+
+Until actual Framecount modulus/reset behavior is confirmed:
+
+- do not silently unwrap;
+- create a new frame_segment_id on a confirmed reset/file boundary;
+- record the reason in the manifest/validation report.
+
+
+6. MISSING, INVALID, AND CARRY POLICY
+
+6.1 State model
+
+At minimum distinguish:
+
+ORIGINAL_VALID_UPDATE
+
+ORIGINAL_INVALID_UPDATE
+
+NO_UPDATE_THIS_FRAME
+
+CARRIED_VALID_WITHIN_AGE
+
+CARRIED_EXPIRED
+
+UNAVAILABLE
+
+TRUE_ZERO
+
+6.2 Zero
+
+Zero is a normal numeric value unless a Signal-specific rule explicitly defines it as invalid.
+
+No project-wide zero-invalid rule is permitted.
+
+6.3 Sentinel values
+
+Sentinel rules must be per Signal or per approved Signal group.
+
+Example values observed in one Signal family must not be generalized to unrelated Signals.
+
+6.4 Carry/Forward Fill
+
+Default policy for a new Signal:
+
+carry_allowed = false
+
+To enable carry, configuration must define:
+
+- physical reason;
+- maximum age in Framecount units;
+- behavior after expiry;
+- whether invalid updates clear the carried value;
+- whether the Signal is suitable for lag/SysID use.
+
+Unlimited carry is prohibited in the new formal contract.
+
+
+7. SAME-FRAME MULTIPLE UPDATE POLICY
+
+No universal final rule is approved yet.
+
+Supported future rules may include:
+
+- LAST_VALID_BY_SOURCE_ORDER;
+- FIRST_VALID_BY_SOURCE_ORDER;
+- MEDIAN_WITHIN_FRAME;
+- MEAN_WITHIN_FRAME;
+- REJECT_IF_MULTIPLE;
+- SIGNAL_SPECIFIC.
+
+Provisional safe default for implementation design:
+
+- preserve all updates in Layer A;
+- do not silently collapse conflicting values;
+- expose update_count and conflict in Layer B;
+- require an explicit per-Signal selection rule before formal analysis.
+
+
+8. SORT CONTRACT
+
+Layer A authoritative identity order:
+
+- source_file_id;
+- source_row_id.
+
+Layer A may offer views sorted for inspection, but sorting cannot overwrite source_row_id.
+
+Layer B formal order:
+
+- frame_segment_id;
+- Framecount.
+
+DateTime/Time[us] cannot replace this order in the current project.
+
+All sort operations must be deterministic and recorded in the manifest.
+
+
+9. DATA QUALITY GATE
+
+Before P004 accepts Layer B, validate:
+
+- required identity columns exist;
+- schema_version supported;
+- Framecount numeric/integer-like;
+- primary key unique;
+- formal order monotonic within segment;
+- gap/reset summary generated;
+- selected Reference/Target columns numeric;
+- selected roles have Unit metadata or an explicit unknown-unit warning;
+- invalid/carry rate reported for every selected Signal;
+- maximum Signal age reported;
+- no unapproved blanket zero fill;
+- no unapproved unlimited carry;
+- target/reference role and discrepancy direction recorded.
+
+Gate outcomes:
+
+PASS
+
+- analysis may continue.
+
+PASS_WITH_WARNING
+
+- analysis may continue, but report must contain warnings.
+
+FAIL
+
+- P004 must not generate a normal-looking final report.
+
+
+10. RUN MANIFEST
+
+Every canonical build writes a machine-readable manifest containing:
+
+- schema_version;
+- run_id;
+- program names/versions/hashes;
+- input identifiers/fingerprints without unapproved paths;
+- DBC identifiers/hashes;
+- selected Signals and signal_keys;
+- Framecount rule;
+- segment/gap/reset summary;
+- sort rule;
+- invalid/sentinel rules;
+- carry rules and maximum ages;
+- same-frame selection rules;
+- row counts at each stage;
+- missing/invalid/carried counts;
+- warnings/errors;
+- output file identifiers.
+
+Preferred future format:
+
+JSON manifest + CSV/Parquet data + optional Excel human report.
+
+Do not require Parquet in the first implementation if the company environment lacks support.
+
+
+11. P004 INPUT CONTRACT
+
+P004 Core must receive:
+
+- validated Layer B table;
+- schema/manifest object;
+- Framecount column role;
+- Reference role;
+- Target role;
+- discrepancy direction;
+- Unit confirmation;
+- optional Stage axes;
+- invalid/carry inclusion policy.
+
+P004 must not:
+
+- blanket-convert all columns to numeric;
+- silently zero-fill;
+- treat carried/expired values as original updates without configuration;
+- use DataFrame row distance as a substitute for Framecount distance;
+- silently resort by untrusted DateTime/Time[us];
+- call discrepancy a sensor error without ground truth.
+
+
+12. EVENT PROCESSOR INPUT CONTRACT
+
+Required:
+
+- frame_segment_id;
+- Framecount;
+- frame_gap_from_previous;
+- anomaly_candidate boolean;
+- anomaly_score or absolute residual;
+- Reference/Target validity;
+- selected Signal age/validity context.
+
+Required output:
+
+- event_candidate_id;
+- start_framecount;
+- peak_framecount;
+- end_framecount;
+- duration_frames;
+- maximum score/residual;
+- candidate density;
+- gap/split reason;
+- data-quality warning summary;
+- video review padding recommendation.
+
+
+13. LEGACY COMPATIBILITY
+
+During transition:
+
+- retain T004A baseline programs;
+- do not overwrite legacy P002/P003/P004;
+- provide explicit Legacy Adapter only when required;
+- tag legacy outputs as legacy schema;
+- compare new and legacy outputs using Synthetic Regression Tests;
+- differences must be explained, not silently accepted.
+
+
+14. IMPLEMENTATION BOUNDARY
+
+This draft authorizes no code change yet.
+
+Implementation begins only after BC010 confirmation below is returned and Contract v0.2 resolves the blocking facts.
+
+
+15. BC010 BUSINESS/REAL-DATA CONFIRMATION PACKET
+
+Answer from actual knowledge or local inspection. Unknown is acceptable and must not be guessed.
+
+BC010Q1 RAW_CSV_SOURCE_ROW_ORDER
+0 UNKNOWN
+1 GENERALLY_CHRONOLOGICAL_AND_USABLE
+2 NOT_CHRONOLOGICAL
+3 CHRONOLOGICAL_ONLY_AFTER_EXISTING_SORT
+4 MIXED_BY_FILE
+
+BC010Q2 FRAMECOUNT_MESSAGE_RELATION_TO_OTHER_CAN_ROWS
+0 UNKNOWN
+1 FRAMECOUNT_PRESENT_ON_EVERY_RELEVANT_ROW
+2 FRAMECOUNT_ONLY_UPDATES_PERIODICALLY_AND_MUST_BE_ASSOCIATED_TO_OTHER_ROWS
+3 FRAMECOUNT_EXISTS_ONLY_IN_SEPARATE_TABLE_OR_SOURCE
+4 MIXED
+
+BC010Q3 MULTIPLE_P002_ROWS_PER_FRAMECOUNT
+0 UNKNOWN
+1 EXPECTED_NORMAL_BEHAVIOR
+2 UNEXPECTED_DATA_PROBLEM
+3 ONLY_FOR_SOME_SIGNALS_OR_FILES
+
+BC010Q4 FRAMECOUNT_DUPLICATE_MEANING
+0 UNKNOWN
+1 MULTIPLE_CAN_UPDATES_WITHIN_ONE_VIDEO_FRAME
+2 DUPLICATE_LOGGING_ERROR
+3 BOTH_POSSIBLE
+
+
+BC010Q5 FRAMECOUNT_GAPS_OBSERVED
+0 UNKNOWN
+1 NO
+2 YES_NORMAL_OR_EXPECTED
+3 YES_SUSPECTED_DATA_LOSS
+4 BOTH_TYPES
+
+BC010Q6 FRAMECOUNT_RESET_OR_WRAP_OBSERVED
+0 UNKNOWN
+1 NO
+2 YES_AT_FILE_OR_VIDEO_BOUNDARY
+3 YES_WITHIN_ONE_CONTINUOUS_FILE
+4 BOTH
+
+BC010Q7 INVALID_OR_MISSING_FRAMECOUNT_FORM
+0 UNKNOWN
+1 BLANK_OR_NAN
+2 ZERO
+3 SENTINEL_OTHER_THAN_ZERO
+4 MULTIPLE_FORMS
+
+BC010Q8 CURRENT_P002_FRAMECOUNT_ASSOCIATION
+0 UNKNOWN
+1 FRAMECOUNT_IS_FORWARD_FILLED_TO_OTHER_CAN_ROWS
+2 MERGED_BY_EXACT_ROW_OR_KEY
+3 CUSTOM_OTHER
+
+
+BC010Q9 SAME_SIGNAL_MULTIPLE_UPDATES_WITHIN_FRAME
+0 UNKNOWN
+1 NOT_OBSERVED
+2 OBSERVED_SAME_VALUE
+3 OBSERVED_DIFFERENT_VALUES
+4 BOTH_SAME_AND_DIFFERENT
+
+BC010Q10 PHYSICAL_VALIDITY_STATUS_SIGNALS
+0 UNKNOWN
+1 NONE_AVAILABLE
+2 AVAILABLE_FOR_CAMERA_ONLY
+3 AVAILABLE_FOR_RADAR_ONLY
+4 AVAILABLE_FOR_BOTH
+
+BC010Q11 ZERO_AS_VALID_MEASUREMENT
+0 UNKNOWN
+1 VALID_FOR_SOME_SIGNALS
+2 NEVER_VALID_IN_CURRENT_SELECTED_SIGNALS
+3 DEPENDS_ON_SIGNAL_AND_STATUS
+
+BC010Q12 PER_SIGNAL_SENTINEL_INFORMATION
+0 UNKNOWN
+1 NOT_AVAILABLE
+2 PARTIALLY_AVAILABLE_FROM_DBC_OR_ENGINEERS
+3 AVAILABLE_FOR_REQUIRED_SIGNALS
+
+
+BC010Q13 VIDEO_FRAMECOUNT_INCREMENT
+0 UNKNOWN
+1 NORMALLY_INCREMENT_BY_ONE
+2 CAN_SKIP_BY_DESIGN
+3 VARIABLE_OR_MIXED
+
+BC010Q14 DESIRED_CANONICAL_ANALYSIS_GRAIN
+0 NEED_DISCUSSION
+1 ONE_ROW_PER_FRAMECOUNT_ACCEPTED
+2 UPDATE_ROW_TABLE_ONLY
+3 BOTH_LAYER_A_AND_LAYER_B_ACCEPTED
+
+BC010Q15 LEGACY_P003_GUI_DURING_TRANSITION
+0 NEED_DISCUSSION
+1 KEEP_AS_READ_ONLY_LEGACY_TOOL
+2 REPLACE_IMMEDIATELY
+3 KEEP_GUI_BUT_REPLACE_INTERNAL_CORE
+
+BC010Q16 FIRST_IMPLEMENTATION_PRIORITY
+0 NEED_DISCUSSION
+1 DATA_CONTRACT_AND_VALIDATION_CORE
+2 SHARED_P001_P002_DECODER_CORE
+3 P004_EVENT_FRAMECOUNT_FIX
+4 OTHER
+
+
+Return format:
+
+BC010B1-4
+A1-Q1Q2Q3Q4
+A2-Q5Q6Q7Q8
+A3-Q9Q10Q11Q12
+A4-Q13Q14Q15Q16
+C-x
+
+Checksum:
+
+x = sum of Q1-Q16 codes modulo 10.
+
+Unknown=0 is valid. Do not infer facts only to avoid zero.
+
+End of Canonical Dataset Contract Draft v0.1.
