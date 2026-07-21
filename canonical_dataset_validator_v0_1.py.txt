@@ -1,0 +1,710 @@
+from __future__ import annotations
+
+import csv
+import hashlib
+import json
+import math
+import re
+import sys
+import uuid
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+SCHEMA_VERSION = "canonical_validation_v0.1"
+CHUNK_SIZE = 50_000
+NONE_ROLE = "<NONE>"
+
+
+def normalized(value) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value).lower())
+
+
+def choose_input_file() -> Path | None:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        value = filedialog.askopenfilename(
+            title="Select legacy P002 decoded CSV (CSV preferred)",
+            filetypes=[
+                ("CSV", "*.csv"),
+                ("Excel", "*.xlsx *.xls *.xlsm"),
+                ("All files", "*.*"),
+            ],
+        )
+        root.destroy()
+        return Path(value) if value else None
+    except Exception:
+        value = input("P002 decoded file path (blank to cancel): ").strip()
+        return Path(value) if value else None
+
+
+def sniff_csv(path: Path):
+    raw = path.read_bytes()[:131072]
+    decoded = None
+    encoding = None
+    for candidate in ["utf-8-sig", "cp932", "shift_jis", "utf-8", "latin1"]:
+        try:
+            decoded = raw.decode(candidate)
+            encoding = candidate
+            break
+        except UnicodeDecodeError:
+            continue
+    if decoded is None:
+        decoded = raw.decode("latin1", errors="replace")
+        encoding = "latin1"
+
+    try:
+        separator = csv.Sniffer().sniff(decoded, delimiters=",;\t|").delimiter
+    except Exception:
+        counts = {item: decoded.count(item) for item in [",", ";", "\t", "|"]}
+        separator = max(counts, key=counts.get)
+    return encoding, separator
+
+
+def read_header(path: Path):
+    import pandas as pd
+
+    if path.suffix.lower() in {".xlsx", ".xls", ".xlsm"}:
+        frame = pd.read_excel(path, nrows=0)
+        return list(frame.columns), {"kind": "excel"}
+
+    encoding, separator = sniff_csv(path)
+    frame = pd.read_csv(path, sep=separator, encoding=encoding, nrows=0)
+    return list(frame.columns), {
+        "kind": "csv",
+        "encoding": encoding,
+        "separator": separator,
+    }
+
+
+def iter_table(path: Path, reader_info: dict):
+    import pandas as pd
+
+    if reader_info["kind"] == "excel":
+        yield pd.read_excel(path)
+        return
+
+    yield from pd.read_csv(
+        path,
+        sep=reader_info["separator"],
+        encoding=reader_info["encoding"],
+        chunksize=CHUNK_SIZE,
+        low_memory=False,
+    )
+
+
+def detect_framecount(columns):
+    exact = [column for column in columns if normalized(column) == "framecount"]
+    if len(exact) == 1:
+        return exact[0]
+    named = [column for column in columns if "framecount" in normalized(column)]
+    if len(named) == 1:
+        return named[0]
+    id620 = [
+        column
+        for column in columns
+        if "620" in normalized(column)
+        and any(token in normalized(column) for token in ["frame", "count"])
+    ]
+    if len(id620) == 1:
+        return id620[0]
+    return (exact or named or id620 or [None])[0]
+
+
+def role_dialog(columns, detected_frame):
+    try:
+        import tkinter as tk
+        from tkinter import messagebox, ttk
+
+        root = tk.Tk()
+        root.title("Canonical Dataset Validator v0.1 - Column Roles")
+        root.attributes("-topmost", True)
+        root.resizable(True, False)
+
+        values = [str(column) for column in columns]
+        optional_values = [NONE_ROLE] + values
+        result = {"confirmed": False}
+
+        tk.Label(
+            root,
+            text="Confirm roles. Reference/Target may be <NONE> for structure-only validation.",
+            anchor="w",
+        ).grid(row=0, column=0, columnspan=2, padx=12, pady=(12, 8), sticky="ew")
+
+        tk.Label(root, text="Framecount (required)").grid(
+            row=1, column=0, padx=12, pady=5, sticky="w"
+        )
+        frame_box = ttk.Combobox(root, values=values, state="readonly", width=70)
+        frame_box.grid(row=1, column=1, padx=12, pady=5, sticky="ew")
+        if detected_frame in columns:
+            frame_box.set(str(detected_frame))
+        elif values:
+            frame_box.current(0)
+
+        tk.Label(root, text="Reference (optional)").grid(
+            row=2, column=0, padx=12, pady=5, sticky="w"
+        )
+        reference_box = ttk.Combobox(
+            root, values=optional_values, state="readonly", width=70
+        )
+        reference_box.grid(row=2, column=1, padx=12, pady=5, sticky="ew")
+        reference_box.current(0)
+
+        tk.Label(root, text="Target (optional)").grid(
+            row=3, column=0, padx=12, pady=5, sticky="w"
+        )
+        target_box = ttk.Combobox(
+            root, values=optional_values, state="readonly", width=70
+        )
+        target_box.grid(row=3, column=1, padx=12, pady=5, sticky="ew")
+        target_box.current(0)
+
+        def submit():
+            if not frame_box.get():
+                messagebox.showerror("Missing role", "Framecount column is required.")
+                return
+            result.update(
+                {
+                    "confirmed": True,
+                    "frame": frame_box.get(),
+                    "reference": None
+                    if reference_box.get() == NONE_ROLE
+                    else reference_box.get(),
+                    "target": None
+                    if target_box.get() == NONE_ROLE
+                    else target_box.get(),
+                }
+            )
+            root.destroy()
+
+        ttk.Button(root, text="Validate", command=submit).grid(
+            row=4, column=0, columnspan=2, pady=14
+        )
+        root.columnconfigure(1, weight=1)
+        root.protocol("WM_DELETE_WINDOW", root.destroy)
+        root.mainloop()
+        return result if result.get("confirmed") else None
+    except Exception:
+        print("Available columns:")
+        for index, column in enumerate(columns):
+            print(f"[{index}] {column}")
+        frame_index = int(input("Framecount column index: ").strip())
+        reference_text = input("Reference column index (blank for none): ").strip()
+        target_text = input("Target column index (blank for none): ").strip()
+        return {
+            "confirmed": True,
+            "frame": str(columns[frame_index]),
+            "reference": str(columns[int(reference_text)]) if reference_text else None,
+            "target": str(columns[int(target_text)]) if target_text else None,
+        }
+
+
+def fast_fingerprint(path: Path) -> str:
+    digest = hashlib.sha256()
+    size = path.stat().st_size
+    digest.update(str(size).encode("ascii"))
+    with path.open("rb") as handle:
+        digest.update(handle.read(1024 * 1024))
+        if size > 1024 * 1024:
+            handle.seek(max(0, size - 1024 * 1024))
+            digest.update(handle.read(1024 * 1024))
+    return digest.hexdigest()
+
+
+def program_hash() -> str:
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+
+
+def initialize_column_stats(columns):
+    return {
+        str(column): {
+            "rows": 0,
+            "missing": 0,
+            "numeric": 0,
+            "non_numeric_nonmissing": 0,
+            "zero": 0,
+            "minimum": None,
+            "maximum": None,
+            "minimum_count": 0,
+            "maximum_count": 0,
+        }
+        for column in columns
+    }
+
+
+def update_numeric_extreme(stats, valid):
+    if valid.empty:
+        return
+    local_min = float(valid.min())
+    local_max = float(valid.max())
+    local_min_count = int((valid == local_min).sum())
+    local_max_count = int((valid == local_max).sum())
+
+    if stats["minimum"] is None or local_min < stats["minimum"]:
+        stats["minimum"] = local_min
+        stats["minimum_count"] = local_min_count
+    elif local_min == stats["minimum"]:
+        stats["minimum_count"] += local_min_count
+
+    if stats["maximum"] is None or local_max > stats["maximum"]:
+        stats["maximum"] = local_max
+        stats["maximum_count"] = local_max_count
+    elif local_max == stats["maximum"]:
+        stats["maximum_count"] += local_max_count
+
+
+def classify_status(errors, warnings):
+    if errors:
+        return "FAIL", 3
+    if warnings:
+        return "PASS_WITH_WARNING", 2
+    return "PASS", 1
+
+
+def safe_json_value(value):
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return None
+    return value
+
+
+def write_summary_csv(path: Path, stats, validity_candidates):
+    fields = [
+        "column",
+        "rows",
+        "missing",
+        "missing_rate",
+        "numeric",
+        "numeric_rate_of_nonmissing",
+        "non_numeric_nonmissing",
+        "zero",
+        "zero_rate_of_numeric",
+        "minimum",
+        "minimum_count",
+        "maximum",
+        "maximum_count",
+        "repeated_boundary_candidate",
+        "validity_status_name_candidate",
+    ]
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for column, item in stats.items():
+            nonmissing = max(0, item["rows"] - item["missing"])
+            numeric = item["numeric"]
+            min_rate = item["minimum_count"] / max(1, numeric)
+            max_rate = item["maximum_count"] / max(1, numeric)
+            repeated_boundary = numeric >= 20 and (min_rate >= 0.01 or max_rate >= 0.01)
+            writer.writerow(
+                {
+                    "column": column,
+                    "rows": item["rows"],
+                    "missing": item["missing"],
+                    "missing_rate": item["missing"] / max(1, item["rows"]),
+                    "numeric": numeric,
+                    "numeric_rate_of_nonmissing": numeric / max(1, nonmissing),
+                    "non_numeric_nonmissing": item["non_numeric_nonmissing"],
+                    "zero": item["zero"],
+                    "zero_rate_of_numeric": item["zero"] / max(1, numeric),
+                    "minimum": safe_json_value(item["minimum"]),
+                    "minimum_count": item["minimum_count"],
+                    "maximum": safe_json_value(item["maximum"]),
+                    "maximum_count": item["maximum_count"],
+                    "repeated_boundary_candidate": repeated_boundary,
+                    "validity_status_name_candidate": column in validity_candidates,
+                }
+            )
+
+
+def validate(path: Path, roles: dict, output_dir: Path):
+    import pandas as pd
+
+    columns, reader_info = read_header(path)
+    frame_col = roles["frame"]
+    reference_col = roles.get("reference")
+    target_col = roles.get("target")
+
+    before_stat = path.stat()
+    input_fingerprint = fast_fingerprint(path)
+    run_id = str(uuid.uuid4())
+    started = datetime.now(timezone.utc).isoformat()
+
+    stats = initialize_column_stats(columns)
+    frame_counts = Counter()
+    total_rows = 0
+    frame_missing = 0
+    frame_nonnumeric = 0
+    frame_noninteger = 0
+    frame_zero_count = 0
+    previous_frame = None
+    backward_transitions = 0
+    same_frame_conflicts = {"reference": 0, "target": 0}
+    role_seen_values = {"reference": {}, "target": {}}
+
+    for chunk_index, chunk in enumerate(iter_table(path, reader_info), start=1):
+        total_rows += len(chunk)
+        for column in columns:
+            name = str(column)
+            series = chunk[column]
+            item = stats[name]
+            item["rows"] += len(series)
+            item["missing"] += int(series.isna().sum())
+            numeric = pd.to_numeric(series, errors="coerce")
+            valid = numeric.dropna()
+            item["numeric"] += int(valid.size)
+            item["non_numeric_nonmissing"] += int(
+                (series.notna() & numeric.isna()).sum()
+            )
+            item["zero"] += int((valid == 0).sum())
+            update_numeric_extreme(item, valid)
+
+        frame_raw = chunk[frame_col]
+        frame_numeric = pd.to_numeric(frame_raw, errors="coerce")
+        frame_missing += int(frame_raw.isna().sum())
+        frame_nonnumeric += int((frame_raw.notna() & frame_numeric.isna()).sum())
+        finite_frame = frame_numeric.dropna()
+        frame_noninteger += int(
+            ((finite_frame - finite_frame.round()).abs() > 1e-9).sum()
+        )
+        frame_zero_count += int((finite_frame == 0).sum())
+
+        for value in finite_frame.tolist():
+            frame_value = float(value)
+            frame_counts[frame_value] += 1
+            if previous_frame is not None and frame_value < previous_frame:
+                backward_transitions += 1
+            previous_frame = frame_value
+
+        for role_name, column in [
+            ("reference", reference_col),
+            ("target", target_col),
+        ]:
+            if not column:
+                continue
+            role_numeric = pd.to_numeric(chunk[column], errors="coerce")
+            for frame_value, role_value in zip(frame_numeric, role_numeric):
+                if pd.isna(frame_value) or pd.isna(role_value):
+                    continue
+                key = float(frame_value)
+                value = float(role_value)
+                previous_value = role_seen_values[role_name].get(key)
+                if previous_value is None:
+                    role_seen_values[role_name][key] = value
+                elif not math.isclose(previous_value, value, rel_tol=1e-12, abs_tol=1e-12):
+                    same_frame_conflicts[role_name] += 1
+
+        if chunk_index % 10 == 0:
+            print(f"[Validator] processed {total_rows:,} rows...", file=sys.stderr)
+
+    unique_frames = sorted(frame_counts)
+    frame_gaps = [
+        unique_frames[index] - unique_frames[index - 1]
+        for index in range(1, len(unique_frames))
+        if unique_frames[index] - unique_frames[index - 1] > 1
+    ]
+    duplicate_rows = sum(count for count in frame_counts.values() if count > 1)
+    duplicate_rate = duplicate_rows / max(1, sum(frame_counts.values()))
+    max_rows_per_frame = max(frame_counts.values(), default=0)
+
+    validity_candidates = [
+        str(column)
+        for column in columns
+        if any(
+            token in normalized(column)
+            for token in ["valid", "status", "tracking", "detected", "detection"]
+        )
+    ]
+    source_row_candidates = [
+        str(column) for column in columns if "sourcerow" in normalized(column)
+    ]
+
+    errors = []
+    warnings = []
+
+    if total_rows == 0:
+        errors.append("EMPTY_INPUT")
+    if frame_col not in columns:
+        errors.append("FRAMECOUNT_COLUMN_NOT_FOUND")
+    if frame_nonnumeric / max(1, total_rows) > 0.05:
+        errors.append("FRAMECOUNT_NONNUMERIC_RATE_GT_5_PERCENT")
+    if frame_missing / max(1, total_rows) > 0.05:
+        errors.append("FRAMECOUNT_MISSING_RATE_GT_5_PERCENT")
+    if frame_noninteger > 0:
+        errors.append("FRAMECOUNT_NOT_INTEGER_LIKE")
+
+    for role_name, column in [("REFERENCE", reference_col), ("TARGET", target_col)]:
+        if column:
+            item = stats[column]
+            nonmissing = item["rows"] - item["missing"]
+            numeric_rate = item["numeric"] / max(1, nonmissing)
+            if numeric_rate < 0.95:
+                errors.append(f"{role_name}_NUMERIC_RATE_LT_95_PERCENT")
+
+    if duplicate_rows > 0:
+        warnings.append("MULTIPLE_ROWS_PER_FRAMECOUNT")
+    if backward_transitions > 0:
+        warnings.append("FRAMECOUNT_BACKWARD_TRANSITIONS")
+    if frame_gaps:
+        warnings.append("FRAMECOUNT_GAPS")
+    if not source_row_candidates:
+        warnings.append("NO_SOURCE_ROW_ID_LEGACY_INPUT")
+    if frame_zero_count > 0:
+        warnings.append("FRAMECOUNT_ZERO_OBSERVED_VERIFY_MEANING")
+    if not validity_candidates:
+        warnings.append("NO_VALIDITY_STATUS_COLUMNS_DETECTED_BY_NAME")
+    if reference_col is None or target_col is None:
+        warnings.append("REFERENCE_TARGET_NOT_BOTH_SELECTED_STRUCTURE_ONLY_VALIDATION")
+    if same_frame_conflicts["reference"] > 0:
+        warnings.append("REFERENCE_CHANGES_WITHIN_SAME_FRAMECOUNT")
+    if same_frame_conflicts["target"] > 0:
+        warnings.append("TARGET_CHANGES_WITHIN_SAME_FRAMECOUNT")
+    warnings.append("LEGACY_SCHEMA_NO_UPDATE_AGE_PROVENANCE")
+
+    boundary_candidates = []
+    zero_columns = []
+    missing_columns = []
+    for column, item in stats.items():
+        numeric = item["numeric"]
+        min_rate = item["minimum_count"] / max(1, numeric)
+        max_rate = item["maximum_count"] / max(1, numeric)
+        if numeric >= 20 and (min_rate >= 0.01 or max_rate >= 0.01):
+            boundary_candidates.append(column)
+        if item["zero"] > 0:
+            zero_columns.append(column)
+        if item["missing"] > 0:
+            missing_columns.append(column)
+
+    if boundary_candidates:
+        warnings.append("REPEATED_BOUNDARY_VALUE_CANDIDATES_REQUIRE_SIGNAL_RULES")
+
+    status_text, status_code = classify_status(errors, warnings)
+
+    p004_risk = "HIGH" if backward_transitions > 0 or duplicate_rows > 0 else "MEDIUM"
+    if errors:
+        p004_risk = "BLOCKED"
+
+    after_stat = path.stat()
+    input_unchanged = (
+        before_stat.st_size == after_stat.st_size
+        and before_stat.st_mtime_ns == after_stat.st_mtime_ns
+    )
+
+    manifest = {
+        "schema_version": SCHEMA_VERSION,
+        "run_id": run_id,
+        "started_utc": started,
+        "completed_utc": datetime.now(timezone.utc).isoformat(),
+        "validator": {
+            "filename": Path(__file__).name,
+            "sha256": program_hash(),
+        },
+        "input": {
+            "basename": path.name,
+            "size_bytes": before_stat.st_size,
+            "fast_fingerprint_sha256": input_fingerprint,
+            "format": reader_info["kind"],
+            "input_unchanged": input_unchanged,
+        },
+        "roles": roles,
+        "result": {
+            "status": status_text,
+            "errors": errors,
+            "warnings": warnings,
+            "direct_p004_use_risk": p004_risk,
+        },
+        "framecount": {
+            "column": frame_col,
+            "total_rows": total_rows,
+            "numeric_missing": frame_missing + frame_nonnumeric,
+            "noninteger_count": frame_noninteger,
+            "zero_count": frame_zero_count,
+            "unique_count": len(frame_counts),
+            "duplicate_rows": duplicate_rows,
+            "duplicate_rate": duplicate_rate,
+            "max_rows_per_frame": max_rows_per_frame,
+            "backward_transition_count": backward_transitions,
+            "gap_count": len(frame_gaps),
+            "maximum_gap": max(frame_gaps) if frame_gaps else 0,
+        },
+        "same_frame_role_conflicts": same_frame_conflicts,
+        "columns": {
+            "count": len(columns),
+            "validity_status_candidates": validity_candidates,
+            "source_row_candidates": source_row_candidates,
+            "columns_with_missing": missing_columns,
+            "columns_with_zero": zero_columns,
+            "repeated_boundary_candidates": boundary_candidates,
+        },
+        "contract_limitations": [
+            "Legacy P002 output does not prove original update provenance.",
+            "Repeated zero/boundary values are candidates, not automatic invalid values.",
+            "Validator does not certify target association, ground truth, or root cause.",
+        ],
+    }
+
+    manifest_path = output_dir / "canonical_validation_manifest_v0_1.json"
+    summary_path = output_dir / "canonical_validation_summary_v0_1.csv"
+    log_path = output_dir / "canonical_validation_log_v0_1.txt"
+
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    write_summary_csv(summary_path, stats, set(validity_candidates))
+
+    log_lines = [
+        f"status={status_text}",
+        f"direct_p004_use_risk={p004_risk}",
+        f"input_basename={path.name}",
+        f"total_rows={total_rows}",
+        f"framecount_column={frame_col}",
+        f"unique_framecount={len(frame_counts)}",
+        f"duplicate_rows={duplicate_rows}",
+        f"duplicate_rate={duplicate_rate:.8f}",
+        f"max_rows_per_frame={max_rows_per_frame}",
+        f"backward_transitions={backward_transitions}",
+        f"gap_count={len(frame_gaps)}",
+        f"maximum_gap={max(frame_gaps) if frame_gaps else 0}",
+        f"same_frame_reference_conflicts={same_frame_conflicts['reference']}",
+        f"same_frame_target_conflicts={same_frame_conflicts['target']}",
+        f"errors={errors}",
+        f"warnings={warnings}",
+        f"validity_status_candidates={validity_candidates}",
+        f"input_unchanged={input_unchanged}",
+    ]
+    log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
+
+    frame_nonmissing_rate = 1 - ((frame_missing + frame_nonnumeric) / max(1, total_rows))
+    if frame_nonmissing_rate >= 0.999:
+        q5 = 1
+    elif frame_nonmissing_rate >= 0.95:
+        q5 = 2
+    else:
+        q5 = 3
+
+    q6 = 2 if frame_noninteger == 0 else 1
+    if duplicate_rows == 0:
+        q7 = 1
+    elif duplicate_rate < 0.05:
+        q7 = 2
+    else:
+        q7 = 3
+    if max_rows_per_frame <= 1:
+        q8 = 1
+    elif max_rows_per_frame <= 5:
+        q8 = 2
+    elif max_rows_per_frame <= 20:
+        q8 = 3
+    else:
+        q8 = 4
+
+    q9 = 1 if backward_transitions == 0 else 2
+    q10 = 1 if not frame_gaps else (2 if max(frame_gaps) <= 5 else 3)
+    q11 = 1 if backward_transitions == 0 else 2
+    q12 = 1 if frame_zero_count == 0 else 2
+
+    q13 = 2 if source_row_candidates else 1
+
+    def role_code(column):
+        if not column:
+            return 0
+        item = stats[column]
+        nonmissing = item["rows"] - item["missing"]
+        return 2 if item["numeric"] / max(1, nonmissing) >= 0.95 else 1
+
+    q14 = role_code(reference_col)
+    q15 = role_code(target_col)
+    total_conflicts = same_frame_conflicts["reference"] + same_frame_conflicts["target"]
+    q16 = 0 if reference_col is None and target_col is None else (1 if total_conflicts == 0 else 2)
+
+    q17 = 2 if missing_columns else 1
+    q18 = 1 if not zero_columns else (2 if len(zero_columns) < len(columns) / 3 else 3)
+    q19 = 1 if not boundary_candidates else (2 if len(boundary_candidates) < len(columns) / 3 else 3)
+    q20 = 2 if validity_candidates else 1
+
+    if total_rows < 100_000:
+        row_bucket = 1
+    elif total_rows < 500_000:
+        row_bucket = 2
+    else:
+        row_bucket = 3
+
+    codes = [
+        2,
+        2,
+        row_bucket,
+        status_code,
+        q5,
+        q6,
+        q7,
+        q8,
+        q9,
+        q10,
+        q11,
+        q12,
+        q13,
+        q14,
+        q15,
+        q16,
+        q17,
+        q18,
+        q19,
+        q20,
+        2,
+        2,
+        2,
+        2 if input_unchanged else 1,
+    ]
+    return codes, manifest
+
+
+def output_packet(codes):
+    print("CDV001B1-6")
+    for index in range(6):
+        block = codes[index * 4 : (index + 1) * 4]
+        print(f"A{index + 1}-" + "".join(str(value) for value in block))
+    print(f"C-{sum(codes) % 10}")
+
+
+def zero_packet():
+    output_packet([0] * 24)
+
+
+def main():
+    input_path = choose_input_file()
+    if input_path is None or not input_path.exists():
+        zero_packet()
+        return
+
+    columns, _ = read_header(input_path)
+    detected_frame = detect_framecount(columns)
+    roles = role_dialog(columns, detected_frame)
+    if not roles:
+        zero_packet()
+        return
+
+    output_dir = Path(__file__).resolve().parent / (
+        "canonical_validation_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    )
+    output_dir.mkdir(parents=True, exist_ok=False)
+
+    codes, _ = validate(input_path, roles, output_dir)
+    output_packet(codes)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        try:
+            emergency = Path(__file__).resolve().parent / "canonical_validator_FATAL.txt"
+            emergency.write_text(
+                f"{type(exc).__name__}: {exc}\n", encoding="utf-8"
+            )
+        except Exception:
+            pass
+        zero_packet()
