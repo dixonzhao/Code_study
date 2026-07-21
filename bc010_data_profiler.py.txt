@@ -1,0 +1,557 @@
+from __future__ import annotations
+
+import csv
+import math
+import re
+import sys
+from collections import Counter, defaultdict
+from pathlib import Path
+
+
+CHUNK_SIZE = 100_000
+MAX_SIGNAL_COLUMNS = 48
+
+
+def choose_file(title: str, patterns):
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        path = filedialog.askopenfilename(title=title, filetypes=patterns)
+        root.destroy()
+        return Path(path) if path else None
+    except Exception:
+        value = input(f"{title}\nPath (blank to cancel): ").strip()
+        return Path(value) if value else None
+
+
+def sniff_csv(path: Path):
+    raw = path.read_bytes()[:131072]
+    encodings = ["utf-8-sig", "cp932", "shift_jis", "utf-8", "latin1"]
+    decoded = None
+    selected_encoding = None
+    for encoding in encodings:
+        try:
+            decoded = raw.decode(encoding)
+            selected_encoding = encoding
+            break
+        except UnicodeDecodeError:
+            continue
+    if decoded is None:
+        decoded = raw.decode("latin1", errors="replace")
+        selected_encoding = "latin1"
+
+    try:
+        dialect = csv.Sniffer().sniff(decoded, delimiters=",;\t|")
+        separator = dialect.delimiter
+    except Exception:
+        counts = {d: decoded.count(d) for d in [",", ";", "\t", "|"]}
+        separator = max(counts, key=counts.get)
+    return selected_encoding, separator
+
+
+def read_header(path: Path):
+    import pandas as pd
+
+    suffix = path.suffix.lower()
+    if suffix in {".xlsx", ".xls", ".xlsm"}:
+        frame = pd.read_excel(path, nrows=0)
+        return list(frame.columns), {"kind": "excel"}
+
+    encoding, separator = sniff_csv(path)
+    frame = pd.read_csv(path, sep=separator, encoding=encoding, nrows=0)
+    return list(frame.columns), {
+        "kind": "csv",
+        "encoding": encoding,
+        "separator": separator,
+    }
+
+
+def iter_table(path: Path, info: dict, usecols=None):
+    import pandas as pd
+
+    if info["kind"] == "excel":
+        yield pd.read_excel(path, usecols=usecols)
+        return
+
+    yield from pd.read_csv(
+        path,
+        sep=info["separator"],
+        encoding=info["encoding"],
+        usecols=usecols,
+        chunksize=CHUNK_SIZE,
+        low_memory=False,
+    )
+
+
+def normalized(value) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value).lower())
+
+
+def find_framecount_column(columns):
+    exact = [c for c in columns if normalized(c) == "framecount"]
+    if len(exact) == 1:
+        return exact[0], 1
+
+    named = [c for c in columns if "framecount" in normalized(c)]
+    if len(named) == 1:
+        return named[0], 2
+
+    id620 = [
+        c
+        for c in columns
+        if "620" in normalized(c)
+        and ("frame" in normalized(c) or "count" in normalized(c))
+    ]
+    if len(id620) == 1:
+        return id620[0], 3
+
+    candidates = exact or named or id620
+    if candidates:
+        return candidates[0], 3
+    return None, 0
+
+
+def compact_name_list(items, limit=12):
+    items = [str(x) for x in items]
+    if len(items) <= limit:
+        return items
+    return items[:limit] + [f"...(+{len(items) - limit})"]
+
+
+def profile_raw(path: Path, log):
+    result = [0, 0, 0, 0]
+    try:
+        columns, info = read_header(path)
+        id620_columns = [
+            c
+            for c in columns
+            if re.search(r"(?i)(?:^|[^0-9a-f])ID0*620(?:_|[^0-9a-f])", str(c))
+            or normalized(c).startswith("id620")
+        ]
+        result[1] = 2 if id620_columns else 1
+        log.append(f"RAW columns={len(columns)}")
+        log.append(f"RAW ID620 columns={compact_name_list(id620_columns)}")
+
+        total_rows = 0
+        update_rows = 0
+        if id620_columns:
+            for chunk_index, chunk in enumerate(
+                iter_table(path, info, usecols=id620_columns), start=1
+            ):
+                total_rows += len(chunk)
+                text = chunk.astype("string")
+                present = chunk.notna() & text.apply(lambda s: s.str.strip().ne(""))
+                update_rows += int(present.any(axis=1).sum())
+                if chunk_index % 10 == 0:
+                    print(f"[RAW] profiled {total_rows:,} rows...", file=sys.stderr)
+            result[0] = 3
+        else:
+            first_column = [columns[0]] if columns else None
+            for chunk_index, chunk in enumerate(
+                iter_table(path, info, usecols=first_column), start=1
+            ):
+                total_rows += len(chunk)
+                if chunk_index % 10 == 0:
+                    print(f"[RAW] counted {total_rows:,} rows...", file=sys.stderr)
+            result[0] = 3
+
+        if total_rows < 100_000:
+            result[3] = 1
+        elif total_rows < 500_000:
+            result[3] = 2
+        else:
+            result[3] = 3
+
+        if id620_columns and total_rows:
+            rate = update_rows / total_rows
+            if rate >= 0.95:
+                result[2] = 1
+            elif rate >= 0.01:
+                result[2] = 2
+            else:
+                result[2] = 3
+            log.append(
+                f"RAW rows={total_rows} ID620_update_rows={update_rows} rate={rate:.8f}"
+            )
+        else:
+            log.append(f"RAW rows={total_rows} ID620 update density unavailable")
+    except Exception as exc:
+        log.append(f"RAW ERROR {type(exc).__name__}: {exc}")
+    return result
+
+
+def metadata_like(column) -> bool:
+    key = normalized(column)
+    tokens = [
+        "datetime",
+        "timeus",
+        "timestamp",
+        "framecount",
+        "sourcerow",
+        "index",
+        "channel",
+        "canid",
+        "message",
+    ]
+    return any(token in key for token in tokens)
+
+
+def profile_decoded(path: Path, log):
+    result = [0] * 20
+    try:
+        import pandas as pd
+
+        columns, info = read_header(path)
+        result[0] = 2
+        frame_col, frame_detection = find_framecount_column(columns)
+        result[1] = frame_detection
+        log.append(f"DECODED columns={len(columns)}")
+        log.append(f"DECODED Framecount column={frame_col!r} detection={frame_detection}")
+        if frame_col is None:
+            return result
+
+        signal_candidates = [c for c in columns if c != frame_col and not metadata_like(c)]
+        selected_signals = signal_candidates[:MAX_SIGNAL_COLUMNS]
+        selected_columns = [frame_col] + selected_signals
+        log.append(f"PROFILE signal columns={compact_name_list(selected_signals)}")
+
+        total_rows = 0
+        raw_missing = 0
+        numeric_missing = 0
+        non_numeric = 0
+        non_integer_numeric = 0
+        zero_frame_positions = []
+        frame_counts = Counter()
+        previous_frame = None
+        negative_steps = 0
+        nondecreasing_steps = 0
+        positive_steps = 0
+
+        zero_counts = Counter()
+        numeric_counts = Counter()
+        signal_min = {}
+        signal_max = {}
+        signal_min_count = Counter()
+        signal_max_count = Counter()
+        same_frame_change_columns = set()
+
+        for chunk_index, chunk in enumerate(
+            iter_table(path, info, usecols=selected_columns), start=1
+        ):
+            total_rows += len(chunk)
+            raw_series = chunk[frame_col]
+            raw_missing += int(raw_series.isna().sum())
+            numeric_frame = pd.to_numeric(raw_series, errors="coerce")
+            numeric_missing += int(numeric_frame.isna().sum())
+            non_numeric += int((raw_series.notna() & numeric_frame.isna()).sum())
+            finite = numeric_frame.dropna()
+            if not finite.empty:
+                non_integer_numeric += int(((finite - finite.round()).abs() > 1e-9).sum())
+
+            values = finite.tolist()
+            for value in values:
+                value = float(value)
+                frame_counts[value] += 1
+                if value == 0:
+                    zero_frame_positions.append(total_rows)
+                if previous_frame is not None:
+                    delta = value - previous_frame
+                    if delta < 0:
+                        negative_steps += 1
+                    else:
+                        nondecreasing_steps += 1
+                        if delta > 0:
+                            positive_steps += 1
+                previous_frame = value
+
+            numeric_chunk = {}
+            for column in selected_signals:
+                series = pd.to_numeric(chunk[column], errors="coerce")
+                numeric_chunk[column] = series
+                valid = series.dropna()
+                if valid.empty:
+                    continue
+                numeric_counts[column] += int(valid.size)
+                zero_counts[column] += int((valid == 0).sum())
+
+                local_min = float(valid.min())
+                local_max = float(valid.max())
+                local_min_count = int((valid == local_min).sum())
+                local_max_count = int((valid == local_max).sum())
+
+                if column not in signal_min or local_min < signal_min[column]:
+                    signal_min[column] = local_min
+                    signal_min_count[column] = local_min_count
+                elif local_min == signal_min[column]:
+                    signal_min_count[column] += local_min_count
+
+                if column not in signal_max or local_max > signal_max[column]:
+                    signal_max[column] = local_max
+                    signal_max_count[column] = local_max_count
+                elif local_max == signal_max[column]:
+                    signal_max_count[column] += local_max_count
+
+            if selected_signals:
+                working = pd.DataFrame({frame_col: numeric_frame})
+                for column, series in numeric_chunk.items():
+                    working[column] = series
+                working = working.dropna(subset=[frame_col])
+                duplicated = working[frame_col].duplicated(keep=False)
+                if duplicated.any():
+                    grouped = working.loc[duplicated].groupby(frame_col, sort=False)
+                    for column in selected_signals:
+                        try:
+                            if (grouped[column].nunique(dropna=True) > 1).any():
+                                same_frame_change_columns.add(column)
+                        except Exception:
+                            pass
+            if chunk_index % 10 == 0:
+                print(f"[P002] profiled {total_rows:,} rows...", file=sys.stderr)
+
+        if total_rows:
+            nonmissing_rate = 1.0 - (numeric_missing / total_rows)
+            if nonmissing_rate >= 0.999:
+                result[2] = 1
+            elif nonmissing_rate >= 0.95:
+                result[2] = 2
+            else:
+                result[2] = 3
+
+        if non_numeric > 0:
+            result[3] = 3
+        elif non_integer_numeric > 0:
+            result[3] = 2
+        elif frame_counts:
+            result[3] = 1
+
+        duplicate_rows = sum(count for count in frame_counts.values() if count > 1)
+        duplicate_rate = duplicate_rows / max(1, sum(frame_counts.values()))
+        if duplicate_rows == 0:
+            result[4] = 1
+        elif duplicate_rate < 0.05:
+            result[4] = 2
+        else:
+            result[4] = 3
+
+        max_rows_per_frame = max(frame_counts.values(), default=0)
+        if max_rows_per_frame <= 1:
+            result[5] = 1
+        elif max_rows_per_frame <= 5:
+            result[5] = 2
+        elif max_rows_per_frame <= 20:
+            result[5] = 3
+        else:
+            result[5] = 4
+
+        if negative_steps == 0 and frame_counts:
+            result[6] = 1
+        elif negative_steps > 0:
+            result[6] = 2
+
+        unique_frames = sorted(frame_counts)
+        unique_diffs = [
+            unique_frames[i] - unique_frames[i - 1]
+            for i in range(1, len(unique_frames))
+        ]
+        gap_diffs = [d for d in unique_diffs if d > 1]
+        has_gap = bool(gap_diffs)
+        has_reset = negative_steps > 0
+        if not has_gap and not has_reset and unique_frames:
+            result[7] = 1
+        elif has_gap and not has_reset:
+            result[7] = 2
+        elif has_reset and not has_gap:
+            result[7] = 3
+        elif has_gap and has_reset:
+            result[7] = 4
+
+        if not gap_diffs:
+            result[8] = 1
+        elif max(gap_diffs) <= 5:
+            result[8] = 2
+        else:
+            result[8] = 3
+
+        result[9] = 2 if has_reset else 1
+
+        if not same_frame_change_columns:
+            result[10] = 1
+        elif len(same_frame_change_columns) <= max(1, len(selected_signals) // 5):
+            result[10] = 2
+        else:
+            result[10] = 3
+
+        zero_frame_count = frame_counts.get(0.0, 0)
+        if zero_frame_count == 0:
+            result[11] = 1
+        elif unique_frames and unique_frames[0] == 0 and negative_steps == 0:
+            result[11] = 2
+        else:
+            result[11] = 3
+
+        columns_with_zeros = [c for c in selected_signals if zero_counts[c] > 0]
+        if not columns_with_zeros:
+            result[12] = 1
+        elif len(columns_with_zeros) <= max(1, len(selected_signals) // 3):
+            result[12] = 2
+        else:
+            result[12] = 3
+
+        boundary_candidates = []
+        for column in selected_signals:
+            count = numeric_counts[column]
+            if count < 20:
+                continue
+            min_rate = signal_min_count[column] / count
+            max_rate = signal_max_count[column] / count
+            if min_rate >= 0.01 or max_rate >= 0.01:
+                boundary_candidates.append(
+                    (
+                        column,
+                        signal_min.get(column),
+                        min_rate,
+                        signal_max.get(column),
+                        max_rate,
+                    )
+                )
+        if not boundary_candidates:
+            result[13] = 1
+        elif len(boundary_candidates) <= max(1, len(selected_signals) // 4):
+            result[13] = 2
+        else:
+            result[13] = 3
+
+        validity_columns = [
+            c
+            for c in columns
+            if any(
+                token in normalized(c)
+                for token in ["valid", "status", "tracking", "detected", "detection"]
+            )
+        ]
+        result[14] = 2 if validity_columns else 1
+
+        camera_validity = [
+            c
+            for c in validity_columns
+            if any(token in normalized(c) for token in ["cam", "camera", "stereo"])
+        ]
+        radar_validity = [
+            c for c in validity_columns if "radar" in normalized(c)
+        ]
+        if camera_validity and radar_validity:
+            result[15] = 4
+        elif camera_validity:
+            result[15] = 2
+        elif radar_validity:
+            result[15] = 3
+        elif validity_columns:
+            result[15] = 1
+
+        result[16] = 2 if any("datetime" in normalized(c) for c in columns) else 1
+        result[17] = 2 if any("timeus" in normalized(c) for c in columns) else 1
+        result[18] = 2 if any("sourcerow" in normalized(c) for c in columns) else 1
+        result[19] = 2
+
+        log.extend(
+            [
+                f"DECODED rows={total_rows}",
+                f"Frame missing raw={raw_missing} numeric_missing={numeric_missing} non_numeric={non_numeric}",
+                f"Frame unique={len(frame_counts)} duplicate_rows={duplicate_rows} duplicate_rate={duplicate_rate:.8f}",
+                f"Frame max_rows_per_frame={max_rows_per_frame} negative_steps={negative_steps}",
+                f"Frame gap_count={len(gap_diffs)} max_gap={max(gap_diffs) if gap_diffs else 0}",
+                f"Same-frame changing signal columns={compact_name_list(sorted(same_frame_change_columns))}",
+                f"Columns with numeric zero={compact_name_list(columns_with_zeros)}",
+                f"Repeated boundary candidates={compact_name_list(boundary_candidates, limit=10)}",
+                f"Validity/status columns={compact_name_list(validity_columns)}",
+            ]
+        )
+    except Exception as exc:
+        log.append(f"DECODED ERROR {type(exc).__name__}: {exc}")
+    return result
+
+
+def write_log(path: Path, raw_codes, decoded_codes, log):
+    legend = [
+        "BC010P observable profiler",
+        "A1 Q1 raw read:0 fail,1 header,2 sampled,3 full-stream; Q2 ID620:1 no,2 yes; Q3 update density:1 >=95%,2 1-95%,3 <1%; Q4 rows:1 <100k,2 <500k,3 >=500k",
+        "A2 Q5 decoded read:2 success; Q6 Frame col:1 exact,2 named fuzzy,3 ID620 fuzzy; Q7 nonmissing:1 >=99.9%,2 >=95%,3 lower; Q8 dtype:1 integer-like,2 noninteger numeric,3 mixed",
+        "A3 Q9 duplicate rate:1 none,2 low,3 high; Q10 max rows/frame:1 one,2 <=5,3 <=20,4 >20; Q11 file-order monotonic:1 yes,2 no; Q12 structure:1 continuous,2 gap,3 reset,4 both",
+        "A4 Q13 gap:1 none,2 max<=5,3 max>5; Q14 reset:1 no,2 yes; Q15 same-frame signal changes:1 none,2 some,3 many; Q16 Framecount zero:1 none,2 valid-looking start,3 interior/suspicious",
+        "A5 Q17 non-frame zero columns:1 none,2 some,3 many; Q18 repeated boundary candidates:1 none,2 some,3 many; Q19 validity/status columns:1 none,2 present; Q20 sensor coverage:1 ambiguous,2 camera,3 radar,4 both",
+        "A6 Q21 DateTime:1 absent,2 present; Q22 Time[us]:1 absent,2 present; Q23 source_row_id:1 absent,2 present; Q24 completion:2 complete",
+        "",
+    ]
+    path.write_text("\n".join(legend + log), encoding="utf-8")
+
+
+def main():
+    script_dir = Path(__file__).resolve().parent
+    log = []
+
+    raw_path = choose_file(
+        "Select RAW MATLAB CAN CSV",
+        [("CSV", "*.csv"), ("All files", "*.*")],
+    )
+    decoded_path = choose_file(
+        "Select P002 decoded time-order CSV (CSV preferred)",
+        [
+            ("CSV", "*.csv"),
+            ("Excel", "*.xlsx *.xls *.xlsm"),
+            ("All files", "*.*"),
+        ],
+    )
+
+    raw_codes = [0, 0, 0, 0]
+    decoded_codes = [0] * 20
+
+    if raw_path and raw_path.exists():
+        log.append(f"RAW file={raw_path.name} size_bytes={raw_path.stat().st_size}")
+        raw_codes = profile_raw(raw_path, log)
+    else:
+        log.append("RAW file not selected or not found")
+
+    if decoded_path and decoded_path.exists():
+        log.append(
+            f"DECODED file={decoded_path.name} size_bytes={decoded_path.stat().st_size}"
+        )
+        decoded_codes = profile_decoded(decoded_path, log)
+    else:
+        log.append("DECODED file not selected or not found")
+
+    all_codes = raw_codes + decoded_codes
+    blocks = [all_codes[i : i + 4] for i in range(0, 24, 4)]
+    checksum = sum(all_codes) % 10
+
+    write_log(
+        script_dir / "BC010_PROFILE_LOG.txt",
+        raw_codes,
+        decoded_codes,
+        log,
+    )
+
+    print("BC010P1-6")
+    for index, block in enumerate(blocks, start=1):
+        print(f"A{index}-" + "".join(str(value) for value in block))
+    print(f"C-{checksum}")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        try:
+            Path(__file__).resolve().with_name("BC010_PROFILE_LOG.txt").write_text(
+                f"FATAL {type(exc).__name__}: {exc}\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+        print("BC010P1-6")
+        for index in range(1, 7):
+            print(f"A{index}-0000")
+        print("C-0")
