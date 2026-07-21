@@ -1,0 +1,382 @@
+T004D - P004 CHARACTERIZATION TEST PROGRAM DESIGN
+
+本文件是程序设计书，不是执行结果。
+
+
+零、P004先验知识（Copilot必须先理解）
+
+P004是当前项目中的Stage Residual/Error Analyzer GUI。
+
+精确源文件名：
+
+sre_cam_stage_residual_error_analyzer_v4_5_3_jp_compact_excel_notes.py
+
+P004不是CAN Decoder，也不是Cleaner。它的当前职责是：
+
+1. 读取P002或P003输出的CSV/Excel；
+2. 让用户选择Time/Frame、Reference、Target和Stage Axis列；
+3. 根据用户方向计算Reference-Target或Target-Reference Discrepancy；
+4. 使用Conditional Median执行Stage 1 Baseline Correction；
+5. 可选执行Stage 2 Conditional Baseline Correction；
+6. 生成FinalResidual和Stage Effect Metrics；
+7. 计算Pearson、Spearman、NMI和Row-based Lag Scan；
+8. 生成1D/2D High-Risk条件；
+9. 根据连续Candidate Rows生成Event Hint；
+10. 输出Excel分析报告和Residualized Source。
+
+业务术语约束：
+
+- Radar只是暂定Engineering Reference，不是Ground Truth；
+- Reference-Target只能称为Discrepancy，不能自动称为Camera真实Error；
+- Event Hint只是视频复核候选窗口，不是自动Event识别或Root Cause；
+- 当前第一目标是压缩调查范围，不是自动判断谁错。
+
+已知静态与T003审查结果：
+
+- P004核心分析函数大部分可用Synthetic DataFrame直接测试；
+- Lag主要基于DataFrame Row Lag，不是实际Framecount Difference；
+- Event核心基于Candidate Row连续性，Gap参数单位也与Rows相关；
+- Stage Bin缺少正式Minimum Sample Count；
+- Sparse Bin没有稳定Fallback；
+- Baseline拟合和Stage效果评价使用同一批数据；
+- Invalid Value主要使用Global Sentinel规则；
+- P004会记录大量运行参数，但不完整记录程序版本。
+
+本任务提供的P004源文件是System Under Test，必须只读。
+
+需要生成：
+
+t004d_p004_characterization_test.py
+
+
+一、Copilot Web Chat输入
+
+在新Copilot Web Chat中同时提供：
+
+- P004源文件；
+- 本设计书。
+
+给Copilot：
+
+把P004源文件作为只读System Under Test。
+先理解“P004先验知识”，再严格按照T004D设计书生成完整测试程序。
+必须调用真实P004实现，不得复制或重新实现Baseline、Residual、Lag、Risk或Event算法。
+不要运行程序，不要预测结果，不要直接回答Packet。
+直接在Chat中输出t004d_p004_characterization_test.py的完整Python源码。
+只输出一个完整Python代码块，不要输出CODE_WRITTEN、解释、摘要或省略号。
+
+
+二、Copilot唯一交付物
+
+完整Python源码：
+
+t004d_p004_characterization_test.py
+
+禁止：
+
+- 修改或返回修改后的P004；
+- 重新实现P004算法并测试复制品；
+- 使用公司真实数据或Signal名称；
+- 声称已经运行；
+- 直接回答Packet；
+- 省略Import、Helper、main或Packet逻辑；
+- 自动给出Root Cause结论。
+
+
+三、测试程序目标
+
+用户保存Python代码并放入P004目录后运行：
+
+python t004d_p004_characterization_test.py
+
+测试程序必须：
+
+1. 找到P004并计算运行前SHA-256；
+2. 创建完全Synthetic DataFrame；
+3. 调用真实P004 Core；
+4. 覆盖Raw Discrepancy、Stage1、Stage2、Existing Error、Association、Lag、High-Risk和Event Hint；
+5. 检查实际DataFrame/Result Object/临时输出；
+6. 计算Q1-Q24；
+7. 再次检查P004 SHA-256；
+8. Terminal只输出Machine Packet；
+9. Debug只写入本地T004D_TEST_LOG.txt。
+
+
+四、实现边界
+
+允许：
+
+- importlib载入P004；
+- 调用P004已有纯函数、类、分析Core或GUI callback背后的Core；
+- 创建最小参数Wrapper；
+- 用tempfile保存Synthetic CSV/Excel（仅当Core要求文件输入）；
+- 使用pandas/numpy检查P004真实输出。
+
+禁止：
+
+- 在测试脚本中重新计算Baseline、Residual、Correlation、NMI、Lag、High-Risk或Event；
+- 用测试脚本自身算法的输出冒充P004结果；
+- 为了测试而修改P004；
+- 没有调用真实Core却把Q4填为成功。
+
+如果某个P004模块无法独立调用，该项填0，不得猜测。
+
+
+五、Synthetic DataFrame
+
+使用通用列名：
+
+- Framecount；
+- reference_distance；
+- target_distance；
+- stage1_axis；
+- stage2_axis；
+- feature_linear；
+- feature_monotonic；
+- lag_feature；
+- existing_discrepancy；
+- invalid_test_signal。
+
+至少创建16行。
+
+Framecount必须包含：
+
+100, 101, 102, 103,
+200, 201, 202, 203,
+300, 301, 302, 303,
+400, 401, 402, 403
+
+这样DataFrame Rows连续，但每4行之间存在很大的Framecount Gap。
+
+构造要求：
+
+1. reference_distance和target_distance产生已知Reference-Target Discrepancy；
+2. stage1_axis至少形成两个主要Bin，每Bin有多个样本；
+3. 另形成一个只有1个样本的Sparse Bin；
+4. stage2_axis在Stage1 Bin内形成可验证的第二层Conditional Structure；
+5. existing_discrepancy与Reference-Target计算结果一致；
+6. feature_linear与FinalResidual具有明显线性关系；
+7. feature_monotonic用于Spearman；
+8. lag_feature与Residual具有已知1 Row Lag，但Framecount Difference不固定；
+9. invalid_test_signal包含用户可配置的Synthetic Global Sentinel，例如9999；
+10. Candidate Rows跨越Framecount 103到200，用于检查Event是否仍按相邻Row合并；
+11. 设计明显Peak Row，用于检查start/end/peak。
+
+测试脚本可以根据P004实际API调整Synthetic数值，但不得改变以上逻辑关系。
+
+
+六、必须执行的Case
+
+CASE A - RAW DISCREPANCY
+
+- Direction=Reference-Target；
+- 验证Raw Discrepancy列与Synthetic定义一致。
+
+CASE B - STAGE 1
+
+- 启用Stage1；
+- 验证Conditional Median Baseline与Residual；
+- 观察单样本Sparse Bin行为。
+
+CASE C - STAGE 2
+
+- 启用Stage2；
+- 验证Stage2基于Stage1 Residual继续补正。
+
+CASE D - EXISTING ERROR/DISCREPANCY COLUMN
+
+- 使用existing_discrepancy；
+- 验证与Case A方向一致。
+
+CASE E - ASSOCIATION AND LAG
+
+- 运行Pearson、Spearman、NMI和Lag；
+- 确认Lag使用Row还是Framecount Difference。
+
+CASE F - HIGH RISK AND EVENT
+
+- 使用Synthetic Threshold；
+- 生成Candidate、High-Risk和Event Hint；
+- 检查跨Framecount Gap的相邻Rows是否被合并；
+- 检查start/end/peak。
+
+
+七、Machine Code
+
+Q1 P004_FILE_FOUND
+0 ERROR
+1 NO
+2 YES
+
+Q2 SYNTHETIC_DATAFRAME_CREATED
+0 ERROR_OR_NOT_RUN
+1 NO
+2 YES
+
+Q3 P004_IMPORTED_OR_LOADED
+0 NOT_RUN
+1 FAILED
+2 SUCCESS
+
+Q4 REAL_P004_CORE_EXECUTED
+0 NOT_RUN
+1 NOT_CALLABLE_WITHOUT_REFACTOR
+2 SUCCESS
+3 PARTIAL_OR_ERROR
+
+
+Q5 REFERENCE_MINUS_TARGET_DIRECTION
+0 NOT_TESTED
+1 INCORRECT
+2 CORRECT
+
+Q6 EXISTING_DISCREPANCY_MODE
+0 NOT_TESTED
+1 INCORRECT_OR_INCONSISTENT
+2 CONSISTENT_WITH_CASE_A
+
+Q7 STAGE1_CONDITIONAL_MEDIAN
+0 NOT_TESTED
+1 INCORRECT
+2 CORRECT
+3 PARTIAL
+
+Q8 STAGE1_RESIDUAL
+0 NOT_TESTED
+1 INCORRECT
+2 CORRECT
+3 PARTIAL
+
+
+Q9 STAGE2_CONDITIONAL_BASELINE
+0 NOT_TESTED
+1 INCORRECT
+2 CORRECT
+3 PARTIAL
+
+Q10 FINAL_RESIDUAL_STAGE2
+0 NOT_TESTED
+1 INCORRECT
+2 CORRECT
+3 PARTIAL
+
+Q11 SINGLE_SAMPLE_SPARSE_BIN
+0 NOT_TESTED
+1 MEDIAN_BASELINE_COMPUTED
+2 REJECTED_OR_INVALIDATED
+3 FALLBACK_USED
+4 OTHER
+
+Q12 BASELINE_EVALUATION_RELATION
+0 NOT_TESTED
+1 SAME_ROWS_USED_FOR_FIT_AND_METRICS
+2 SEPARATE_ROWS
+3 OPTIONAL_OR_MIXED
+
+
+Q13 GLOBAL_INVALID_SENTINEL
+0 NOT_TESTED
+1 NOT_FILTERED
+2 FILTERED
+3 PARTIAL
+
+Q14 PEARSON_RESULT
+0 NOT_TESTED
+1 MISSING_OR_INCORRECT
+2 PRESENT_AND_DIRECTIONALLY_CORRECT
+
+Q15 SPEARMAN_RESULT
+0 NOT_TESTED
+1 MISSING_OR_INCORRECT
+2 PRESENT_AND_DIRECTIONALLY_CORRECT
+
+Q16 NMI_RESULT
+0 NOT_TESTED
+1 MISSING_OR_INVALID
+2 PRESENT_AND_VALID_RANGE
+
+
+Q17 LAG_BASIS
+0 NOT_TESTED
+1 DATAFRAME_ROW_LAG
+2 FRAMECOUNT_DIFFERENCE
+3 OTHER_OR_MIXED
+
+Q18 THRESHOLD_AND_CANDIDATE
+0 NOT_TESTED
+1 INCORRECT_OR_MISSING
+2 EXPECTED_CANDIDATES_CREATED
+3 PARTIAL
+
+Q19 HIGH_RISK_COUNT_GATE
+0 NOT_TESTED
+1 NOT_APPLIED_OR_INCORRECT
+2 APPLIED
+3 PARTIAL
+
+Q20 EVENT_ACROSS_LARGE_FRAME_GAP
+0 NOT_TESTED
+1 MERGED_BY_ROW_CONTINUITY
+2 SPLIT_BY_FRAMECOUNT_GAP
+3 CONFIG_DEPENDENT_OR_OTHER
+
+
+Q21 EVENT_START_END_PEAK
+0 NOT_TESTED
+1 MISSING_OR_INCORRECT
+2 PRESENT_AND_CORRECT
+3 PARTIAL
+
+Q22 REPORT_OR_RESIDUALIZED_OUTPUT
+0 NOT_TESTED
+1 NOT_CREATED_OR_INVALID
+2 CREATED
+3 PARTIAL
+
+Q23 TEST_COMPLETION
+0 NOT_RUN
+1 FAILED_OR_NOT_TESTABLE
+2 ALL_REQUIRED_CASES_COMPLETED
+3 PARTIAL
+
+Q24 P004_HASH_UNCHANGED
+0 UNKNOWN
+1 NO
+2 YES
+
+
+八、Terminal Packet
+
+T004D1-6
+A1-Q1Q2Q3Q4
+A2-Q5Q6Q7Q8
+A3-Q9Q10Q11Q12
+A4-Q13Q14Q15Q16
+A5-Q17Q18Q19Q20
+A6-Q21Q22Q23Q24
+C-x
+
+规则：
+
+- 使用连字符；
+- 每个A Block恰好4个单字符Code；
+- x为Q1-Q24总和modulo 10；
+- Terminal不输出公司路径、Hash、源码或Synthetic数据；
+- 即使部分Case失败，也尽量输出Packet；
+- 无法确认填0，不得猜测。
+
+
+九、用户运行步骤
+
+1. 保存Copilot返回的完整代码为：
+
+t004d_p004_characterization_test.py
+
+2. 放入P004所在目录；
+3. 确认P004原文件未被替换；
+4. 运行：
+
+python t004d_p004_characterization_test.py
+
+5. 只回传T004D1-6 Packet；
+6. 若无Packet，只回传Error Type和Traceback末尾一行。
