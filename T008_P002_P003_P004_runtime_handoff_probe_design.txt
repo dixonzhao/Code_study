@@ -1,0 +1,288 @@
+T008 - P002/P003/P004 RUNTIME HANDOFF PROBE DESIGN
+
+本文件要求Copilot生成Synthetic Runtime测试程序。不得修改或重新实现三个真实程序。
+
+
+0. System Under Test
+
+P002：matlab_can_time_order_decoder_gui.py
+
+P003：can_analysis_csv_cleaner_gui.py
+
+P004：sre_cam_stage_residual_error_analyzer_v4_5_3_jp_compact_excel_notes.py
+
+目的：比较两条真实路径。
+
+Path A：P002 Output -> P004
+
+Path B：P002 Output -> P003 -> P004
+
+本任务不是评价算法优劣，只确认两个Handoff是否实际可运行，以及P003对Row、Framecount、Missing Value和P004结果造成什么变化。
+
+
+1. Copilot Web Chat输入与唯一交付物
+
+新开Copilot Web Chat，同时提供P002、P003、P004和本T008设计书。
+
+给Copilot：
+
+把三个源文件作为只读System Under Test。根据真实API生成完整Synthetic Runtime测试程序。不要运行、不要修改源文件、不要在Chat中预测Packet。
+
+直接输出完整Python源码：
+
+t008_runtime_handoff_probe.py
+
+只输出一个完整Python代码块，不输出解释、摘要、CODE_WRITTEN或文件链接。
+
+
+2. 测试程序通用要求
+
+程序放入三个源文件同一目录后运行：
+
+python t008_runtime_handoff_probe.py
+
+必须：
+
+1. 找到三个精确源文件名；
+2. 分别计算运行前SHA-256；
+3. 使用tempfile创建全部Synthetic输入和输出；
+4. 调用真实P002 Decode逻辑，不得在测试程序中复制DBC Decode；
+5. 调用真实P003 Cleaner逻辑，不得自行模拟fillna/sort；
+6. 调用真实P004 Discrepancy/Stage Core，不得自行重写分析算法；
+7. 允许创建最小Analyzer/GUI对象、Tk变量替身并Monkeypatch文件对话框、messagebox和输出目录；
+8. 禁止启动GUI mainloop；
+9. 即使P003无法调用，也必须继续测试Path A；
+10. 固定期望值只能使用直接给定的Synthetic常量断言；
+11. Debug和证据只写本地T008_TEST_LOG.txt；
+12. Terminal只输出Machine Packet；
+13. 最后再次计算三个Hash；
+14. Checksum自动计算。
+
+
+3. Synthetic P002输入
+
+根据P002真实Header与DBC API创建最小MATLAB-format CAN CSV和CH1/CH2 DBC。
+
+至少包含：
+
+- 一个Framecount Message/Signal；
+- 一个Reference Distance Signal；
+- 一个Target Distance Signal；
+- 至少8个Framecount；
+- Reference与Target更新频率不同，用于触发P002现有Forward Fill；
+- Framecount输入顺序故意打乱，用于观察P002/P003排序；
+- Reference-Target产生简单、已知且非零的Discrepancy。
+
+必须通过真实P002生成Wide Decoded Output。
+
+如果P002真实输出未自然包含Blank，测试程序可以在P002输出副本中额外添加以下Probe列，然后交给P003：
+
+- probe_numeric_missing：明确包含NaN；
+- probe_text_missing：包含普通文本和Blank；
+- probe_source_row_id：唯一递增整数。
+
+这些Probe列只测试P003 Handoff，不参与P004数学分析。
+
+
+4. Path A - P002直接进入P004
+
+使用P002真实输出：
+
+- 通过P004真实文件读取或Core接受DataFrame；
+- 手动映射Framecount、Reference和Target列；
+- 执行Reference-Target Discrepancy；
+- 若最小Stage配置可运行，则执行Stage1；
+- 检查P004是否接受P002输出而不要求P003文件名或Schema。
+
+
+5. Path B - P002经过P003进入P004
+
+将带Probe列的P002输出交给真实P003：
+
+- 使用最小GUI对象/Callback Wrapper运行真实Cleaner；
+- 配置保留Framecount、Reference、Target和三个Probe列；
+- 配置现有默认Missing Value行为；
+- 配置Framecount作为Sort基准；
+- 检查Row Count、Row Order、Framecount、Probe NaN/Text和Source Row ID；
+- 再把P003真实输出交给P004；
+- 执行与Path A相同的Discrepancy/Stage配置；
+- 比较Frame定位与Final Residual。
+
+如果P003仍无法无mainloop调用，Q7填1，并继续完成Path A与Hash检查。
+
+
+6. Machine Code Q1-Q24
+
+Q1 ALL_THREE_FILES_FOUND
+0 ERROR_OR_UNKNOWN
+1 PARTIAL
+2 ALL
+
+Q2 SYNTHETIC_RAW_CAN_AND_DBC_CREATED
+0 NOT_RUN_OR_FAILED
+1 PARTIAL
+2 SUCCESS
+
+Q3 REAL_P002_EXECUTED
+0 NOT_RUN
+1 FAILED
+2 SUCCESS
+3 PARTIAL
+
+Q4 P002_WIDE_OUTPUT_CREATED
+0 NOT_RUN_OR_FAILED
+1 INVALID
+2 VALID
+
+
+Q5 P002_FRAMECOUNT_DECODED_AS_EXPECTED
+0 NOT_TESTED
+1 INCORRECT
+2 CORRECT
+3 PARTIAL
+
+Q6 P002_REFERENCE_TARGET_SIGNALS_DECODED
+0 NOT_TESTED
+1 INCORRECT
+2 CORRECT
+3 PARTIAL
+
+Q7 REAL_P003_EXECUTION
+0 NOT_RUN
+1 NOT_CALLABLE_WITHOUT_REFACTOR
+2 SUCCESS
+3 PARTIAL_OR_ERROR
+
+Q8 P003_OUTPUT_CREATED
+0 NOT_RUN_OR_NONE
+1 INVALID
+2 VALID
+3 PARTIAL
+
+
+Q9 P003_ROW_COUNT
+0 NOT_TESTED
+1 CHANGED
+2 PRESERVED
+
+Q10 P003_FRAMECOUNT_ORDER
+0 NOT_TESTED
+1 NOT_MONOTONIC_OR_WRONG
+2 MONOTONIC_AS_CONFIGURED
+3 PARTIAL
+
+Q11 P003_NUMERIC_NAN_BEHAVIOR
+0 NOT_TESTED
+1 PRESERVED_AS_NAN
+2 FILLED_ZERO
+3 DROPPED_OR_OTHER
+
+Q12 P003_TEXT_BLANK_BEHAVIOR
+0 NOT_TESTED
+1 PRESERVED_AS_BLANK_OR_NAN
+2 FILLED_ZERO_OR_STRING_ZERO
+3 COLUMN_DROPPED
+4 OTHER
+
+
+Q13 P003_FRAMECOUNT_VALUES_CHANGED
+0 NOT_TESTED
+1 NO
+2 YES
+3 PARTIAL
+
+Q14 P003_SOURCE_ROW_ID_PRESERVED
+0 NOT_TESTED
+1 NO
+2 YES
+3 PARTIAL
+
+Q15 P004_ACCEPTS_DIRECT_P002_OUTPUT
+0 NOT_TESTED
+1 NO
+2 YES
+3 PARTIAL
+
+Q16 PATH_A_P004_ANALYSIS_EXECUTED
+0 NOT_RUN
+1 FAILED
+2 SUCCESS
+3 PARTIAL
+
+
+Q17 P004_ACCEPTS_P003_OUTPUT
+0 NOT_TESTED
+1 NO
+2 YES
+3 PARTIAL
+
+Q18 PATH_B_P004_ANALYSIS_EXECUTED
+0 NOT_RUN
+1 FAILED
+2 SUCCESS
+3 PARTIAL
+
+Q19 PATH_A_AND_B_FRAME_MAPPING
+0 NOT_COMPARABLE
+1 DIFFERENT
+2 SAME
+3 PARTIAL
+
+Q20 PATH_A_AND_B_DISCREPANCY_OR_RESIDUAL
+0 NOT_COMPARABLE
+1 DIFFERENT
+2 SAME
+3 PARTIAL
+
+
+Q21 MISSINGNESS_SEMANTICS_DIFFER_BETWEEN_PATHS
+0 NOT_COMPARABLE_OR_UNKNOWN
+1 NO
+2 YES
+3 PARTIAL
+
+Q22 TEST_COMPLETION
+0 NOT_RUN
+1 FAILED
+2 ALL_CASES_COMPLETE
+3 PARTIAL
+
+Q23 ALL_SOURCE_HASHES_UNCHANGED
+0 UNKNOWN
+1 NO
+2 YES
+
+Q24 TEST_DID_NOT_COPY_PROGRAM_ALGORITHMS
+0 UNKNOWN
+1 NO
+2 YES
+
+
+7. Terminal Packet
+
+T008B1-6
+A1-Q1Q2Q3Q4
+A2-Q5Q6Q7Q8
+A3-Q9Q10Q11Q12
+A4-Q13Q14Q15Q16
+A5-Q17Q18Q19Q20
+A6-Q21Q22Q23Q24
+C-x
+
+规则：
+
+- 每个A Block恰好四个单字符Code；
+- 使用连字符；
+- x为Q1-Q24数值总和modulo 10；
+- 无法确认填0；
+- Terminal不得输出路径、Hash、源码、Synthetic数据或Evidence；
+- Evidence只保存在公司电脑本地T008_TEST_LOG.txt。
+
+
+8. 用户运行步骤
+
+1. 保存Copilot返回代码为t008_runtime_handoff_probe.py；
+2. 放入P002/P003/P004同一目录；
+3. 运行：python t008_runtime_handoff_probe.py；
+4. 回传T008B1-6 Packet；
+5. 若无Packet，只回传Exception类型与Traceback最后一行。
