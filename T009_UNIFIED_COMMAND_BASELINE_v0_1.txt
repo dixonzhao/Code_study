@@ -1,0 +1,580 @@
+T009 - UNIFIED COMMAND BASELINE v0.1
+
+Status: FORMAL WORKING BASELINE
+Date: 2026-07-21
+Scope: P001-P004 current system, confirmed behavior, governance, and refactor order
+
+This document is the single working baseline after T001-T008 characterization.
+It does not authorize new algorithms. It does not claim root cause.
+
+
+1. MISSION
+
+The first engineering objective is:
+
+Convert a large camera/radar/CAN/video dataset into a small, reviewable list of high-priority discrepancy candidate windows linked to Framecount/video position.
+
+The current objective is NOT:
+
+- automatic root-cause judgment;
+- automatic camera fault judgment;
+- automatic radar fault judgment;
+- adding every possible statistical or SysID method;
+- building new Analyzer modules before the current chain is controlled.
+
+Formal terminology:
+
+- Radar is a provisional engineering reference, not ground truth.
+- Reference minus Target is a discrepancy, not automatically camera error.
+- Baseline is an estimate of normal conditional discrepancy structure.
+- Residual is discrepancy minus the selected baseline.
+- Event Hint is a review candidate window, not a confirmed business event.
+
+
+2. GOVERNANCE
+
+ChatGPT / GPT-5.6 SOL Work:
+
+- owns the technical route, mathematical definitions, experiment design, interface contract, refactor order, and Decision Log;
+- decides which behavior enters the formal Pipeline;
+- supplies implementation specifications and acceptance criteria.
+
+User:
+
+- executes in the approved company environment;
+- provides business confirmation and manually returned test results;
+- reviews video/CAN/tracking behavior;
+- controls compliance and company-environment actions.
+
+Implementation Tool / Company Copilot:
+
+- implements code and tests from an approved specification;
+- adapts to real source structure and environment;
+- does not independently add algorithms, redefine residual/baseline/event, or change the formal Pipeline.
+
+Conflict rule:
+
+Source-visible evidence + real runtime evidence + user business confirmation take priority over an Implementation Tool's verbal claim.
+
+
+3. SOURCE BASELINE
+
+P001:
+
+can_header_catalog_gui.py
+
+P002:
+
+matlab_can_time_order_decoder_gui.py
+
+P003:
+
+can_analysis_csv_cleaner_gui.py
+
+P004:
+
+sre_cam_stage_residual_error_analyzer_v4_5_3_jp_compact_excel_notes.py
+
+T004A created timestamped baseline copies and a manifest. All four original hashes matched after the freeze.
+
+Rule:
+
+- Keep the T004A baseline_freeze folder in the company environment.
+- Do not overwrite it.
+- Refactor work must use new files/branches/copies.
+- Every characterization test confirmed source hashes unchanged unless explicitly recorded otherwise.
+
+
+4. CURRENT ACTUAL EXECUTION CHAIN
+
+Current operational chain:
+
+P001 optional signal discovery
+-> user manually selects CAN IDs, Channels, DBCs, and Signals
+-> P002 decodes Raw MATLAB CAN CSV
+-> user usually selects P002 output in P003
+-> P003 selects/cleans/sorts/types/fills output
+-> user selects P002 or P003 output in P004
+-> user manually maps Frame/Reference/Target/Stage columns and parameters
+-> P004 creates discrepancy/residual/investigation output
+-> human engineering review checks video/CAN/tracking/HMI context
+
+There is currently:
+
+- no code-level orchestrator;
+- no shared schema registry;
+- no versioned handoff contract;
+- no compatibility test between program versions;
+- no common run manifest;
+- no automatic program-to-program invocation.
+
+The effective interface is currently:
+
+user memory + GUI configuration + column-name resolution + runtime trial.
+
+
+5. TIME AND FRAME AUTHORITY
+
+USER-CONFIRMED FACT:
+
+- DateTime is not trustworthy for the current analysis.
+- Time[us] is not trustworthy for the current analysis.
+- Framecount is the only trusted video/data alignment reference.
+- The stereo-camera video visibly provides Framecount for manual verification.
+
+Consequences:
+
+- Future formal sorting/alignment/event contracts must be Framecount-centered.
+- Row adjacency is not equivalent to Framecount continuity.
+- A program must not silently replace invalid/missing Framecount with zero.
+- Framecount Gap, duplicate, invalid, and possible wrap behavior require explicit policy.
+- Video-linked outputs must retain start, peak, and end Framecount.
+
+UNRESOLVED BUSINESS CONTRACT:
+
+- exact policy for multiple rows within one Framecount;
+- exact policy for duplicate Framecount values;
+- whether a future canonical table is event/update-row based or one-row-per-Framecount;
+- Framecount wrap/reset behavior across files or video segments.
+
+
+6. PROGRAM INVENTORY AND CONFIRMED BEHAVIOR
+
+
+6.1 P001 - Header Catalog
+
+Current valid use:
+
+- optional exploration when available Signals/Headers are unknown;
+- human reference for Ctrl-F/search and later P002 configuration.
+
+Confirmed:
+
+- P001 is not programmatically consumed by P002-P004.
+- P001 contains physical decode capability beyond the minimum catalog role.
+- P001 duplicates more than five normalized parser/decode functions with P002.
+- P001 and P002 share a common origin but have meaningful divergence.
+- P001 and P002 do not import a shared local parser/decoder module.
+- P001-only Unit handling exists in the inspected branch.
+- Catalog/decode divergence can theoretically cause P001 and P002 to disagree about supported Signals.
+
+Formal target responsibility:
+
+- discover structure using a shared CAN/DBC core;
+- present catalog information;
+- do not maintain an independent physical decode implementation.
+
+
+6.2 P002 - CAN/DBC Decoder
+
+Current valid use:
+
+- authoritative existing Raw CAN -> decoded physical signal implementation.
+
+Runtime-confirmed strengths:
+
+- real P002 decode path executed on Synthetic CSV/DBC;
+- Little Endian correct in tested case;
+- Big Endian correct in tested case;
+- Signed decode correct in tested case;
+- Scale and Offset correct in tested case;
+- Channel selection correct in tested case;
+- Framecount decoded correctly in tested case;
+- incomplete/invalid byte updates produced warning/skip behavior;
+- output Wide CSV was created;
+- tested same-name collision path produced separate/renamed columns rather than silent overwrite.
+
+Confirmed limitations:
+
+- DBC Min/Max are ignored;
+- Extended CAN ID is not supported in current P001/P002 inspection;
+- Unlimited Forward Fill is applied;
+- no Forward Fill disable/limit contract was confirmed;
+- no update mask;
+- no signal age / last update;
+- no original source row ID;
+- no formal Unit/Validity metadata propagation;
+- multiple rows can exist within one Framecount;
+- output naming/collision behavior has mixed branches;
+- only partial output schema validation exists.
+
+Formal target responsibility:
+
+- decode bytes to physical signal updates using a shared tested CAN/DBC core;
+- preserve raw update identity and provenance;
+- not decide final missing-value semantics silently;
+- expose data required by the canonical dataset builder.
+
+
+6.3 P003 - Cleaner
+
+Current operational use:
+
+- usually used because Framecount-based sorting/alignment and analysis-column preparation are required before analysis.
+
+Confirmed behavior:
+
+- supports CSV and Excel;
+- reads full file into memory;
+- can read P002 output without required filename coupling;
+- Framecount is treated as a required/current central column in inspected path;
+- stable sort is explicitly requested after numeric sort-key coercion;
+- duplicate sort/frame keys are preserved;
+- kept Signal column names are preserved;
+- can conditionally change row order and dtype;
+- no original source row ID is created/preserved by contract;
+- no Framecount Gap or Wrap detection;
+- no Forward Fill inside P003;
+- default remaining Blank/NaN action is Fill Zero;
+- Zero Fill covers the generic remaining-column path;
+- Framecount can enter the generic Zero Fill path;
+- current Zero Fill cannot be disabled through the confirmed path;
+- no Signal-specific invalid sentinel contract;
+- no distinction among No Update, Invalid, Unavailable, and True Zero;
+- no update mask;
+- no Signal Age;
+- no imputation log or cell-level trace;
+- numeric conversion failure becomes NaN and may later become zero;
+- cleaning logic is distributed across multiple class methods;
+- no independent headless Cleaner Core exists;
+- repeated T004C/T008 attempts could not execute real P003 without GUI coupling/refactor.
+
+Critical semantic risk:
+
+P002 Unlimited Forward Fill
+-> P003 remaining missing values become zero
+-> missingness provenance is lost
+-> P004 can interpret imputed values as ordinary measurements.
+
+Formal target responsibility:
+
+- become a Dataset Builder/Validator with a callable headless Core;
+- own explicit sorting, validation, optional alignment, and approved imputation policy;
+- never convert unknown/invalid/missing Framecount to zero silently;
+- preserve source/update/age/validity metadata.
+
+
+6.4 P004 - Stage Residual Analyzer
+
+Runtime-confirmed strengths:
+
+- imports successfully;
+- Reference-Target direction works in tested case;
+- Existing Discrepancy mode is consistent with direct discrepancy in tested case;
+- Stage1 real implementation executes;
+- Stage2 real implementation executes;
+- Stage1 and Stage2 Residual outputs matched fixed Synthetic expectations;
+- Stage Core is mainly a pure-function/small-connected-function set;
+- Stage Core extraction without mathematical change is feasible;
+- Pearson result present/directionally correct in tested case;
+- Spearman result present/directionally correct in tested case;
+- NMI result present/in valid range in tested case;
+- Threshold produced expected candidates;
+- High-Risk Count Gate was applied in tested path;
+- P004 can accept generic P002 output through file/column mapping without a hard-coded P003 filename.
+
+Confirmed limitations:
+
+- Baseline field representation did not match T004E fixed expectation while Residual did; Baseline output contract requires later clarification before declaring a math defect;
+- Baseline fit and Stage metrics use the same rows;
+- Minimum Sample Count Gate exists but is optional/disabled in confirmed path;
+- Sparse single-sample Bin was rejected/invalidated in tested case;
+- Lag is DataFrame Row Lag, not Framecount Difference;
+- Event Hint continuity is Row-based;
+- Candidate Rows across a large Framecount Gap were merged into one Event Hint;
+- Event start/end/peak output was only partially validated;
+- Invalid/Missing/Unit/Row Identity handling is mixed and configuration-dependent;
+- P004 may coerce broad input columns numerically in an inspected path;
+- P004 contains Stage analysis, association scan, high-risk analysis, Event Hint generation, and reporting in one expanding program.
+
+Formal target responsibility:
+
+- analyze a validated canonical dataset;
+- compute approved discrepancy/baseline/residual methods;
+- expose Stage Core separately from GUI/reporting;
+- not silently redefine row order or missingness;
+- not claim root cause.
+
+Event processing target:
+
+- separate Event Candidate processing responsibility from Stage mathematics;
+- use Framecount continuity/gap rules, not only adjacent DataFrame rows;
+- output start/peak/end Framecount and review context.
+
+
+7. FORMAL TECHNICAL DEBT REGISTER
+
+TD-001 CRITICAL - Missingness provenance loss
+
+P002 Forward Fill plus P003 Zero Fill makes stale/missing/invalid values indistinguishable from measurements.
+
+TD-002 CRITICAL - No authoritative Framecount contract
+
+Multiple programs sort or reinterpret rows. Gap/duplicate/wrap/invalid behavior is not centrally defined.
+
+TD-003 HIGH - P001/P002 parser duplication and divergence
+
+Common-origin code has diverged across multiple layers without shared tests/core.
+
+TD-004 HIGH - P003 GUI/Core coupling
+
+Cleaner behavior cannot be headlessly tested or orchestrated without refactor.
+
+TD-005 HIGH - P004 Event Hint uses Row continuity
+
+Large Framecount gaps can be merged into one Event Hint.
+
+TD-006 HIGH - No versioned handoff schema
+
+P002/P003/P004 compatibility depends on manual mapping and runtime behavior.
+
+TD-007 MEDIUM/HIGH - Stage evaluation on fit rows
+
+Stage improvement metrics can be optimistic. Cross-segment/log validation is not yet formalized.
+
+TD-008 MEDIUM - P004 responsibility expansion
+
+Static analysis, association, high-risk, event processing, and reporting are mixed.
+
+TD-009 MEDIUM - Full-file memory processing
+
+P003 reads full files; source data can exceed 1 GB. Performance validation is still required.
+
+
+8. FORMAL DECISIONS v0.1
+
+D001 KEEP - P002 physical decode math
+
+Reason: real Synthetic tests confirmed central decode behavior. Refactor around it; do not rewrite blindly.
+
+D002 MODIFY - P001/P002 shared parser architecture
+
+Decision: future P001 and P002 must call one shared CAN/DBC Core. P001 remains optional discovery UI.
+
+D003 REJECT AS FORMAL POLICY - Unlimited untracked Forward Fill
+
+Current behavior may remain only for legacy compatibility until replacement. Future contract requires explicit limit/age/provenance.
+
+D004 REJECT AS FORMAL POLICY - Generic Blank/NaN to Zero
+
+Zero can be a valid measurement. Invalid values differ by Signal. Future missing/invalid policy must be explicit and per-signal capable.
+
+D005 KEEP/MODIFY - Stage1/Stage2 mathematical implementation
+
+Residual behavior is retained provisionally. Baseline output contract, sample gate, and validation split require clarification/experiments.
+
+D006 REJECT - Row-only Event continuity
+
+Future Event Candidate merging must use Framecount-aware rules.
+
+D007 KEEP - P004 Event Hint as investigation aid
+
+It is useful for reducing review scope, but is not confirmed Event detection or root cause.
+
+D008 DEFER - SysID/AR/ARX expansion
+
+Do not add dynamic models until canonical data, Framecount, target association, baseline, threshold, and Event output are stable.
+
+D009 KEEP - Manual engineering verification
+
+Video/CAN/tracking review remains required for final engineering hypotheses.
+
+
+9. TARGET PROGRAM RESPONSIBILITIES
+
+Shared CAN/DBC Core
+
+- CSV header parsing primitives;
+- DBC message/signal parsing;
+- byte extraction;
+- endian/signed/scale/offset decode;
+- channel/ID/signal selection;
+- tested error handling;
+- no GUI.
+
+P001 Catalog UI
+
+- calls Shared CAN/DBC Core;
+- displays available structure;
+- no independent decode fork.
+
+P002 Decoder UI/Core
+
+- calls Shared CAN/DBC Core;
+- outputs decoded updates plus provenance;
+- does not silently own final missing-value/alignment policy.
+
+Canonical Dataset Builder (P003 replacement core)
+
+- validates schema;
+- applies Framecount contract;
+- sorts deterministically;
+- preserves Source Row and update state;
+- applies explicit per-signal invalid/imputation rules;
+- outputs machine-readable manifest and validation report;
+- callable without GUI.
+
+P003 GUI Adapter
+
+- collects configuration;
+- calls Canonical Dataset Builder;
+- contains no independent cleaning mathematics.
+
+P004 Analysis Core
+
+- consumes Canonical Dataset Contract;
+- computes approved discrepancy/baseline/residual and investigation statistics;
+- does not own generic data cleaning.
+
+Event Candidate Processor
+
+- threshold/persistence/Framecount-gap split/merge;
+- start/peak/end Framecount;
+- review-window export;
+- no automatic root-cause claim.
+
+Report Adapter
+
+- Excel/CSV documentation and user-facing explanations;
+- does not change analysis results.
+
+Orchestrator (later)
+
+- runs approved modules/configurations;
+- writes run manifest;
+- checks version compatibility;
+- not implemented before callable cores and contracts exist.
+
+
+10. TARGET PIPELINE v0.1
+
+Raw CAN + DBC
+-> Shared CAN/DBC Core
+-> Decoded Signal Updates with Provenance
+-> Canonical Dataset Builder
+-> Framecount/Data Quality Gate
+-> Target/Role Mapping
+-> Camera-Radar Discrepancy
+-> Approved Baseline
+-> Residual
+-> Anomaly Candidate Score/Threshold
+-> Persistence Filtering
+-> Framecount-aware Event Split/Merge
+-> Start/Peak/End Framecount
+-> Video/CAN/Tracking Manual Review
+-> Engineering Hypothesis
+
+Future only after validation:
+
+Scenario segmentation -> AR/ARX -> Prediction Error -> Dynamic investigation.
+
+
+11. REFACTOR ORDER
+
+R0 - Characterization and Source Freeze
+
+Status: COMPLETE for current planning level.
+
+Completed:
+
+- source baseline freeze;
+- program inventory;
+- overlap/gap inspection;
+- P002 runtime decode characterization;
+- P003 contract/GUI-coupling characterization;
+- P004 Stage/stat/event characterization;
+- cross-program handoff inspection.
+
+R1 - Canonical Dataset Contract v0.1
+
+Status: NEXT.
+
+Define before changing code:
+
+- required columns;
+- Framecount type/validity;
+- Source Row identity;
+- decoded update flag;
+- Signal Age / Last Update;
+- Unit/dtype/validity metadata;
+- per-signal invalid rules;
+- Forward Fill policy and limit;
+- duplicate Framecount policy;
+- sort policy;
+- output manifest;
+- validation errors/warnings.
+
+R2 - Characterization Tests as Regression Assets
+
+Convert useful T004/T008 logic into retained local regression tests. Tests must not depend on public GitHub or company data.
+
+R3 - Shared P001/P002 CAN/DBC Core
+
+Extract proven decode behavior without changing mathematics. Make P001/P002 use the same implementation.
+
+R4 - Callable Canonical Dataset Builder
+
+Extract/replace P003 cleaning logic behind a headless API. Legacy GUI remains an adapter during transition.
+
+R5 - P004 Core Boundary
+
+Separate Stage Core, Event Candidate Processor, and Report Adapter. Preserve validated Stage behavior.
+
+R6 - Framecount-aware Event MVP
+
+Implement persistence, gap split, merge, start/peak/end Framecount, and review-window output.
+
+R7 - Minimal Orchestrator
+
+Only after R1-R6 interfaces are stable.
+
+
+12. OPEN QUESTIONS THAT BLOCK R1
+
+OQ-001 What exactly is one canonical row: CAN update row, unique Framecount row, or configurable view?
+
+OQ-002 When multiple values of one Signal exist within one Framecount, which value/policy is valid?
+
+OQ-003 What is the Framecount duplicate/gap/wrap/reset policy?
+
+OQ-004 Which Signals permit Forward Fill, and what is each maximum age?
+
+OQ-005 How are per-signal Invalid, Unavailable, No Update, and True Zero represented?
+
+OQ-006 Which validity/status bits exist for camera/radar target measurements?
+
+OQ-007 What exact target-association rule compares camera and radar objects?
+
+OQ-008 Which Unit and coordinate/definition point applies to each compared distance?
+
+OQ-009 What minimum sample count and fallback are required for Stage bins?
+
+OQ-010 What Framecount gap splits two candidate windows into separate Events?
+
+
+13. NEXT ACTIONS
+
+NA-001
+
+Create Canonical Dataset Contract v0.1 and a compact Business Confirmation packet for OQ-001 to OQ-006.
+
+NA-002
+
+Create the first controlled refactor specification only after NA-001. No Implementation Tool may select the architecture independently.
+
+NA-003
+
+Begin with regression-protected Shared CAN/DBC Core and Dataset Builder boundaries. Do not add new Analyzer functions during this phase.
+
+
+14. STOP RULE
+
+No new algorithm enters the formal Pipeline during architecture recovery unless:
+
+- it solves a documented current problem;
+- its assumptions and outputs are defined;
+- a controlled Experiment exists;
+- the result is recorded in the Decision Log;
+- it does not bypass the Canonical Dataset Contract.
+
+End of Unified Command Baseline v0.1.
