@@ -1,0 +1,460 @@
+T003 - FULL PROGRAM CONTRACT AUDIT + MACHINE RETURN CODEC V1
+
+任务性质：只读源代码审查。
+
+禁止事项：
+
+- 不修改任何程序；
+- 不重构；
+- 不新增算法；
+- 不运行公司真实数据；
+- 不上传或复制源代码、DBC、CSV、截图或内部资料；
+- 不替项目负责人决定正式Pipeline；
+- 不因为某功能“看起来合理”就标记为正确。
+
+
+审查对象
+
+P001
+can_header_catalog_gui.py
+
+P002
+matlab_can_time_order_decoder_gui.py
+
+P003
+can_analysis_csv_cleaner_gui.py
+
+P004
+sre_cam_stage_residual_error_analyzer_v4_5_3_jp_compact_excel_notes.py
+
+
+已确认上下文
+
+1. P001主要在新任务、不知道有哪些Signal时用于发现Header、CAN ID、Channel和DBC Signal。
+2. 当前主要人工执行链为P002 -> P003 -> P004。
+3. Framecount是当前数据唯一可信的视频同步基准。
+4. DateTime和Time[us]在当前数据中不能作为可信的视频同步依据。
+5. T002已确认：P002以DateTime/Time[us]建立wide row并排序，随后进行无限forward fill；P003通常再次排序并默认补0；P004的lag主要使用DataFrame row lag。
+6. 不同Signal可能具有不同的Invalid/Default Sentinel。
+7. Radar只是暂定Engineering Reference，不是Ground Truth。
+8. 当前目标是把大量数据压缩成少量可行动调查候选，不是自动判定Root Cause。
+
+如T003源代码证据与以上内容冲突，必须记录冲突，但不得自行修改程序。
+
+
+PART A - 本地完整报告
+
+在公司电脑生成：
+
+T003_FULL_PROGRAM_CONTRACT_AUDIT.txt
+
+该文件只保留在公司电脑，不进行人工全文回传。
+
+完整报告必须包含以下章节。
+
+
+1. INSPECTION_SCOPE_AND_LIMITATIONS
+
+- 实际阅读的文件名；
+- 是否存在import的自定义模块；
+- 无法读取或无法静态确认的内容；
+- 未运行真实数据、GUI和端到端测试的限制。
+
+
+2. PROGRAM_CALL_MAP
+
+对每个程序列出：
+
+- GUI入口；
+- 主执行函数；
+- 输入读取函数；
+- DBC处理函数；
+- 排序/清洗函数；
+- 分析函数；
+- 输出写入函数；
+- 主要自定义类；
+- 重要全局变量或配置对象。
+
+使用函数名和行号作为本地证据。
+
+
+3. PROGRAM_CARDS
+
+分别为P001-P004建立Program Card：
+
+- 当前职责；
+- 输入文件；
+- 必需列；
+- 可选列；
+- GUI配置；
+- 输出文件；
+- 输出列/Sheet；
+- 默认值；
+- 隐式假设；
+- 失败行为；
+- 外部依赖；
+- 是否修改行顺序；
+- 是否修改缺失值；
+- 是否保存运行配置；
+- 是否存在下游程序化Consumer。
+
+
+4. INPUT_OUTPUT_SCHEMA_AND_LINEAGE
+
+建立跨程序字段Lineage，至少覆盖：
+
+- source row/index；
+- CAN ID；
+- Channel；
+- DLC；
+- raw bytes；
+- DateTime；
+- Time[us]；
+- Framecount；
+- decoded signal；
+- unit；
+- dtype；
+- invalid/default value；
+- missing/no-update state；
+- forward-filled value；
+- zero-filled value；
+- reference signal；
+- target signal；
+- raw discrepancy/error column；
+- baseline；
+- residual；
+- anomaly candidate；
+- Event Hint start/end/peak。
+
+标记字段在哪个程序被创建、修改、丢失或重新解释。
+
+
+5. P001_DETAILED_AUDIT
+
+检查：
+
+- CSV读取是只读Header还是读取全部数据；
+- delimiter/header detection；
+- CH1/CH2 DBC assignment；
+- CAN ID/Channel/DLC/Byte header解析；
+- Message/Signal Catalog；
+- Signal Filter；
+- 是否执行物理量Decode；
+- little/big endian；
+- signedness；
+- scale/offset；
+- 与P002重复的函数或代码块；
+- 输出是否能直接作为P002机器配置输入；
+- DBC与CSV不一致时的检查与错误提示。
+
+
+6. P002_DETAILED_AUDIT
+
+检查：
+
+- delimiter/header detection；
+- CH1/CH2 DBC选择；
+- Standard/Extended CAN ID；
+- 同一CAN ID跨Channel处理；
+- DLC与Byte完整性；
+- incomplete/invalid byte handling；
+- little endian；
+- big endian；
+- signed signal；
+- scale/offset；
+- DBC min/max；
+- enum/value table；
+- invalid/default definition；
+- multiplexed signal；
+- duplicate Signal Name collision；
+- duplicate message update；
+- signal filter；
+- wide expansion；
+- source row provenance；
+- Framecount propagation；
+- sorting；
+- forward fill；
+- unit/dtype/validity metadata；
+- structured error report；
+- memory/chunking strategy；
+- 对超过1GB输入的代码层可行性。
+
+
+7. P003_DETAILED_AUDIT
+
+检查：
+
+- CSV/Excel输入；
+- delimiter/header handling；
+- exact/fuzzy column resolution；
+- sort key选择与关闭排序；
+- stable sort；
+- keep/drop column规则；
+- numeric conversion；
+- blank/NaN handling；
+- zero fill范围和默认状态；
+- signal-specific missing policy；
+- signal-specific invalid sentinel policy；
+- 原始列、原始值与清洗值是否同时保留；
+- schema/quality report；
+- 输出格式；
+- full-memory/chunked processing；
+- 操作是否可逆和可追溯。
+
+
+8. P004_DETAILED_AUDIT
+
+检查并给出准确数学定义或代码公式：
+
+- input column exact/fuzzy resolution；
+- time/frame column resolution；
+- reference/target role；
+- discrepancy/error direction；
+- existing-error-column mode；
+- units validation；
+- invalid-value filtering；
+- Stage 1 baseline；
+- Stage 2 baseline；
+- bin生成方式；
+- minimum sample count；
+- sparse-bin fallback；
+- baseline训练与评价是否使用同一批样本；
+- leakage防护；
+- FinalResidual；
+- Q95及其他Stage effect metrics；
+- candidate rate；
+- fixed/robust threshold；
+- Pearson；
+- Spearman；
+- NMI；
+- lag scan；
+- Evidence Score；
+- 1D High-Risk；
+- 2D High-Risk；
+- count gate；
+- multiple-comparison控制；
+- Event Hint连续性；
+- event gap/merge；
+- start/end/peak/duration；
+- residualized source output；
+- Excel Sheet和说明；
+- 是否可能把association写成causal influence；
+- 是否可能把discrepancy写成camera error；
+- 是否可能自动输出root cause表述；
+- output是否记录完整运行参数和程序版本。
+
+
+9. GUI_REPRODUCIBILITY_AND_OPERATIONS
+
+跨P001-P004检查：
+
+- 配置能否Save/Load；
+- 默认参数是否清晰显示；
+- 是否生成run manifest；
+- 是否生成log；
+- 是否记录输入文件hash/path；
+- 是否记录程序版本；
+- 是否记录参数；
+- 异常是否fail-fast；
+- 输出文件唯一命名；
+- GUI关闭/取消时行为；
+- 是否可能覆盖旧输出；
+- 同一输入与配置是否可重现相同输出。
+
+
+10. DEPENDENCIES_AND_TESTABILITY
+
+检查：
+
+- Python标准库依赖；
+- 第三方库；
+- GUI库；
+- Excel库；
+- DBC库或自定义Parser；
+- 是否存在单元测试；
+- 是否存在integration test；
+- 核心逻辑是否与GUI分离；
+- 是否能使用synthetic DataFrame测试；
+- 是否存在hard-coded列名、阈值、路径或单位；
+- 是否存在随机性且未固定seed。
+
+
+11. OVERLAP_AND_INTERFACE_GAPS
+
+只根据代码事实列出：
+
+- P001/P002重复；
+- P002/P003重复；
+- P003/P004重复；
+- P004内部职责扩张；
+- 没有明确Owner的职责；
+- 多个程序共同修改的字段；
+- 下游依赖但上游未保证的字段；
+- 人工步骤；
+- 无法复现的配置；
+- 无法追溯的变换。
+
+每项分类为：
+
+- CONFIRMED_IMPLEMENTATION_FACT；
+- DESIGN_GAP；
+- KNOWN_LIMITATION；
+- UNKNOWN_REQUIRING_RUNTIME_CHECK。
+
+不得提出新算法。
+
+
+12. FIELD_CODE_EVIDENCE_MATRIX
+
+对下面Machine Codec中的f1-f72逐项记录：
+
+- assigned code；
+- source file；
+- function/class；
+- line number；
+- one-sentence evidence；
+- confidence：HIGH/MEDIUM/LOW。
+
+
+PART B - Machine Return Codec
+
+另生成：
+
+T003_PACKET.txt
+
+该文件只能包含一行数字Packet，不包含任何解释。
+
+
+COMMON ENUMS
+
+B - BOOLEAN/PRESENCE
+0 UNKNOWN
+1 NO/ABSENT
+2 YES/PRESENT
+3 PARTIAL/MIXED/CONFIGURABLE
+
+V - VALIDATION STRENGTH
+0 UNKNOWN
+1 NONE
+2 WARNING_OR_MANUAL_CHECK
+3 AUTOMATIC_FAIL_STOP
+
+
+FIELD DEFINITIONS
+
+f1  shared_internal_library_exists [B]
+f2  code_level_orchestrator_exists [B]
+f3  configuration_save_and_load [B]
+f4  run_manifest_generated [B]
+f5  program_version_recorded_in_output [B]
+f6  persistent_execution_log [B]
+f7  automated_tests_exist [B]
+f8  deterministic_reproduction_supported [B]
+
+f9  P001_csv_read_mode
+    0 UNKNOWN; 1 HEADER_ONLY; 2 FULL_DATA; 3 MIXED
+f10 P001_delimiter_header_detection [B]
+f11 P001_loads_and_parses_dbc [B]
+f12 P001_separate_ch1_ch2_dbc [B]
+f13 P001_can_id_channel_byte_discovery [B]
+f14 P001_signal_filtering [B]
+f15 P001_physical_decode_logic_duplicates_P002 [B]
+f16 P001_machine_readable_configuration_consumed_by_P002 [B]
+
+f17 P002_delimiter_header_detection [B]
+f18 P002_standard_and_extended_can_id_support [B]
+f19 P002_same_can_id_multiple_channel_handling [V]
+f20 P002_dlc_and_byte_completeness_validation [V]
+f21 P002_little_endian_decode [B]
+f22 P002_big_endian_decode [B]
+f23 P002_signed_decode [B]
+f24 P002_scale_and_offset [B]
+f25 P002_dbc_min_max_enforced [B]
+f26 P002_invalid_default_semantics
+    0 UNKNOWN; 1 NONE; 2 GLOBAL; 3 SIGNAL_SPECIFIC; 4 MIXED
+f27 P002_multiplexed_signal_support [B]
+f28 P002_output_signal_collision_validation [V]
+f29 P002_source_row_provenance [B]
+f30 P002_unit_dtype_validity_metadata_output [B]
+f31 P002_chunked_or_streaming_large_file_processing [B]
+f32 P002_structured_error_audit_summary [B]
+
+f33 P003_csv_and_excel_input [B]
+f34 P003_column_resolution
+    0 UNKNOWN; 1 EXACT_ONLY; 2 FUZZY_ONLY; 3 EXACT_AND_FUZZY
+f35 P003_configurable_sorting [B]
+f36 P003_missing_fill_can_be_disabled [B]
+f37 P003_signal_specific_missing_policy [B]
+f38 P003_signal_specific_invalid_policy [B]
+f39 P003_signal_specific_dtype_rules [B]
+f40 P003_original_and_cleaned_value_provenance [B]
+f41 P003_schema_or_quality_report_output [B]
+f42 P003_processing_mode
+    0 UNKNOWN; 1 FULL_MEMORY; 2 CHUNKED_OR_STREAMING; 3 MIXED
+
+f43 P004_required_column_resolution
+    0 UNKNOWN; 1 EXACT_ONLY; 2 FUZZY_ONLY; 3 EXACT_AND_FUZZY
+f44 P004_reference_target_role_validation [V]
+f45 P004_unit_compatibility_validation [V]
+f46 P004_configurable_discrepancy_direction [B]
+f47 P004_existing_error_column_mode [B]
+f48 P004_signal_specific_invalid_filtering [B]
+f49 P004_stage1_baseline [B]
+f50 P004_stage2_conditional_baseline [B]
+f51 P004_minimum_samples_per_bin [B]
+f52 P004_sparse_bin_fallback
+    0 UNKNOWN; 1 NONE; 2 DROP_OR_INVALIDATE; 3 GLOBAL_OR_PARENT_BASELINE;
+    4 NEIGHBOR_OR_INTERPOLATE; 5 MIXED_OR_OTHER
+f53 P004_train_evaluation_separation [B]
+f54 P004_stage_effect_metrics [B]
+f55 P004_threshold_documented_and_configurable [B]
+f56 P004_association_metrics
+    0 UNKNOWN; 1 NONE; 2 SOME_OF_PEARSON_SPEARMAN_NMI;
+    3 ALL_PEARSON_SPEARMAN_NMI
+f57 P004_lag_uses_actual_framecount_difference [B]
+f58 P004_high_risk_minimum_count_gate [B]
+f59 P004_event_continuity_basis
+    0 UNKNOWN; 1 ADJACENT_ROWS; 2 FRAMECOUNT_GAP;
+    3 CONFIGURABLE_ROW_OR_FRAME; 4 OTHER_OR_MIXED
+f60 P004_safe_discrepancy_vs_error_wording [B]
+f61 P004_output_records_run_config_and_version [B]
+f62 P004_prevents_automatic_root_cause_claim [B]
+
+f63 canonical_cross_program_schema_exists [B]
+f64 current_sorting_owner
+    0 UNKNOWN; 1 NONE; 2 P002; 3 P003; 4 P004; 5 MULTIPLE
+f65 current_missing_value_policy_owner
+    0 UNKNOWN; 1 NONE; 2 P002; 3 P003; 4 P004; 5 MULTIPLE
+f66 units_metadata_propagated_end_to_end [B]
+f67 validity_and_fill_provenance_propagated_end_to_end [B]
+f68 cross_program_compatibility_validation [V]
+f69 synthetic_or_regression_tests_exist [B]
+f70 formal_module_responsibility_boundary_enforced [B]
+f71 complete_source_inspection_for_all_four_programs [B]
+f72 contradiction_or_unexpected_fact
+    0 NONE; 1 PRESENT_REQUIRES_TARGETED_FOLLOWUP
+
+
+PACKET FORMAT
+
+T003C1/72:f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13,f14,f15,f16,f17,f18,f19,f20,f21,f22,f23,f24,f25,f26,f27,f28,f29,f30,f31,f32,f33,f34,f35,f36,f37,f38,f39,f40,f41,f42,f43,f44,f45,f46,f47,f48,f49,f50,f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65,f66,f67,f68,f69,f70,f71,f72#c
+
+要求：
+
+- 必须正好72个整数；
+- 只能使用字段定义允许的Code；
+- 静态代码不能确定时必须填0；
+- 不得用“最接近的选项”替代UNKNOWN；
+- c = f1到f72的整数和 modulo 10；
+- T003_PACKET.txt中只输出Packet一行；
+- 不输出解释、空行、Markdown或公司信息。
+
+
+完成标准
+
+1. T003_FULL_PROGRAM_CONTRACT_AUDIT.txt已在公司电脑生成并保留；
+2. T003_PACKET.txt只包含一行合法Packet；
+3. 72个字段均可在完整报告的FIELD_CODE_EVIDENCE_MATRIX中追溯；
+4. 没有修改P001-P004；
+5. 没有运行或导出公司真实数据；
+6. 没有提出或批准新的正式算法。
