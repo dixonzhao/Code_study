@@ -1,0 +1,340 @@
+T004C - P003 CHARACTERIZATION TEST PROGRAM DESIGN
+
+本文件是程序设计书，不是执行结果。
+
+
+零、P003先验知识（Copilot必须先理解）
+
+P003是当前项目中的Analyze-ready Dataset Cleaner GUI。
+
+精确源文件名：
+
+can_analysis_csv_cleaner_gui.py
+
+P003不是DBC Decoder，也不是Residual Analyzer。它的当前职责是：
+
+1. 读取P002输出的Decoded CSV，部分路径也支持Excel；
+2. 选择分析需要保留的列；
+3. 处理数值类型和无效/空白值；
+4. 按用户配置重新排序；
+5. 当前默认排序候选通常包括Framecount、Time[us]和DateTime；
+6. 当前GUI默认将剩余Blank/NaN补0，但该选项可以关闭；
+7. 输出通常包含_can_analysis_cleaned；
+8. 输出由用户人工选择后送入P004 Analyzer。
+
+已知静态审查结果：
+
+- P003采用full-memory处理；
+- 支持exact/fuzzy列解析；
+- 排序可配置；
+- 缺少Signal-specific Missing/Invalid/Dtype Policy；
+- 缺少Fill Provenance；
+- 原始Index可能存在但通常不作为正式输出Provenance。
+
+本任务提供的can_analysis_csv_cleaner_gui.py是System Under Test，必须保持只读。
+
+需要生成独立测试程序：
+
+t004c_p003_characterization_test.py
+
+
+一、Copilot Web Chat输入
+
+在新Copilot Web Chat中同时提供两个附件：
+
+- can_analysis_csv_cleaner_gui.py
+- 本设计书
+
+给Copilot以下指令：
+
+把can_analysis_csv_cleaner_gui.py作为只读System Under Test。
+先理解设计书中的“P003先验知识”，再严格按照设计书生成完整测试程序。
+必须调用真实P003实现，不得复制或重新实现Cleaner算法。
+不要运行程序，不要预测测试结果，不要直接返回Packet。
+请直接在Chat中输出t004c_p003_characterization_test.py的完整Python源码。
+只输出一个完整Python代码块，不要输出CODE_WRITTEN、解释、摘要或省略号。
+
+
+二、Copilot唯一交付物
+
+Copilot只负责完整输出：
+
+t004c_p003_characterization_test.py
+
+禁止：
+
+- 修改或返回修改后的P003；
+- 直接回答测试Packet；
+- 声称已经运行；
+- 重新实现Cleaner并测试复制品；
+- 使用公司真实数据；
+- 省略Import、Helper、main或Packet逻辑；
+- 创建自然语言结果报告。
+
+
+三、测试程序运行目标
+
+用户保存Python代码后，将测试程序放入P003同目录并运行：
+
+python t004c_p003_characterization_test.py
+
+程序运行时必须：
+
+1. 找到P003并计算运行前SHA-256；
+2. 使用tempfile和Synthetic DataFrame/CSV创建输入；
+3. 调用真实P003 Cleaner实现；
+4. 至少分别运行默认Zero Fill和关闭Zero Fill两套配置；
+5. 读取实际输出DataFrame或CSV；
+6. 根据实际结果判断Q1-Q20；
+7. 再次检查P003 SHA-256；
+8. 清理临时数据；
+9. Terminal只输出Machine Packet。
+
+
+四、实现边界
+
+允许：
+
+- importlib载入P003；
+- 调用P003现有函数、类或GUI callback背后的Core；
+- 创建最小Wrapper传入Synthetic文件和配置；
+- 如果P003必须通过GUI对象运行，可在不显示窗口时构造必要对象；
+- 使用pandas检查P003实际输出。
+
+禁止：
+
+- 在测试脚本中重新实现sort、fill、keep/filter或dtype conversion；
+- 用测试脚本自己的pandas清洗结果冒充P003输出；
+- 没有调用真实P003却把Q4填为成功；
+- 修改P003以便测试。
+
+若真实P003无法调用：
+
+- Q4填1；
+- 未测试项填0；
+- 不伪造结果。
+
+
+五、Synthetic输入
+
+使用通用列名，不使用公司Signal：
+
+- Framecount；
+- Time[us]；
+- DateTime；
+- source_order；
+- true_zero_signal；
+- missing_signal；
+- numeric_string_signal；
+- invalid_sentinel_signal；
+- text_signal；
+- drop_me。
+
+至少创建以下5行，原始顺序必须保留在source_order中：
+
+Row 0:
+Framecount=102, source_order=0, true_zero_signal=0,
+missing_signal=NaN, numeric_string_signal="12.5",
+invalid_sentinel_signal=273.15, text_signal="A"
+
+Row 1:
+Framecount=100, source_order=1, true_zero_signal=1,
+missing_signal=5, numeric_string_signal="13.5",
+invalid_sentinel_signal=1, text_signal="B"
+
+Row 2:
+Framecount=100, source_order=2, true_zero_signal=0,
+missing_signal=NaN, numeric_string_signal="bad",
+invalid_sentinel_signal=273.15, text_signal="C"
+
+Row 3:
+Framecount=101, source_order=3, true_zero_signal=2,
+missing_signal=7, numeric_string_signal="14.5",
+invalid_sentinel_signal=2, text_signal="D"
+
+Row 4:
+Framecount=105, source_order=4, true_zero_signal=0,
+missing_signal=NaN, numeric_string_signal="15.5",
+invalid_sentinel_signal=3, text_signal="E"
+
+Time[us]和DateTime应与source_order形成不同但确定的顺序，用于确认实际Sort Priority。
+
+
+六、运行配置
+
+至少运行两个Case：
+
+CASE DEFAULT
+
+- 使用GUI默认Zero Fill；
+- 使用默认Sort Key Resolution；
+- 保留除drop_me以外的测试列；
+- 执行P003真实dtype conversion。
+
+CASE NO_ZERO_FILL
+
+- 明确关闭Zero Fill；
+- 其他配置与DEFAULT相同。
+
+如P003支持关闭Sorting，可增加第三个Case，但不是本任务强制要求。
+
+
+七、Machine Code定义
+
+Q1 P003_FILE_FOUND
+0 ERROR
+1 NO
+2 YES
+
+Q2 SYNTHETIC_INPUT_CREATED
+0 ERROR_OR_NOT_RUN
+1 NO
+2 YES
+
+Q3 P003_IMPORTED_OR_LOADED
+0 NOT_RUN
+1 FAILED
+2 SUCCESS
+
+Q4 REAL_P003_EXECUTED
+0 NOT_RUN
+1 NOT_CALLABLE_WITHOUT_REFACTOR
+2 BOTH_REQUIRED_CASES_EXECUTED
+3 PARTIAL_OR_ERROR
+
+
+Q5 DEFAULT_SORT_FRAMECOUNT_ASCENDING
+0 NOT_TESTED
+1 NO
+2 YES
+
+Q6 DUPLICATE_FRAMECOUNT_STABILITY
+0 NOT_TESTED
+1 SOURCE_ORDER_NOT_PRESERVED_WITHIN_DUPLICATE
+2 SOURCE_ORDER_PRESERVED_WITHIN_DUPLICATE
+3 SOURCE_ORDER_COLUMN_DROPPED_CANNOT_CONFIRM
+
+Q7 SORT_PRIORITY
+0 NOT_TESTED
+1 FRAMECOUNT_PRIMARY
+2 TIME_US_PRIMARY
+3 DATETIME_PRIMARY
+4 OTHER_OR_MIXED
+
+Q8 OUTPUT_ROW_COUNT
+0 NOT_TESTED
+1 CHANGED_FROM_FIVE
+2 REMAINS_FIVE
+
+
+Q9 DEFAULT_ZERO_FILL_MISSING_SIGNAL
+0 NOT_TESTED
+1 NAN_PRESERVED
+2 NAN_CHANGED_TO_ZERO
+3 ROW_OR_COLUMN_DROPPED
+
+Q10 NO_ZERO_FILL_MISSING_SIGNAL
+0 NOT_TESTED
+1 NAN_PRESERVED
+2 NAN_STILL_CHANGED_TO_ZERO
+3 ROW_OR_COLUMN_DROPPED
+
+Q11 TRUE_ZERO_SIGNAL
+0 NOT_TESTED
+1 ZERO_CHANGED_OR_DROPPED
+2 TRUE_ZERO_PRESERVED
+
+Q12 ZERO_PROVENANCE
+0 NOT_TESTED
+1 TRUE_ZERO_AND_FILLED_ZERO_NOT_DISTINGUISHABLE
+2 DISTINGUISHABLE_WITH_FLAG_OR_ORIGINAL_COLUMN
+3 PARTIAL
+
+
+Q13 INVALID_SENTINEL_273_15
+0 NOT_TESTED
+1 PRESERVED_AS_ORDINARY_VALUE
+2 FILTERED_OR_CHANGED
+3 CONFIG_DEPENDENT
+
+Q14 NUMERIC_STRING_CONVERSION
+0 NOT_TESTED
+1 VALID_NUMERIC_STRINGS_NOT_CONVERTED
+2 VALID_NUMERIC_STRINGS_CONVERTED
+3 MIXED_OR_ERROR
+
+Q15 BAD_NUMERIC_STRING
+0 NOT_TESTED
+1 PRESERVED_AS_TEXT
+2 CONVERTED_TO_NAN
+3 CONVERTED_TO_ZERO
+4 ROW_OR_COLUMN_DROPPED
+5 OTHER
+
+Q16 TEXT_COLUMN
+0 NOT_TESTED
+1 PRESERVED
+2 DROPPED
+3 CHANGED
+
+
+Q17 KEEP_DROP_BEHAVIOR
+0 NOT_TESTED
+1 DROP_ME_NOT_REMOVED_OR_WRONG_COLUMNS_REMOVED
+2 DROP_ME_REMOVED_OTHER_REQUIRED_COLUMNS_PRESERVED
+3 PARTIAL
+
+Q18 SOURCE_ORDER_PROVENANCE
+0 NOT_TESTED
+1 SOURCE_ORDER_COLUMN_DROPPED
+2 SOURCE_ORDER_COLUMN_PRESERVED
+3 CONFIG_DEPENDENT
+
+Q19 MISSING_OR_CLEANING_PROVENANCE
+0 NOT_TESTED
+1 NO_FLAGS_OR_ORIGINAL_VALUE_COLUMNS
+2 PROVENANCE_PRESENT
+3 PARTIAL
+
+Q20 P003_UNMODIFIED_AND_TEST_COMPLETION
+0 ERROR_OR_UNKNOWN
+1 P003_HASH_CHANGED
+2 HASH_UNCHANGED_ALL_REQUIRED_CASES_COMPLETED
+3 HASH_UNCHANGED_PARTIAL_TEST
+
+
+八、Terminal Packet
+
+T004C1-5
+A1-Q1Q2Q3Q4
+A2-Q5Q6Q7Q8
+A3-Q9Q10Q11Q12
+A4-Q13Q14Q15Q16
+A5-Q17Q18Q19Q20
+C-x
+
+规则：
+
+- 使用连字符；
+- 每个A Block恰好4个单字符Code；
+- x为Q1-Q20总和modulo 10；
+- Terminal不输出路径、Hash、Synthetic数据或源码；
+- Debug只写入本地T004C_TEST_LOG.txt；
+- 无法确认必须填0，不得猜测；
+- 即使部分Case失败，也尽量输出完整Packet。
+
+
+九、用户运行步骤
+
+1. 把Copilot返回的完整代码保存为：
+
+t004c_p003_characterization_test.py
+
+2. 放入P003所在目录；
+3. 确认P003原文件未被替换；
+4. 运行：
+
+python t004c_p003_characterization_test.py
+
+5. 只回传Terminal输出的T004C1-5 Packet；
+6. 如果没有Packet，只回传Error Type和Traceback末尾一行。
