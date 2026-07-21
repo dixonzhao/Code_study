@@ -1,0 +1,43 @@
+T002R - COMPACT RETURN CAPSULE
+
+Do not repeat the source-code inspection.
+Read the already generated file:
+
+T002_time_and_missing_value_contract_audit_result.txt
+
+Create a second file:
+
+T002_RETURN_CAPSULE.txt
+
+The complete T002 report remains local. The new return capsule must contain
+only the final conclusions needed for technical decisions.
+
+HARD LIMIT: 1,200 characters total.
+No introduction, explanation, evidence quotation, table, or recommendation.
+Use UNKNOWN when the full report cannot determine an answer.
+Use semicolons to compress multiple values.
+
+Output exactly these fields:
+
+T002_CAPSULE
+P002_ROW=
+FRAMECOUNT_PROPAGATION=
+P002_SORT=keys:;stage:;stable:Y/N/U
+SOURCE_ROW_INDEX_PRESERVED=Y/N/U
+DUPLICATE_FRAMECOUNT=
+FRAMECOUNT_GAP=
+FRAMECOUNT_WRAP_RESET=
+FORWARD_FILL=scope:;unlimited:Y/N/U;grouped_by:;provenance:Y/N/U
+P003_SORT=keys:;stable:Y/N/U;can_disable:Y/N/U
+ZERO_FILL=default:Y/N/U;scope:;true_zero_distinguishable:Y/N/U
+INVALID_SENTINEL_HANDLING=GLOBAL/SIGNAL_SPECIFIC/NONE/UNKNOWN
+P004_SORT=
+LAG_BASIS=ROW/FRAMECOUNT_DIFFERENCE/OTHER/UNKNOWN
+EVENT_CONTINUITY=ADJACENT_ROW/FRAMECOUNT_GAP/CONFIGURABLE/OTHER/UNKNOWN
+P004_FILL_PROVENANCE_VISIBLE=Y/N/U
+FIRST_PROVENANCE_LOSS=program:function_or_stage:short_reason
+RUNTIME_EVIDENCE_NEEDED=max_3_short_items
+CONTRADICTION_OR_UNEXPECTED=NONE_or_one_short_sentence
+
+Do not include company data, sample values, DBC content, source code, or long
+function bodies. Function name is allowed only in FIRST_PROVENANCE_LOSS.
