@@ -3,6 +3,34 @@ T004B - P002 CHARACTERIZATION TEST PROGRAM DESIGN
 本文件是程序设计书，不是执行结果。
 
 
+零、P002先验知识（Copilot必须先理解）
+
+P002是当前项目中的CAN DBC Decoder GUI。
+
+精确源文件名：
+
+matlab_can_time_order_decoder_gui.py
+
+P002不是测试脚本，也不是Analyzer。它的当前职责是：
+
+1. 读取StcamViewer导出的MATLAB-format Raw CAN CSV；
+2. 识别类似ID221_2_8_0的Byte Header；
+3. 分别读取CH1 DBC和CH2 DBC；
+4. 根据用户选择的CAN ID、Channel和Signal Filter解析Message；
+5. 使用当前P002内部Custom DBC Parser执行little/big endian、signed、scale和offset Decode；
+6. 将不同Decoded Signal横向展开；
+7. 当前实现以DateTime/Time[us]建立和排序wide rows；
+8. 当前实现对大多数Signal执行无限forward fill；
+9. 输出文件名通常包含_decoded_time_order；
+10. 输出供P003 Cleaner或P004 Analyzer人工选择使用。
+
+当前业务中Framecount是视频同步的可信基准，但T004B只能使用Synthetic Framecount，不得使用公司真实CAN ID、DBC或数据。
+
+本任务提供的matlab_can_time_order_decoder_gui.py是System Under Test，必须保持只读。需要生成的是一个独立测试程序：
+
+t004b_p002_characterization_test.py
+
+
 一、用户准备
 
 1. 在公司Copilot Web Chat中新开一个对话。
@@ -15,16 +43,16 @@ T004B - P002 CHARACTERIZATION TEST PROGRAM DESIGN
 3. 给Copilot以下指令：
 
 把matlab_can_time_order_decoder_gui.py作为只读实现参考。
-严格按照T004B程序设计书生成完整测试程序，并以可下载Python文件
-t004b_p002_characterization_test.py返回。
+先理解设计书中的“P002先验知识”，再严格按照设计书生成完整测试程序。
 必须调用真实P002实现，不得复制或重新实现Decoder算法。
 不要运行程序，不要预测测试结果，不要直接返回Packet。
-不要只在Chat中粘贴代码块；必须生成可下载的.py文件附件。
+请直接在Chat中输出t004b_p002_characterization_test.py的完整Python源码。
+只输出一个完整Python代码块，不要输出CODE_WRITTEN、解释、摘要或省略号。
 
 
 二、Copilot唯一交付物
 
-Copilot只负责生成并返回可下载文件：
+Copilot只负责在Chat中完整输出以下文件的Python源码：
 
 t004b_p002_characterization_test.py
 
@@ -34,7 +62,9 @@ t004b_p002_characterization_test.py
 - 把修改后的P002作为交付物；
 - 在Chat中直接返回Packet；
 - 声称测试已经运行；
-- 只返回代码文本而不生成Python文件；
+- 回复CODE_WRITTEN但不给出源码；
+- 省略Import、Helper、main或Packet逻辑；
+- 使用“其余代码同上”等省略表达；
 - 使用公司真实CSV或DBC；
 - 复制P002算法到测试脚本并测试复制品；
 - 跳过Case后仍返回PASS；
@@ -297,10 +327,11 @@ C-x
 
 九、用户运行步骤
 
-Copilot生成可下载Python文件后：
+Copilot完整输出Python源码后：
 
-1. 下载t004b_p002_characterization_test.py；
-2. 把它放入原始P002所在目录；
+1. 将Copilot Chat返回的完整代码保存为：
+   t004b_p002_characterization_test.py
+2. 把该Python文件放入原始P002所在目录；
 3. 确认原始P002仍保持原文件名且没有被替换；
 4. 在公司允许的Terminal中进入该目录并运行：
 
