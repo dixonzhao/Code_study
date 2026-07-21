@@ -1,54 +1,76 @@
-T005 - P003 CLEANER DATA CONTRACT PROBE
+T005B - P003 LOCAL CONTRACT INSPECTOR DESIGN
 
-本文件是静态审查问卷，不是程序设计书，不要求生成Python。
+本文件要求Copilot生成Python静态检查程序，不要求Copilot在Chat中自行回答问卷。
 
 
-0. 审查对象
+0. System Under Inspection
 
-精确文件名：
+精确源文件名：
 
 can_analysis_csv_cleaner_gui.py
 
 简称P003。
 
-P003当前工程角色：
+P003当前角色：读取P002输出或兼容CSV/Excel，选择列、再次排序、转换类型、处理空白/NaN，并输出Analyze-ready Dataset。
 
-- 读取P002输出的Decoded Time-order CSV，或用户选择的兼容CSV/Excel；
-- 选择保留列；
-- 再次排序；
-- 转换数据类型；
-- 处理空白/NaN；
-- 输出Analyze-ready Dataset；
-- 通常由用户手动选择输入和输出；
-- P004再由用户手动选择P003输出。
+已知约束：
 
-已确认事实：
-
-- P003与P002存在重复排序；
-- P002执行Unlimited Forward Fill；
-- P003默认会把剩余Blank/NaN填为0；
-- P003没有独立可直接调用的Cleaner Core，真实执行路径与GUI耦合；
-- 目前唯一可信的时间/视频对齐基准是Framecount；
-- DateTime和Time[us]不可信，不得默认作为权威时间轴；
-- 不同Signal的无效值可能不同，0也不总是无效；
-- 本任务只确认现有源码行为，不批准现有行为进入未来正式Pipeline。
+- 唯一可信的视频/数据对齐基准是Framecount；
+- DateTime和Time[us]不可信，不得作为未来权威时间轴；
+- P002已经执行Unlimited Forward Fill；
+- 现有静态审查表明P003默认还会把Blank/NaN填为0；
+- 不同Signal可能使用不同无效值，0不总是无效；
+- 本任务只检查现有源码，不批准、不修改现有行为。
 
 
-1. Copilot Web Chat操作
+1. Copilot Web Chat输入与唯一交付物
 
-在新的Copilot Web Chat中同时提供：
+在新Copilot Web Chat中同时提供：
 
 1. can_analysis_csv_cleaner_gui.py
-2. 本T005文件
+2. 本T005B设计书
 
-指令：
+给Copilot：
 
-把P003作为只读System Under Review。只进行静态源码审查，不运行、不修改、不重构、不生成Python或自然语言报告。严格按照T005的Q1-Q40，从源码可见事实选择Code。无法确认填0。最后只输出Machine Packet和Checksum，不输出解释。
+把P003作为只读System Under Inspection。根据P003真实源码生成一个本地静态检查程序。不要在Chat中直接回答Q1-Q40，不要运行，不要修改P003。
+
+直接在Chat中输出以下文件的完整Python源码：
+
+t005b_p003_contract_inspector.py
+
+只输出一个完整Python代码块，不输出解释、摘要、CODE_WRITTEN、文件链接或Packet预测。
 
 
-2. Machine Code
+2. 检查程序实现要求
 
-Q1 EXACT_P003_FILE_RECOGNIZED
+检查程序放在P003同一目录并运行：
+
+python t005b_p003_contract_inspector.py
+
+程序必须：
+
+1. 使用Python标准库完成，不要求pandas等第三方库；
+2. 找到精确P003文件名；
+3. 用tokenize.open或安全编码Fallback读取源码；
+4. 计算运行前SHA-256；
+5. 使用ast.parse分析Module、FunctionDef、ClassDef、Call、keyword、Attribute和main guard；
+6. 结合AST与源码上下文检查read_csv、read_excel、fillna、replace、dropna、sort_values、to_numeric、ffill、drop_duplicates、to_csv、to_excel、文件对话框和GUI变量；
+7. 不得仅因某个Keyword出现就直接判定行为，必须检查所在函数、参数和控制分支；
+8. 对每个非0答案，在本地T005B_EVIDENCE_LOG.txt记录：Q编号、Code、函数/类名、行号和不超过三行的源码证据；
+9. 无法从源码可靠确认时填0，不得猜测；
+10. 不Import或执行P003，不启动GUI；
+11. 不修改P003；
+12. 计算运行后SHA-256；
+13. Terminal只输出Machine Packet；
+14. Exception写入T005B_EVIDENCE_LOG.txt，Terminal仍尽量输出Packet；
+15. Checksum由程序自动计算。
+
+Copilot必须根据附件中的真实P003结构定制检查器，不能只写一个对任意文件进行简单Keyword计数的通用脚本。
+
+
+3. Machine Code Q1-Q40
+
+Q1 EXACT_P003_FILE_FOUND
 0 ERROR_OR_UNKNOWN
 1 NO
 2 YES
@@ -61,7 +83,7 @@ Q2 GUI_FRAMEWORK
 
 Q3 MODULE_IMPORT_SAFETY
 0 UNKNOWN
-1 IMPORT_LAUNCHES_GUI_OR_MAIN
+1 IMPORT_WOULD_LAUNCH_GUI_OR_MAIN
 2 MAIN_GUARD_PRESENT
 3 PARTIAL_OR_CONDITIONAL
 
@@ -288,7 +310,7 @@ Q35 ORDER_OF_ZERO_FILL_AND_SORT
 
 Q36 OUTPUT_SCHEMA_DEPENDS_ON_GUI_OPTIONS
 0 UNKNOWN
-1 NO_FIXED_SCHEMA_BUT_OPTIONS_CHANGE_COLUMNS
+1 NO_FIXED_SCHEMA_AND_OPTIONS_CHANGE_COLUMNS
 2 FIXED_SCHEMA
 3 PARTIAL_FIXED_CORE_PLUS_OPTIONS
 
@@ -306,10 +328,10 @@ Q38 CORE_EXTRACTION_WITHOUT_BEHAVIOR_CHANGE
 2 FEASIBLE_SMALL_REFACTOR
 3 FEASIBLE_BROAD_REFACTOR
 
-Q39 SOURCE_FILE_MODIFIED_BY_REVIEW
+Q39 P003_HASH_UNCHANGED
 0 UNKNOWN
-1 YES
-2 NO
+1 NO
+2 YES
 
 Q40 DEFAULT_OUTPUT_NAME
 0 UNKNOWN
@@ -319,9 +341,9 @@ Q40 DEFAULT_OUTPUT_NAME
 4 MIXED
 
 
-3. Terminal Packet
+4. Terminal Packet
 
-T005C1-10
+T005B1-10
 A1-Q1Q2Q3Q4
 A2-Q5Q6Q7Q8
 A3-Q9Q10Q11Q12
@@ -336,14 +358,17 @@ C-x
 
 规则：
 
-- 每个A Block恰好4个单字符Code；
+- 每个A Block恰好四个单字符Code；
 - 使用连字符；
 - x为Q1-Q40数值总和modulo 10；
-- 无法从源码确认填0，不得猜测；
-- 只输出Packet，不输出自然语言；
-- 不输出路径、源码、公司数据或Signal内容。
+- Terminal不得输出路径、源码、Hash或Evidence；
+- Evidence只保存在公司电脑本地T005B_EVIDENCE_LOG.txt。
 
 
-4. 用户回传
+5. 用户运行步骤
 
-只需把T005C1-10 Packet逐行输入给ChatGPT。
+1. 保存Copilot返回的完整代码为t005b_p003_contract_inspector.py；
+2. 放入P003所在文件夹；
+3. 运行：python t005b_p003_contract_inspector.py；
+4. 回传T005B1-10 Packet；
+5. 若没有Packet，只回传Exception类型和Traceback最后一行。
