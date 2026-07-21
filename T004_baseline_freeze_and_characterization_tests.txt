@@ -2,6 +2,32 @@ T004 - BASELINE FREEZE AND SYNTHETIC CHARACTERIZATION TESTS
 
 MODE - IMPLEMENT TESTS, DO NOT MODIFY P001-P004
 
+STOP - COPILOT DELIVERY GATE
+
+本轮Copilot唯一允许的交付物是一个实际写入当前VS Code Workspace的Python文件：
+
+t004_characterization_tests.py
+
+必须使用VS Code/Copilot的文件创建或编辑能力直接创建该文件。
+
+Copilot在这一步禁止：
+
+- 在Chat中直接回答T004B1-8 Packet；
+- 根据源码猜测测试结果；
+- 只粘贴Python代码块而不创建文件；
+- 声称已经运行脚本；
+- 创建自然语言报告。
+
+成功创建文件后，Copilot Chat只回复：
+
+FILE_CREATED
+
+如果当前Copilot模式没有写入Workspace文件的能力，只回复：
+
+CANNOT_CREATE_FILE
+
+看到FILE_CREATED以后，Copilot任务立即结束。后续运行由用户完成。
+
 目标：
 
 1. 冻结四个现有程序的当前版本；
@@ -12,13 +38,14 @@ MODE - IMPLEMENT TESTS, DO NOT MODIFY P001-P004
 
 执行角色（必须严格遵守）：
 
-1. Copilot只负责生成一个Python脚本：
+1. Copilot只负责在Workspace中实际创建一个Python脚本：
    t004_characterization_tests.py
-2. Copilot不得声称已经复制文件、计算Hash、运行测试或得到最终Packet。
-3. 用户负责把脚本保存在P001-P004所在目录，并在VS Code Terminal实际运行。
-4. baseline freeze、SHA-256、Synthetic Input创建、测试执行和Packet计算全部由脚本在运行时完成。
-5. 最终Packet只能来自Python Terminal的真实运行输出，不能由Copilot Chat根据源码推测。
-6. 如果Copilot无法让某个Case调用真实程序Core，脚本必须为该Case输出NOT_TESTED/NOT_TESTABLE Code。
+2. Copilot不得在Chat中只贴代码；必须创建真实.py文件。
+3. Copilot不得声称已经复制文件、计算Hash、运行测试或得到最终Packet。
+4. 用户确认脚本文件存在后，在VS Code Terminal实际运行。
+5. baseline freeze、SHA-256、Synthetic Input创建、测试执行和Packet计算全部由脚本在运行时完成。
+6. 最终Packet只能来自Python Terminal的真实运行输出，不能由Copilot Chat根据源码推测。
+7. 如果Copilot无法让某个Case调用真实程序Core，脚本必须为该Case输出NOT_TESTED/NOT_TESTABLE Code。
 
 Copilot完成本任务时只需要创建或更新上述Python脚本。不要在Chat中生成自然语言总结或伪造测试结果。
 
@@ -362,7 +389,7 @@ Q32 CONTRADICTION_OR_UNEXPECTED
 1 PRESENT_REQUIRES_TARGETED_FOLLOWUP
 
 
-RETURN FORMAT
+PYTHON TERMINAL RUNTIME OUTPUT FORMAT
 
 T004B1-8
 A1-Q1Q2Q3Q4
@@ -379,6 +406,7 @@ Rules:
 
 - 上述10行必须由t004_characterization_tests.py真实运行后在Terminal输出；
 - Copilot Chat不得自行填写或预测这些Code；
+- Copilot文件创建阶段不得输出这一Packet；
 - 使用连字符，不使用冒号；
 - 每个A Block正好4个单字符Code；
 - 不输出解释、逗号、空格、Markdown或自然语言报告；
