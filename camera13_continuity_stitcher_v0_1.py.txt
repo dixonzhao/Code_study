@@ -1,0 +1,910 @@
+#!/usr/bin/env python3
+"""
+Camera 1 / Camera 3 Continuity Stitcher v0.1
+
+Experiment: RTS001-E01
+
+Purpose
+-------
+Construct one provisional canonical Stereo Camera target from Camera 1 and
+Camera 3 after a configurable starting FrameCount. The selection uses only
+Camera-side temporal continuity and validity. Radar values are deliberately
+not accepted as inputs, so the procedure cannot select whichever Camera value
+happens to be closer to Radar.
+
+This is an experimental MVP utility, not an AKBPTS replacement and not a
+root-cause detector. Ambiguous intervals remain visible and should not be used
+for baseline fitting until reviewed.
+
+Input
+-----
+CSV/TXT/XLSX/XLS with FrameCount and Camera 1 / Camera 3 Distance columns.
+Optional paired Camera fields can be mapped in the GUI and are copied from the
+selected source into canonical output columns.
+
+Output (beside input)
+---------------------
+- camera13_continuity_stitched_v0_1.csv
+- camera13_continuity_review_windows_v0_1.csv
+- C13S001_return_capsule.txt
+"""
+
+from __future__ import annotations
+
+import csv
+import math
+import re
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+VERSION = "0.1"
+NONE_COLUMN = "<NONE>"
+SOURCE_NAMES = {0: "CAM1", 1: "CAM3", -1: "NONE"}
+
+
+OPTIONAL_PAIRS = [
+    ("RelativeSpeed", ("relative", "speed")),
+    ("LateralPosition", ("lateral", "position")),
+    ("LateralSpeed", ("lateral", "speed")),
+    ("ObjectDetectionType", ("object", "detection", "type")),
+    ("ObjectType", ("object", "type")),
+    ("SwitchingFlag", ("switching", "flag")),
+    ("MessageCounter", ("message", "counter")),
+    ("SignalAge", ("signal", "age")),
+]
+
+
+@dataclass
+class Config:
+    frame_column: str
+    cam1_distance: str
+    cam3_distance: str
+    optional_columns: dict[str, tuple[str | None, str | None]]
+    start_frame: float
+    frame_rate: float
+    invalid_values: list[float]
+    minimum_distance: float
+    maximum_distance: float
+    maximum_signal_age: float
+    continuity_scale: float
+    confidence_jump_limit: float
+    switch_penalty: float
+    confidence_margin: float
+    initial_source: str
+    review_merge_gap: int
+
+
+def normalized_name(value: object) -> str:
+    text = "" if value is None else str(value)
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+
+def choose_input_file() -> Path:
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    root.withdraw()
+    root.update()
+    selected = filedialog.askopenfilename(
+        title="Select the multi-camera CSV or Excel file",
+        filetypes=[
+            ("Data files", "*.csv *.txt *.xlsx *.xls"),
+            ("CSV files", "*.csv"),
+            ("Excel files", "*.xlsx *.xls"),
+            ("All files", "*.*"),
+        ],
+    )
+    root.destroy()
+    if not selected:
+        raise RuntimeError("No input file was selected.")
+    return Path(selected)
+
+
+def read_input(path: Path):
+    try:
+        import pandas as pd
+    except ImportError as exc:
+        raise RuntimeError("pandas is required in the approved Python environment.") from exc
+
+    if path.suffix.lower() in {".xlsx", ".xls"}:
+        workbook = pd.ExcelFile(path)
+        if not workbook.sheet_names:
+            raise RuntimeError("The selected workbook has no readable sheet.")
+        return pd.read_excel(path, sheet_name=workbook.sheet_names[0], dtype=object)
+
+    encodings = ["utf-8-sig", "utf-8", "cp932", "shift_jis", "latin-1"]
+    last_error: Exception | None = None
+    for encoding in encodings:
+        try:
+            return pd.read_csv(
+                path,
+                sep=None,
+                engine="python",
+                encoding=encoding,
+            )
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"Input file could not be read: {last_error}")
+
+
+def find_guess(columns: list[str], source_tokens: tuple[str, ...], field_tokens: tuple[str, ...]) -> str:
+    ranked: list[tuple[int, str]] = []
+    for column in columns:
+        compact = normalized_name(column)
+        source_score = sum(1 for token in source_tokens if normalized_name(token) in compact)
+        field_score = sum(1 for token in field_tokens if normalized_name(token) in compact)
+        if source_score and field_score == len(field_tokens):
+            ranked.append((source_score * 10 + field_score, column))
+    return max(ranked, default=(0, NONE_COLUMN))[1]
+
+
+def guess_frame_column(columns: list[str]) -> str:
+    for column in columns:
+        compact = normalized_name(column)
+        if "framecount" in compact:
+            return column
+    for column in columns:
+        if "frame" in normalized_name(column):
+            return column
+    return columns[0] if columns else NONE_COLUMN
+
+
+def parse_float_list(text: str) -> list[float]:
+    values: list[float] = []
+    for item in re.split(r"[,;\s]+", text.strip()):
+        if item:
+            values.append(float(item))
+    return values
+
+
+def show_mapping_dialog(columns: list[str]) -> Config:
+    import tkinter as tk
+    from tkinter import messagebox, ttk
+
+    result: dict[str, Any] = {}
+    root = tk.Tk()
+    root.title("Camera 1 / Camera 3 Continuity Stitcher v0.1")
+    root.geometry("980x820")
+
+    canvas = tk.Canvas(root, highlightthickness=0)
+    scrollbar = ttk.Scrollbar(root, orient="vertical", command=canvas.yview)
+    body = ttk.Frame(canvas, padding=14)
+    body.bind("<Configure>", lambda event: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.create_window((0, 0), window=body, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+    canvas.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+
+    ttk.Label(
+        body,
+        text="RTS001-E01: Camera 1 / Camera 3 continuity-based target reconstruction",
+        font=("TkDefaultFont", 13, "bold"),
+    ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
+    ttk.Label(
+        body,
+        text=(
+            "Radar is intentionally not used. Map Camera-side columns only. "
+            "Optional paired fields are copied from the selected source."
+        ),
+        wraplength=900,
+    ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(0, 12))
+
+    all_choices = columns
+    optional_choices = [NONE_COLUMN] + columns
+    row = 2
+
+    variables: dict[str, tk.StringVar] = {}
+
+    def add_combo(label: str, key: str, choices: list[str], default: str, column: int, current_row: int):
+        ttk.Label(body, text=label).grid(row=current_row, column=column, sticky="w", padx=(0, 8), pady=3)
+        variable = tk.StringVar(value=default if default in choices else choices[0])
+        combo = ttk.Combobox(body, textvariable=variable, values=choices, state="normal", width=48)
+        combo.grid(row=current_row, column=column + 1, sticky="ew", padx=(0, 14), pady=3)
+        variables[key] = variable
+
+    frame_guess = guess_frame_column(columns)
+    cam1_distance_guess = find_guess(columns, ("0x221", "221", "cam1", "camera1"), ("distance",))
+    cam3_distance_guess = find_guess(columns, ("0x251", "251", "cam3", "camera3"), ("distance",))
+
+    add_combo("FrameCount column", "frame", all_choices, frame_guess, 0, row)
+    row += 1
+    add_combo("CAM1 Distance (0x221)", "cam1_distance", all_choices, cam1_distance_guess, 0, row)
+    row += 1
+    add_combo("CAM3 Distance (0x251)", "cam3_distance", all_choices, cam3_distance_guess, 0, row)
+    row += 1
+
+    ttk.Separator(body).grid(row=row, column=0, columnspan=4, sticky="ew", pady=10)
+    row += 1
+    ttk.Label(body, text="Optional paired Camera fields", font=("TkDefaultFont", 11, "bold")).grid(
+        row=row, column=0, columnspan=4, sticky="w"
+    )
+    row += 1
+    ttk.Label(body, text="Field").grid(row=row, column=0, sticky="w")
+    ttk.Label(body, text="CAM1 / 0x221").grid(row=row, column=1, sticky="w")
+    ttk.Label(body, text="Field").grid(row=row, column=2, sticky="w")
+    ttk.Label(body, text="CAM3 / 0x251").grid(row=row, column=3, sticky="w")
+    row += 1
+
+    optional_variables: dict[str, tuple[tk.StringVar, tk.StringVar]] = {}
+    for output_name, tokens in OPTIONAL_PAIRS:
+        cam1_guess = find_guess(columns, ("0x221", "221", "cam1", "camera1"), tokens)
+        cam3_guess = find_guess(columns, ("0x251", "251", "cam3", "camera3"), tokens)
+        ttk.Label(body, text=output_name).grid(row=row, column=0, sticky="w", pady=3)
+        var1 = tk.StringVar(value=cam1_guess if cam1_guess in optional_choices else NONE_COLUMN)
+        ttk.Combobox(body, textvariable=var1, values=optional_choices, state="normal", width=38).grid(
+            row=row, column=1, sticky="ew", padx=(0, 12), pady=3
+        )
+        ttk.Label(body, text=output_name).grid(row=row, column=2, sticky="w", pady=3)
+        var3 = tk.StringVar(value=cam3_guess if cam3_guess in optional_choices else NONE_COLUMN)
+        ttk.Combobox(body, textvariable=var3, values=optional_choices, state="normal", width=38).grid(
+            row=row, column=3, sticky="ew", pady=3
+        )
+        optional_variables[output_name] = (var1, var3)
+        row += 1
+
+    ttk.Separator(body).grid(row=row, column=0, columnspan=4, sticky="ew", pady=10)
+    row += 1
+    ttk.Label(body, text="Parameters", font=("TkDefaultFont", 11, "bold")).grid(
+        row=row, column=0, columnspan=4, sticky="w"
+    )
+    row += 1
+
+    parameter_defaults = [
+        ("Start FrameCount", "start_frame", "7400"),
+        ("Frame rate (frames/s)", "frame_rate", "20"),
+        ("Invalid Distance values", "invalid_values", "0, 327.66"),
+        ("Minimum valid Distance (m)", "minimum_distance", "0.05"),
+        ("Maximum valid Distance (m)", "maximum_distance", "300"),
+        ("Maximum SignalAge (if mapped)", "maximum_signal_age", "1"),
+        ("Continuity scale m/frame (0=auto)", "continuity_scale", "0"),
+        ("Confident jump limit m/frame (0=auto)", "confidence_jump_limit", "0"),
+        ("Source-switch penalty", "switch_penalty", "1.5"),
+        ("Confidence advantage margin (m/frame)", "confidence_margin", "0.5"),
+        ("Review-window merge gap (frames)", "review_merge_gap", "100"),
+    ]
+    parameter_variables: dict[str, tk.StringVar] = {}
+    for index, (label, key, default) in enumerate(parameter_defaults):
+        display_column = 0 if index % 2 == 0 else 2
+        display_row = row + index // 2
+        ttk.Label(body, text=label).grid(row=display_row, column=display_column, sticky="w", pady=3)
+        variable = tk.StringVar(value=default)
+        ttk.Entry(body, textvariable=variable, width=28).grid(
+            row=display_row, column=display_column + 1, sticky="w", padx=(0, 14), pady=3
+        )
+        parameter_variables[key] = variable
+    row += (len(parameter_defaults) + 1) // 2
+
+    ttk.Label(body, text="Initial source").grid(row=row, column=0, sticky="w", pady=3)
+    initial_source_var = tk.StringVar(value="AUTO")
+    ttk.Combobox(
+        body,
+        textvariable=initial_source_var,
+        values=["AUTO", "CAM1", "CAM3"],
+        state="readonly",
+        width=18,
+    ).grid(row=row, column=1, sticky="w", pady=3)
+    row += 1
+
+    ttk.Label(
+        body,
+        text=(
+            "Recommended first run: keep defaults. Use CAM1 or CAM3 as the initial source only "
+            "when the video clearly identifies the target at FrameCount 7400."
+        ),
+        wraplength=900,
+    ).grid(row=row, column=0, columnspan=4, sticky="w", pady=(4, 12))
+    row += 1
+
+    def submit():
+        try:
+            frame_column = variables["frame"].get()
+            cam1_distance = variables["cam1_distance"].get()
+            cam3_distance = variables["cam3_distance"].get()
+            for selected_column in (frame_column, cam1_distance, cam3_distance):
+                if selected_column not in columns:
+                    raise ValueError(f"Column does not exist: {selected_column}")
+            if len({frame_column, cam1_distance, cam3_distance}) != 3:
+                raise ValueError("FrameCount, CAM1 Distance, and CAM3 Distance must be different columns.")
+
+            optional_columns: dict[str, tuple[str | None, str | None]] = {}
+            for name, (var1, var3) in optional_variables.items():
+                value1 = None if var1.get() == NONE_COLUMN else var1.get()
+                value3 = None if var3.get() == NONE_COLUMN else var3.get()
+                for selected_column in (value1, value3):
+                    if selected_column is not None and selected_column not in columns:
+                        raise ValueError(f"Column does not exist: {selected_column}")
+                if (value1 is None) != (value3 is None):
+                    raise ValueError(f"{name}: map both CAM1 and CAM3 columns, or leave both as <NONE>.")
+                optional_columns[name] = (value1, value3)
+
+            config = Config(
+                frame_column=frame_column,
+                cam1_distance=cam1_distance,
+                cam3_distance=cam3_distance,
+                optional_columns=optional_columns,
+                start_frame=float(parameter_variables["start_frame"].get()),
+                frame_rate=float(parameter_variables["frame_rate"].get()),
+                invalid_values=parse_float_list(parameter_variables["invalid_values"].get()),
+                minimum_distance=float(parameter_variables["minimum_distance"].get()),
+                maximum_distance=float(parameter_variables["maximum_distance"].get()),
+                maximum_signal_age=float(parameter_variables["maximum_signal_age"].get()),
+                continuity_scale=float(parameter_variables["continuity_scale"].get()),
+                confidence_jump_limit=float(parameter_variables["confidence_jump_limit"].get()),
+                switch_penalty=float(parameter_variables["switch_penalty"].get()),
+                confidence_margin=float(parameter_variables["confidence_margin"].get()),
+                initial_source=initial_source_var.get(),
+                review_merge_gap=int(parameter_variables["review_merge_gap"].get()),
+            )
+            if config.frame_rate <= 0:
+                raise ValueError("Frame rate must be greater than zero.")
+            if config.maximum_distance <= config.minimum_distance:
+                raise ValueError("Maximum Distance must be greater than Minimum Distance.")
+            if config.switch_penalty < 0 or config.confidence_margin < 0:
+                raise ValueError("Penalty and margin must not be negative.")
+            result["config"] = config
+            root.destroy()
+        except Exception as exc:
+            messagebox.showerror("Configuration error", str(exc))
+
+    ttk.Button(body, text="Run continuity stitching", command=submit).grid(
+        row=row, column=0, columnspan=4, pady=14
+    )
+    for index in range(4):
+        body.columnconfigure(index, weight=1)
+    root.mainloop()
+
+    if "config" not in result:
+        raise RuntimeError("Operation was cancelled.")
+    return result["config"]
+
+
+def numeric_series(frame, column: str):
+    import pandas as pd
+
+    return pd.to_numeric(frame[column], errors="coerce")
+
+
+def build_valid_mask(values, ages, config: Config):
+    import numpy as np
+
+    array = values.to_numpy(dtype=float)
+    valid = np.isfinite(array)
+    valid &= array >= config.minimum_distance
+    valid &= array <= config.maximum_distance
+    for invalid_value in config.invalid_values:
+        valid &= ~np.isclose(array, invalid_value, rtol=0.0, atol=1e-4, equal_nan=False)
+    if ages is not None:
+        age_array = ages.to_numpy(dtype=float)
+        valid &= np.isfinite(age_array)
+        valid &= age_array >= 0
+        valid &= age_array <= config.maximum_signal_age
+    return valid
+
+
+def estimate_continuity_scale(frames, distances: list[Any], valid_masks: list[Any]) -> float:
+    import numpy as np
+
+    samples: list[float] = []
+    frame_array = frames.to_numpy(dtype=float)
+    for values, valid in zip(distances, valid_masks):
+        array = values.to_numpy(dtype=float)
+        valid_pair = valid[1:] & valid[:-1]
+        delta_frame = frame_array[1:] - frame_array[:-1]
+        valid_pair &= delta_frame > 0
+        valid_pair &= delta_frame <= 5
+        step = np.abs(array[1:] - array[:-1]) / np.maximum(delta_frame, 1)
+        usable = step[valid_pair & np.isfinite(step) & (step <= 10)]
+        samples.extend(usable.tolist())
+    if not samples:
+        return 0.75
+    sample_array = np.asarray(samples, dtype=float)
+    median = float(np.median(sample_array))
+    mad = float(np.median(np.abs(sample_array - median)))
+    robust_limit = median + 8.0 * 1.4826 * mad
+    trimmed = sample_array[sample_array <= max(robust_limit, 0.25)]
+    if len(trimmed) < 20:
+        trimmed = sample_array[sample_array <= np.percentile(sample_array, 90)]
+    q99 = float(np.percentile(trimmed, 99)) if len(trimmed) else median
+    return float(min(2.5, max(0.30, q99 * 1.5 + 0.05)))
+
+
+def huber_cost(normalized_error: float) -> float:
+    value = abs(float(normalized_error))
+    return 0.5 * value * value if value <= 1.0 else value - 0.5
+
+
+def contiguous_true_segments(mask) -> list[tuple[int, int]]:
+    segments: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, value in enumerate(mask):
+        if value and start is None:
+            start = index
+        elif not value and start is not None:
+            segments.append((start, index))
+            start = None
+    if start is not None:
+        segments.append((start, len(mask)))
+    return segments
+
+
+def select_path(frames, distances: list[Any], valid_masks: list[Any], config: Config, scale: float):
+    import numpy as np
+
+    frame_array = frames.to_numpy(dtype=float)
+    value_arrays = [series.to_numpy(dtype=float) for series in distances]
+    any_valid = valid_masks[0] | valid_masks[1]
+    selected = np.full(len(frame_array), -1, dtype=np.int8)
+
+    segments = contiguous_true_segments(any_valid)
+    for segment_index, (start, end) in enumerate(segments):
+        length = end - start
+        dp = np.full((length, 2), np.inf, dtype=float)
+        previous_state = np.full((length, 2), -1, dtype=np.int8)
+
+        for state in (0, 1):
+            if not valid_masks[state][start]:
+                continue
+            seed_penalty = 0.0
+            if segment_index == 0 and config.initial_source in {"CAM1", "CAM3"}:
+                requested = 0 if config.initial_source == "CAM1" else 1
+                if state != requested:
+                    seed_penalty = 50.0
+            dp[0, state] = seed_penalty
+
+        if not np.isfinite(dp[0]).any():
+            continue
+
+        for local_index in range(1, length):
+            global_index = start + local_index
+            previous_global = global_index - 1
+            frame_delta = max(frame_array[global_index] - frame_array[previous_global], 1.0)
+            for current_state in (0, 1):
+                if not valid_masks[current_state][global_index]:
+                    continue
+                current_value = value_arrays[current_state][global_index]
+                for prior_state in (0, 1):
+                    if not math.isfinite(dp[local_index - 1, prior_state]):
+                        continue
+                    prior_value = value_arrays[prior_state][previous_global]
+                    if valid_masks[prior_state][previous_global]:
+                        transition_error = abs(current_value - prior_value) / frame_delta
+                        transition_cost = huber_cost(transition_error / max(scale, 1e-9))
+                    else:
+                        transition_cost = 1.0
+                    if current_state != prior_state:
+                        transition_cost += config.switch_penalty
+                    candidate_cost = dp[local_index - 1, prior_state] + transition_cost
+                    if candidate_cost < dp[local_index, current_state]:
+                        dp[local_index, current_state] = candidate_cost
+                        previous_state[local_index, current_state] = prior_state
+
+        final_state = int(np.argmin(dp[-1]))
+        if not math.isfinite(dp[-1, final_state]):
+            continue
+        for local_index in range(length - 1, -1, -1):
+            selected[start + local_index] = final_state
+            if local_index > 0:
+                final_state = int(previous_state[local_index, final_state])
+                if final_state not in (0, 1):
+                    break
+    return selected
+
+
+def classify_selection(
+    frames,
+    distances,
+    valid_masks,
+    selected,
+    confidence_limit: float,
+    margin: float,
+    initial_source: str,
+):
+    import numpy as np
+
+    frame_array = frames.to_numpy(dtype=float)
+    value_arrays = [series.to_numpy(dtype=float) for series in distances]
+    statuses: list[str] = []
+    reasons: list[str] = []
+    switch_flags = np.zeros(len(selected), dtype=np.int8)
+    errors = np.full((len(selected), 2), np.nan, dtype=float)
+    previous_selected_index: int | None = None
+    previous_path_source = -1
+
+    for index, source in enumerate(selected):
+        if source not in (0, 1):
+            statuses.append("INVALID")
+            reasons.append("BOTH_DISTANCE_INVALID")
+            previous_path_source = -1
+            continue
+
+        if previous_path_source in (0, 1) and source != previous_path_source:
+            switch_flags[index] = 1
+        previous_path_source = int(source)
+
+        valid_count = int(valid_masks[0][index]) + int(valid_masks[1][index])
+        if previous_selected_index is None:
+            if valid_count == 1:
+                statuses.append("CONFIDENT")
+                reasons.append(f"SEED_ONLY_{SOURCE_NAMES[source]}_VALID")
+            elif initial_source in {"CAM1", "CAM3"}:
+                statuses.append("CONFIDENT")
+                reasons.append(f"MANUAL_SEED_{SOURCE_NAMES[source]}_BOTH_VALID")
+            else:
+                statuses.append("AMBIGUOUS")
+                reasons.append(f"AUTO_SEED_{SOURCE_NAMES[source]}_BOTH_VALID")
+            previous_selected_index = index
+            continue
+
+        prior_source = int(selected[previous_selected_index])
+        prior_value = value_arrays[prior_source][previous_selected_index]
+        frame_delta = max(frame_array[index] - frame_array[previous_selected_index], 1.0)
+        for candidate in (0, 1):
+            if valid_masks[candidate][index]:
+                errors[index, candidate] = abs(value_arrays[candidate][index] - prior_value) / frame_delta
+
+        selected_error = errors[index, source]
+        alternative = 1 - int(source)
+        alternative_error = errors[index, alternative]
+
+        if valid_count == 1:
+            if math.isfinite(selected_error) and selected_error <= confidence_limit:
+                statuses.append("CONFIDENT")
+                reasons.append(
+                    f"{'SWITCH' if switch_flags[index] else 'STAY'}_ONLY_{SOURCE_NAMES[source]}_VALID"
+                )
+            else:
+                statuses.append("AMBIGUOUS")
+                reasons.append(f"ONLY_{SOURCE_NAMES[source]}_VALID_BUT_LARGE_JUMP")
+        elif not math.isfinite(selected_error):
+            statuses.append("AMBIGUOUS")
+            reasons.append("SELECTED_CONTINUITY_UNAVAILABLE")
+        elif selected_error > confidence_limit:
+            statuses.append("AMBIGUOUS")
+            reasons.append(
+                f"{'SWITCH' if switch_flags[index] else 'STAY'}_LARGE_CONTINUITY_JUMP"
+            )
+        elif math.isfinite(alternative_error) and alternative_error - selected_error < margin:
+            statuses.append("AMBIGUOUS")
+            reasons.append("BOTH_CAMERAS_PLAUSIBLE")
+        else:
+            statuses.append("CONFIDENT")
+            reasons.append(
+                f"CONTINUITY_{'SWITCH' if switch_flags[index] else 'STAY'}_{SOURCE_NAMES[source]}"
+            )
+
+        # Ambiguous points do not update the continuity reference. This avoids
+        # allowing one uncertain jump to redefine the following trajectory.
+        if statuses[-1] == "CONFIDENT":
+            previous_selected_index = index
+        elif index - previous_selected_index >= 5:
+            # Recover after a persistent changed trajectory, but retain the
+            # ambiguous label on the re-seeding frame.
+            previous_selected_index = index
+
+    return statuses, reasons, switch_flags, errors
+
+
+def collapse_to_last_row_per_frame(frame, frame_column: str):
+    import pandas as pd
+
+    work = frame.copy()
+    work.insert(0, "__C13S_InputOrder", range(len(work)))
+    work[frame_column] = pd.to_numeric(work[frame_column], errors="coerce")
+    work = work[work[frame_column].notna()].copy()
+    work = work.sort_values([frame_column, "__C13S_InputOrder"], kind="stable")
+    counts = work.groupby(frame_column, sort=False).size().rename("__C13S_SourceRowCount")
+    collapsed = work.groupby(frame_column, sort=False, as_index=False).tail(1).copy()
+    collapsed["__C13S_SourceRowCount"] = collapsed[frame_column].map(counts).astype(int)
+    collapsed = collapsed.sort_values(frame_column, kind="stable").reset_index(drop=True)
+    return collapsed
+
+
+def build_review_windows(output, frame_column: str, merge_gap: int):
+    import pandas as pd
+
+    interesting = output[
+        (output["CanonicalSelectionStatus"] != "CONFIDENT")
+        | (output["CanonicalSwitchFlag"] == 1)
+    ].copy()
+    columns = [
+        "WindowID",
+        "StartFrame",
+        "EndFrame",
+        "SpanFrames",
+        "FlaggedFrameCount",
+        "AmbiguousCount",
+        "InvalidCount",
+        "SwitchCount",
+        "MaximumCanonicalContinuityError",
+        "Reasons",
+    ]
+    if interesting.empty:
+        return pd.DataFrame(columns=columns)
+
+    windows: list[dict[str, Any]] = []
+    current_rows: list[Any] = []
+    previous_frame: float | None = None
+
+    def finish_window(rows: list[Any]) -> None:
+        if not rows:
+            return
+        start_frame = float(rows[0][frame_column])
+        end_frame = float(rows[-1][frame_column])
+        statuses = [str(row["CanonicalSelectionStatus"]) for row in rows]
+        reasons = sorted({str(row["CanonicalSelectionReason"]) for row in rows})
+        errors = [
+            float(row["CanonicalContinuityError"])
+            for row in rows
+            if row["CanonicalContinuityError"] == row["CanonicalContinuityError"]
+        ]
+        windows.append(
+            {
+                "WindowID": f"W{len(windows) + 1:03d}",
+                "StartFrame": int(start_frame) if start_frame.is_integer() else start_frame,
+                "EndFrame": int(end_frame) if end_frame.is_integer() else end_frame,
+                "SpanFrames": end_frame - start_frame + 1,
+                "FlaggedFrameCount": len(rows),
+                "AmbiguousCount": statuses.count("AMBIGUOUS"),
+                "InvalidCount": statuses.count("INVALID"),
+                "SwitchCount": sum(int(row["CanonicalSwitchFlag"]) for row in rows),
+                "MaximumCanonicalContinuityError": max(errors) if errors else float("nan"),
+                "Reasons": ";".join(reasons),
+            }
+        )
+
+    for _, row in interesting.iterrows():
+        frame_value = float(row[frame_column])
+        if previous_frame is not None and frame_value - previous_frame > merge_gap:
+            finish_window(current_rows)
+            current_rows = []
+        current_rows.append(row)
+        previous_frame = frame_value
+    finish_window(current_rows)
+    return pd.DataFrame(windows, columns=columns)
+
+
+def write_capsule(
+    path: Path,
+    input_path: Path,
+    output,
+    windows,
+    config: Config,
+    scale: float,
+    confidence_limit: float,
+    collapsed_rows: int,
+) -> None:
+    import numpy as np
+
+    status_counts = output["CanonicalSelectionStatus"].value_counts().to_dict()
+    source_counts = output["CanonicalCameraSource"].value_counts().to_dict()
+    lines = [
+        "C13S001-v0.1",
+        f"INPUT-{input_path.name}",
+        f"ROWS-{len(output)}",
+        f"COLLAPSED_EXTRA_ROWS-{collapsed_rows}",
+        f"START_FRAME-{config.start_frame:g}",
+        f"CONTINUITY_SCALE-{scale:.6g}",
+        f"CONFIDENCE_LIMIT-{confidence_limit:.6g}",
+        f"CONFIDENT-{int(status_counts.get('CONFIDENT', 0))}",
+        f"AMBIGUOUS-{int(status_counts.get('AMBIGUOUS', 0))}",
+        f"INVALID-{int(status_counts.get('INVALID', 0))}",
+        f"CAM1-{int(source_counts.get('CAM1', 0))}",
+        f"CAM3-{int(source_counts.get('CAM3', 0))}",
+        f"NONE-{int(source_counts.get('NONE', 0))}",
+        f"SWITCHES-{int(output['CanonicalSwitchFlag'].sum())}",
+        f"REVIEW_WINDOWS-{len(windows)}",
+        "",
+        "WINDOWS",
+    ]
+    for _, row in windows.head(24).iterrows():
+        maximum_error = row["MaximumCanonicalContinuityError"]
+        maximum_text = "NA" if not np.isfinite(maximum_error) else f"{float(maximum_error):.4g}"
+        lines.append(
+            f"{row['WindowID']}-{row['StartFrame']}-{row['EndFrame']}"
+            f"-A{int(row['AmbiguousCount'])}"
+            f"-I{int(row['InvalidCount'])}"
+            f"-S{int(row['SwitchCount'])}"
+            f"-E{maximum_text}"
+        )
+    if len(windows) > 24:
+        lines.append(f"WINDOWS_OMITTED-{len(windows) - 24}")
+    lines.extend(
+        [
+            "",
+            "RULES",
+            "RADAR_NOT_USED-1",
+            "CONFIDENT_ONLY_FOR_BASELINE-1",
+            "AMBIGUOUS_REQUIRES_REVIEW-1",
+        ]
+    )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def choose_output_paths(output_dir: Path) -> tuple[Path, Path, Path]:
+    base_names = (
+        "camera13_continuity_stitched_v0_1.csv",
+        "camera13_continuity_review_windows_v0_1.csv",
+        "C13S001_return_capsule.txt",
+    )
+    base_paths = tuple(output_dir / name for name in base_names)
+    if not any(path.exists() for path in base_paths):
+        return base_paths
+
+    for number in range(1, 1000):
+        suffix = f"_{number:03d}"
+        candidate_paths = (
+            output_dir / f"camera13_continuity_stitched_v0_1{suffix}.csv",
+            output_dir / f"camera13_continuity_review_windows_v0_1{suffix}.csv",
+            output_dir / f"C13S001_return_capsule{suffix}.txt",
+        )
+        if not any(path.exists() for path in candidate_paths):
+            return candidate_paths
+    raise RuntimeError("No free output suffix is available from _001 to _999.")
+
+
+def run_stitching(input_path: Path, input_frame, config: Config) -> tuple[Path, Path, Path]:
+    import numpy as np
+    import pandas as pd
+
+    required = [config.frame_column, config.cam1_distance, config.cam3_distance]
+    missing = [column for column in required if column not in input_frame.columns]
+    if missing:
+        raise RuntimeError(f"Required columns are missing: {missing}")
+
+    original_valid_frame_rows = pd.to_numeric(input_frame[config.frame_column], errors="coerce").notna().sum()
+    frame = collapse_to_last_row_per_frame(input_frame, config.frame_column)
+    frame = frame[pd.to_numeric(frame[config.frame_column], errors="coerce") >= config.start_frame].copy()
+    frame = frame.reset_index(drop=True)
+    if frame.empty:
+        raise RuntimeError(f"No rows remain at or after FrameCount {config.start_frame:g}.")
+
+    frames = numeric_series(frame, config.frame_column)
+    cam1_distance = numeric_series(frame, config.cam1_distance)
+    cam3_distance = numeric_series(frame, config.cam3_distance)
+
+    cam1_age = None
+    cam3_age = None
+    age_columns = config.optional_columns.get("SignalAge", (None, None))
+    if age_columns[0] is not None and age_columns[1] is not None:
+        cam1_age = numeric_series(frame, age_columns[0])
+        cam3_age = numeric_series(frame, age_columns[1])
+
+    valid1 = build_valid_mask(cam1_distance, cam1_age, config)
+    valid3 = build_valid_mask(cam3_distance, cam3_age, config)
+    distances = [cam1_distance, cam3_distance]
+    valid_masks = [valid1, valid3]
+
+    estimated_scale = estimate_continuity_scale(frames, distances, valid_masks)
+    scale = config.continuity_scale if config.continuity_scale > 0 else estimated_scale
+    confidence_limit = (
+        config.confidence_jump_limit
+        if config.confidence_jump_limit > 0
+        else max(1.0, min(5.0, scale * 3.0))
+    )
+
+    selected = select_path(frames, distances, valid_masks, config, scale)
+    statuses, reasons, switch_flags, errors = classify_selection(
+        frames,
+        distances,
+        valid_masks,
+        selected,
+        confidence_limit,
+        config.confidence_margin,
+        config.initial_source,
+    )
+
+    output = frame.copy()
+    output["CanonicalCameraSource"] = [SOURCE_NAMES[int(source)] for source in selected]
+    output["CanonicalSelectionStatus"] = statuses
+    output["CanonicalSelectionReason"] = reasons
+    output["CanonicalSwitchFlag"] = switch_flags
+    output["CAM1DistanceValid"] = valid1.astype(int)
+    output["CAM3DistanceValid"] = valid3.astype(int)
+    output["CAM1ContinuityError"] = errors[:, 0]
+    output["CAM3ContinuityError"] = errors[:, 1]
+    output["CanonicalContinuityError"] = [
+        errors[index, source] if source in (0, 1) else np.nan
+        for index, source in enumerate(selected)
+    ]
+
+    d1_array = cam1_distance.to_numpy(dtype=float)
+    d3_array = cam3_distance.to_numpy(dtype=float)
+    output["CanonicalCameraDistance"] = np.where(
+        selected == 0,
+        d1_array,
+        np.where(selected == 1, d3_array, np.nan),
+    )
+
+    for output_name, (column1, column3) in config.optional_columns.items():
+        if output_name == "SignalAge":
+            canonical_name = "CanonicalCameraSignalAge"
+        else:
+            canonical_name = f"CanonicalCamera{output_name}"
+        if column1 is None or column3 is None:
+            continue
+        values1 = frame[column1].to_numpy(dtype=object)
+        values3 = frame[column3].to_numpy(dtype=object)
+        output[canonical_name] = np.where(
+            selected == 0,
+            values1,
+            np.where(selected == 1, values3, np.nan),
+        )
+
+    output["__C13S_ContinuityScale"] = scale
+    output["__C13S_ConfidenceJumpLimit"] = confidence_limit
+    output["__C13S_StartFrame"] = config.start_frame
+    output["__C13S_Method"] = "CAM1_CAM3_CAMERA_ONLY_CONTINUITY_VITERBI"
+
+    windows = build_review_windows(output, config.frame_column, config.review_merge_gap)
+    output_dir = input_path.parent
+    output_path, windows_path, capsule_path = choose_output_paths(output_dir)
+    output.to_csv(output_path, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_MINIMAL)
+    windows.to_csv(windows_path, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_MINIMAL)
+    collapsed_extra_rows = int(original_valid_frame_rows - len(collapse_to_last_row_per_frame(input_frame, config.frame_column)))
+    write_capsule(
+        capsule_path,
+        input_path,
+        output,
+        windows,
+        config,
+        scale,
+        confidence_limit,
+        collapsed_extra_rows,
+    )
+    return output_path, windows_path, capsule_path
+
+
+def main() -> int:
+    try:
+        input_path = choose_input_file()
+        print(f"Reading: {input_path}")
+        input_frame = read_input(input_path)
+        if input_frame.empty:
+            raise RuntimeError("The selected input file contains no data rows.")
+        columns = [str(column) for column in input_frame.columns]
+        config = show_mapping_dialog(columns)
+        output_path, windows_path, capsule_path = run_stitching(input_path, input_frame, config)
+        print("Camera 1 / Camera 3 continuity stitching completed.")
+        print(f"Stitched output: {output_path}")
+        print(f"Review windows: {windows_path}")
+        print(f"Return capsule: {capsule_path}")
+
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showinfo(
+                "C13S001 completed",
+                "Camera 1 / Camera 3 continuity stitching completed.\n\n"
+                f"Output:\n{output_path.name}\n\n"
+                f"Review windows:\n{windows_path.name}\n\n"
+                f"Please return:\n{capsule_path.name}",
+            )
+            root.destroy()
+        except Exception:
+            pass
+        return 0
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror("C13S001 error", str(exc))
+            root.destroy()
+        except Exception:
+            pass
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
