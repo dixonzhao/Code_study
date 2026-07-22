@@ -1,0 +1,676 @@
+#!/usr/bin/env python3
+"""
+Video Review Queue Builder v0.1
+
+Purpose
+-------
+Create a small, deterministic, chronologically ordered review queue from
+multi_camera_canonical_frame_v0_1.csv.  The queue validates the Camera
+selector against video; it does not determine root cause and does not treat
+Radar as ground truth.
+
+The program is read-only with respect to the input CSV.  It writes a queue,
+a manifest, and a log beside the input file (or in a selected output folder).
+
+Run as GUI:
+    python video_review_queue_builder_v0_1.py
+
+Run as CLI:
+    python video_review_queue_builder_v0_1.py --input <canonical.csv>
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import sys
+import time
+import uuid
+import re
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+VERSION = "0.1"
+OUTPUT_CSV = "video_review_queue_v0_1.csv"
+OUTPUT_MANIFEST = "video_review_queue_manifest_v0_1.json"
+OUTPUT_LOG = "video_review_queue_log_v0_1.txt"
+
+REQUIRED_COLUMNS = [
+    "FrameCount",
+    "region",
+    "SelectedCameraCANID_Hex",
+    "CameraSelectionStatus",
+    "SelectedCameraSignalAgeFrames",
+    "RecognitionTransition",
+    "recognition_id_intra_frame_conflict",
+    "ProvisionalDiscrepancy",
+]
+
+COPY_COLUMNS = [
+    "region",
+    "PreviousSupportedCameraCANID",
+    "SelectedCameraCANID_Decimal",
+    "SelectedCameraCANID_Hex",
+    "recognition_id",
+    "recognition_id_intra_frame_conflict",
+    "radar_distance_intra_frame_conflict",
+    "radar_detection_intra_frame_conflict",
+    "RecognitionTransition",
+    "AnyCameraUpdateNear",
+    "SelectedCameraUpdatedThisFrame",
+    "SelectedCameraUpdatesInFrame",
+    "CameraCandidatesUpdatedCount",
+    "SelectedCameraMessageCounter",
+    "SelectedCameraLastUpdateFrame",
+    "SelectedCameraSignalAgeFrames",
+    "SelectedCameraDistance",
+    "SelectedCameraRelativeSpeed",
+    "SelectedCameraLateralPosition",
+    "SelectedCameraSwitchingFlag",
+    "SelectedCameraObjectDetectionType",
+    "radar_distance",
+    "radar_relative_speed",
+    "RadarDetected",
+    "CameraSelectionStatus",
+    "ProvisionalDiscrepancy",
+]
+
+
+def fast_fingerprint(path: Path, block_size: int = 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    size = path.stat().st_size
+    with path.open("rb") as stream:
+        digest.update(stream.read(block_size))
+        if size > block_size:
+            stream.seek(max(0, size - block_size))
+            digest.update(stream.read(block_size))
+    digest.update(str(size).encode("ascii"))
+    return digest.hexdigest()
+
+
+def bool_series(series):
+    import pandas as pd
+
+    if pd.api.types.is_bool_dtype(series):
+        return series.fillna(False)
+    normalized = series.astype(str).str.strip().str.lower()
+    return normalized.isin({"true", "1", "1.0", "yes", "y"})
+
+
+def safe_number(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def evenly_spaced_indices(frame, count: int):
+    import numpy as np
+
+    if frame.empty or count <= 0:
+        return []
+    ordered = frame.sort_values("FrameCount", kind="mergesort")
+    if len(ordered) <= count:
+        return list(ordered.index)
+    positions = np.linspace(0, len(ordered) - 1, num=count, dtype=int)
+    return list(ordered.iloc[positions].index)
+
+
+def count_code(value: int) -> int:
+    if value <= 0:
+        return 0
+    if value < 10:
+        return 1
+    if value < 100:
+        return 2
+    return 3
+
+
+def ratio_code(numerator: int, denominator: int) -> int:
+    if denominator <= 0:
+        return 0
+    ratio = numerator / denominator
+    if ratio >= 0.999999:
+        return 4
+    if ratio >= 0.75:
+        return 3
+    if ratio >= 0.50:
+        return 2
+    return 1
+
+
+def queue_count_code(value: int) -> int:
+    if value < 20:
+        return 1
+    if value < 40:
+        return 2
+    if value < 80:
+        return 3
+    return 4
+
+
+def build_review_queue(
+    input_path: Path,
+    output_dir: Path,
+    window_radius_frames: int = 50,
+    valid_anchor: float = 6500,
+    investigation_anchor: float = 38239,
+):
+    import numpy as np
+    import pandas as pd
+
+    if window_radius_frames < 0:
+        raise ValueError("Window radius must be non-negative.")
+
+    before_stat = input_path.stat()
+    started = time.perf_counter()
+    source = pd.read_csv(input_path, low_memory=False)
+    missing = [column for column in REQUIRED_COLUMNS if column not in source.columns]
+    if missing:
+        raise ValueError("Missing required canonical columns: " + ", ".join(missing))
+
+    source["FrameCount"] = pd.to_numeric(source["FrameCount"], errors="coerce")
+    source["SelectedCameraSignalAgeFrames"] = pd.to_numeric(
+        source["SelectedCameraSignalAgeFrames"], errors="coerce"
+    )
+    source["ProvisionalDiscrepancy"] = pd.to_numeric(
+        source["ProvisionalDiscrepancy"], errors="coerce"
+    )
+    source = source[source["FrameCount"].notna()].copy()
+    source.sort_values("FrameCount", kind="mergesort", inplace=True)
+    source.reset_index(drop=True, inplace=True)
+
+    transition = bool_series(source["RecognitionTransition"])
+    conflict = bool_series(source["recognition_id_intra_frame_conflict"])
+    update_columns = [
+        column
+        for column in source.columns
+        if re.fullmatch(r"Camera0x[0-9A-Fa-f]{3}_UpdatedThisFrame", column)
+    ]
+    source["CameraCandidatesUpdatedCount"] = 0
+    for column in update_columns:
+        source["CameraCandidatesUpdatedCount"] += bool_series(source[column]).astype(int)
+    selected_valid = source["CameraSelectionStatus"].eq("SELECTED_VALID")
+    valid_region = ~source["region"].eq("PRE_VALID")
+
+    candidates: dict[int, dict] = {}
+
+    def add(index, reason: str, priority: int, detail: str = ""):
+        if index is None or index not in source.index:
+            return
+        item = candidates.setdefault(
+            int(index), {"reasons": [], "details": [], "priority": int(priority)}
+        )
+        if reason not in item["reasons"]:
+            item["reasons"].append(reason)
+        if detail and detail not in item["details"]:
+            item["details"].append(detail)
+        item["priority"] = min(item["priority"], int(priority))
+
+    def nearest_index(frame_value):
+        if source.empty:
+            return None
+        return int((source["FrameCount"] - frame_value).abs().idxmin())
+
+    add(nearest_index(valid_anchor), "VALID_START_ANCHOR", 1, f"nearest_to={valid_anchor:g}")
+    add(
+        nearest_index(investigation_anchor),
+        "INVESTIGATION_ANCHOR",
+        1,
+        f"nearest_to={investigation_anchor:g}",
+    )
+
+    camera_source = source.loc[valid_region & source["SelectedCameraCANID_Hex"].ne("")]
+    appeared_camera_ids = sorted(
+        value
+        for value in camera_source["SelectedCameraCANID_Hex"].dropna().astype(str).unique()
+        if value
+    )
+    for camera_id in appeared_camera_ids:
+        rows = camera_source[camera_source["SelectedCameraCANID_Hex"].astype(str).eq(camera_id)]
+        for index in evenly_spaced_indices(rows, 1):
+            add(index, "CAMERA_ID_COVERAGE", 2, camera_id)
+
+    exception_source = source.loc[
+        valid_region
+        & ~source["CameraSelectionStatus"].isin(["SELECTED_VALID", "PRE_VALID_FRAME"])
+    ]
+    exception_types = sorted(exception_source["CameraSelectionStatus"].dropna().unique())
+    for status in exception_types:
+        rows = exception_source[exception_source["CameraSelectionStatus"].eq(status)]
+        for index in evenly_spaced_indices(rows, 2):
+            add(index, "SELECTION_STATUS_EXCEPTION", 1, str(status))
+
+    transition_source = source.loc[valid_region & transition].copy()
+    transition_source["_previous"] = transition_source.get(
+        "PreviousSupportedCameraCANID", pd.Series(np.nan, index=transition_source.index)
+    ).astype(str)
+    transition_source["_selected"] = transition_source["SelectedCameraCANID_Hex"].astype(str)
+    if not transition_source.empty:
+        group_sizes = (
+            transition_source.groupby(["region", "_previous", "_selected"], dropna=False)
+            .size()
+            .sort_values(ascending=False)
+        )
+        for group_key in list(group_sizes.index[:6]):
+            region_value, previous_value, selected_value = group_key
+            rows = transition_source[
+                transition_source["region"].eq(region_value)
+                & transition_source["_previous"].eq(previous_value)
+                & transition_source["_selected"].eq(selected_value)
+            ]
+            indices = evenly_spaced_indices(rows, 1)
+            if indices:
+                add(
+                    indices[0],
+                    "RECOGNITION_TRANSITION",
+                    1,
+                    f"{previous_value}->{selected_value};region={region_value}",
+                )
+
+    conflict_source = source.loc[valid_region & conflict]
+    for index in evenly_spaced_indices(conflict_source, 3):
+        add(index, "RECOGNITION_CONFLICT", 1)
+
+    multi_update_source = source.loc[
+        valid_region & source["CameraCandidatesUpdatedCount"].gt(1)
+    ]
+    for index in evenly_spaced_indices(multi_update_source, 1):
+        add(index, "MULTI_CAMERA_UPDATE", 1)
+
+    age_source = source.loc[
+        valid_region & selected_valid & source["SelectedCameraSignalAgeFrames"].notna()
+    ]
+    max_age = safe_number(age_source["SelectedCameraSignalAgeFrames"].max())
+    if max_age is not None:
+        max_age_rows = age_source[
+            np.isclose(age_source["SelectedCameraSignalAgeFrames"], max_age, equal_nan=False)
+        ]
+        for index in evenly_spaced_indices(max_age_rows, 3):
+            add(index, "MAX_SELECTED_SIGNAL_AGE", 2, f"age_frames={max_age:g}")
+
+    discrepancy_source = source.loc[
+        valid_region & selected_valid & source["ProvisionalDiscrepancy"].notna()
+    ]
+    for index in discrepancy_source.nlargest(2, "ProvisionalDiscrepancy").index:
+        add(index, "POSITIVE_DISCREPANCY_EXTREME", 2)
+    for index in discrepancy_source.nsmallest(2, "ProvisionalDiscrepancy").index:
+        add(index, "NEGATIVE_DISCREPANCY_EXTREME", 2)
+
+    control_mask = (
+        valid_region
+        & selected_valid
+        & ~transition
+        & ~conflict
+        & source["ProvisionalDiscrepancy"].notna()
+        & source["SelectedCameraSignalAgeFrames"].fillna(np.inf).eq(0)
+    )
+    for region_value, reason in [
+        ("STABLE", "STABLE_CONTROL"),
+        ("INVESTIGATION", "INVESTIGATION_CONTROL"),
+    ]:
+        rows = source.loc[control_mask & source["region"].eq(region_value)].copy()
+        if rows.empty:
+            continue
+        try:
+            rows["_distance_stratum"] = pd.qcut(
+                rows["radar_distance"], q=3, labels=False, duplicates="drop"
+            )
+        except (ValueError, KeyError):
+            rows["_distance_stratum"] = 0
+        for stratum in sorted(rows["_distance_stratum"].dropna().unique()):
+            stratum_rows = rows[rows["_distance_stratum"].eq(stratum)]
+            indices = evenly_spaced_indices(stratum_rows, 1)
+            if indices:
+                add(indices[0], reason, 3, f"radar_distance_stratum={int(stratum)}")
+
+    output_rows = []
+    for index, item in candidates.items():
+        row = source.loc[index]
+        frame_value = float(row["FrameCount"])
+        output = {
+            "ReviewID": "",
+            "WindowStartFrame": max(0.0, frame_value - window_radius_frames),
+            "KeyFrame": frame_value,
+            "WindowEndFrame": frame_value + window_radius_frames,
+            "ReviewPriority": item["priority"],
+            "ReasonCodes": "|".join(item["reasons"]),
+            "ReasonDetails": "|".join(item["details"]),
+            "ReviewQuestion": (
+                "Check the displayed/tracked Camera target around KeyFrame; confirm whether "
+                "the Recognition_ID-selected Camera CAN ID is visually plausible."
+            ),
+        }
+        for column in COPY_COLUMNS:
+            output[column] = row[column] if column in source.columns else ""
+        output.update(
+            {
+                "VideoReviewResult": "",
+                "CameraTargetVisible": "",
+                "SelectedCameraMatchesDisplayedTarget": "",
+                "VisibleTargetSwitchOrJump": "",
+                "CameraTrackingStable": "",
+                "RadarMeasurementPlausible": "",
+                "ReviewerNotes": "",
+            }
+        )
+        output_rows.append(output)
+
+    queue = pd.DataFrame(output_rows)
+    if not queue.empty:
+        queue.sort_values(["KeyFrame", "ReviewPriority"], kind="mergesort", inplace=True)
+        queue.reset_index(drop=True, inplace=True)
+        queue["ReviewID"] = [f"Q{index:03d}" for index in range(1, len(queue) + 1)]
+        for column in ["WindowStartFrame", "KeyFrame", "WindowEndFrame"]:
+            values = pd.to_numeric(queue[column], errors="coerce")
+            if values.notna().all() and np.allclose(values, np.round(values)):
+                queue[column] = np.round(values).astype("Int64")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    queue_path = output_dir / OUTPUT_CSV
+    manifest_path = output_dir / OUTPUT_MANIFEST
+    log_path = output_dir / OUTPUT_LOG
+    queue.to_csv(queue_path, index=False, encoding="utf-8-sig")
+
+    after_stat = input_path.stat()
+    input_unchanged = (
+        before_stat.st_size == after_stat.st_size
+        and before_stat.st_mtime_ns == after_stat.st_mtime_ns
+    )
+    reason_counts = Counter()
+    for item in candidates.values():
+        reason_counts.update(item["reasons"])
+    source_camera_counts = {
+        camera_id: int((camera_source["SelectedCameraCANID_Hex"].astype(str) == camera_id).sum())
+        for camera_id in appeared_camera_ids
+    }
+    queue_camera_ids = set(
+        queue.get("SelectedCameraCANID_Hex", pd.Series(dtype=str)).dropna().astype(str)
+    )
+    exception_types_in_queue = set()
+    if not queue.empty:
+        for _, row in queue.iterrows():
+            if "SELECTION_STATUS_EXCEPTION" in str(row["ReasonCodes"]):
+                exception_types_in_queue.add(str(row["CameraSelectionStatus"]))
+
+    metrics = {
+        "source_row_count": int(len(source)),
+        "source_framecount_unique": bool(source["FrameCount"].is_unique),
+        "source_framecount_monotonic": bool(source["FrameCount"].is_monotonic_increasing),
+        "source_camera_ids": appeared_camera_ids,
+        "source_camera_counts": source_camera_counts,
+        "source_transition_count": int((valid_region & transition).sum()),
+        "source_recognition_conflict_count": int((valid_region & conflict).sum()),
+        "source_exception_status_counts": {
+            str(key): int(value)
+            for key, value in exception_source["CameraSelectionStatus"].value_counts().items()
+        },
+        "source_max_selected_signal_age_frames": max_age,
+        "queue_row_count": int(len(queue)),
+        "queue_reason_counts": dict(reason_counts),
+        "queue_camera_ids": sorted(queue_camera_ids),
+        "queue_exception_types": sorted(exception_types_in_queue),
+        "input_unchanged": input_unchanged,
+    }
+    manifest = {
+        "version": VERSION,
+        "run_id": str(uuid.uuid4()),
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "input": {
+            "basename": input_path.name,
+            "size_bytes": before_stat.st_size,
+            "fast_fingerprint_sha256": fast_fingerprint(input_path),
+        },
+        "configuration": {
+            "window_radius_frames": window_radius_frames,
+            "valid_anchor": valid_anchor,
+            "investigation_anchor": investigation_anchor,
+            "sampling_is_deterministic": True,
+        },
+        "metrics": metrics,
+        "interpretation_limits": [
+            "This queue validates selector plausibility against video; it does not determine root cause.",
+            "The queue is a deliberately enriched validation sample and must not be used to estimate event prevalence or false-positive rate.",
+            "Radar remains a provisional reference and is not ground truth.",
+            "ProvisionalDiscrepancy is used only for review sampling and is not zero-centered anomaly error.",
+            "FrameCount anchors are investigation labels, not selector rules.",
+            "Blank reviewer fields must be completed manually in the company environment.",
+        ],
+    }
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    log_path.write_text(
+        "\n".join(
+            [
+                f"version={VERSION}",
+                f"elapsed_seconds={time.perf_counter() - started:.3f}",
+                f"input_unchanged={input_unchanged}",
+                f"metrics={metrics}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    source_count = len(source)
+    source_bucket = 1 if source_count < 50_000 else 2 if source_count < 200_000 else 3
+    valid_count = int(valid_region.sum())
+    valid_bucket = 1 if valid_count < 50_000 else 2 if valid_count < 200_000 else 3
+    source_camera_set = set(appeared_camera_ids)
+    camera_coverage_code = ratio_code(
+        len(source_camera_set & queue_camera_ids), len(source_camera_set)
+    )
+    transition_count = metrics["source_transition_count"]
+    conflict_count = metrics["source_recognition_conflict_count"]
+    exception_type_count = len(exception_types)
+    exception_coverage_code = ratio_code(
+        len(exception_types_in_queue), exception_type_count
+    )
+    max_age_code = (
+        0
+        if max_age is None
+        else 1
+        if max_age == 0
+        else 2
+        if max_age <= 1
+        else 3
+        if max_age <= 5
+        else 4
+    )
+    reason_set = set(reason_counts)
+    review_columns_present = all(
+        column in queue.columns
+        for column in [
+            "VideoReviewResult",
+            "SelectedCameraMatchesDisplayedTarget",
+            "VisibleTargetSwitchOrJump",
+            "CameraTrackingStable",
+            "ReviewerNotes",
+        ]
+    )
+    codes = [
+        2,
+        2,
+        2 if metrics["source_framecount_unique"] else 1,
+        2 if metrics["source_framecount_monotonic"] else 1,
+        source_bucket,
+        valid_bucket,
+        queue_count_code(len(queue)),
+        2 if {"VALID_START_ANCHOR", "INVESTIGATION_ANCHOR"}.issubset(reason_set) else 1,
+        2 if "STABLE" in set(queue.get("region", [])) else 1,
+        2 if "INVESTIGATION" in set(queue.get("region", [])) else 1,
+        4 if len(source_camera_set) >= 7 else 3 if len(source_camera_set) >= 5 else 2,
+        camera_coverage_code,
+        count_code(transition_count),
+        2 if "RECOGNITION_TRANSITION" in reason_set else 1,
+        count_code(conflict_count),
+        2 if conflict_count == 0 or "RECOGNITION_CONFLICT" in reason_set else 1,
+        max_age_code,
+        2 if max_age is None or "MAX_SELECTED_SIGNAL_AGE" in reason_set else 1,
+        count_code(exception_type_count),
+        exception_coverage_code,
+        2 if "POSITIVE_DISCREPANCY_EXTREME" in reason_set else 1,
+        2 if "NEGATIVE_DISCREPANCY_EXTREME" in reason_set else 1,
+        2 if "STABLE_CONTROL" in reason_set else 1,
+        2 if "INVESTIGATION_CONTROL" in reason_set else 1,
+        2 if queue["KeyFrame"].is_unique else 1,
+        2 if queue["KeyFrame"].is_monotonic_increasing else 1,
+        2
+        if ((queue["WindowStartFrame"] <= queue["KeyFrame"]) & (queue["KeyFrame"] <= queue["WindowEndFrame"])).all()
+        else 1,
+        2 if input_unchanged else 1,
+        2 if queue_path.exists() else 1,
+        2 if manifest_path.exists() else 1,
+        2 if log_path.exists() else 1,
+        2 if review_columns_present else 1,
+    ]
+    return codes, manifest
+
+
+def output_packet(codes):
+    print("VRQ001B1-8")
+    for index in range(8):
+        block = codes[index * 4 : (index + 1) * 4]
+        print(f"A{index + 1}-" + "".join(str(value) for value in block))
+    print(f"C-{sum(codes) % 10}")
+
+
+def run_gui():
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, ttk
+
+    root = tk.Tk()
+    root.title("Video Review Queue Builder v0.1")
+    root.geometry("760x330")
+    root.resizable(True, False)
+
+    input_var = tk.StringVar()
+    output_var = tk.StringVar()
+    radius_var = tk.StringVar(value="50")
+    valid_anchor_var = tk.StringVar(value="6500")
+    investigation_anchor_var = tk.StringVar(value="38239")
+
+    frame = ttk.Frame(root, padding=16)
+    frame.pack(fill="both", expand=True)
+    frame.columnconfigure(1, weight=1)
+
+    def choose_input():
+        value = filedialog.askopenfilename(
+            title="Select multi_camera_canonical_frame_v0_1.csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if value:
+            input_var.set(value)
+            if not output_var.get():
+                output_var.set(str(Path(value).parent))
+
+    def choose_output():
+        value = filedialog.askdirectory(title="Select output folder")
+        if value:
+            output_var.set(value)
+
+    rows = [
+        ("Canonical CSV", input_var, choose_input),
+        ("Output folder", output_var, choose_output),
+    ]
+    for row_index, (label, variable, command) in enumerate(rows):
+        ttk.Label(frame, text=label).grid(row=row_index, column=0, sticky="w", pady=6)
+        ttk.Entry(frame, textvariable=variable).grid(
+            row=row_index, column=1, sticky="ew", padx=8, pady=6
+        )
+        ttk.Button(frame, text="Browse", command=command).grid(
+            row=row_index, column=2, pady=6
+        )
+
+    parameters = [
+        ("Window radius (FrameCount)", radius_var),
+        ("Valid-start anchor", valid_anchor_var),
+        ("Investigation anchor", investigation_anchor_var),
+    ]
+    for offset, (label, variable) in enumerate(parameters, start=2):
+        ttk.Label(frame, text=label).grid(row=offset, column=0, sticky="w", pady=6)
+        ttk.Entry(frame, textvariable=variable, width=18).grid(
+            row=offset, column=1, sticky="w", padx=8, pady=6
+        )
+
+    ttk.Label(
+        frame,
+        text=(
+            "Default radius 50 creates ±50 FrameCount review windows. "
+            "The program does not assume a video frame rate."
+        ),
+        wraplength=700,
+    ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(10, 6))
+
+    def execute():
+        try:
+            input_path = Path(input_var.get()).expanduser()
+            if not input_path.is_file():
+                raise ValueError("Select a valid canonical CSV.")
+            output_dir = Path(output_var.get()).expanduser() if output_var.get() else input_path.parent
+            codes, manifest = build_review_queue(
+                input_path=input_path,
+                output_dir=output_dir,
+                window_radius_frames=int(radius_var.get()),
+                valid_anchor=float(valid_anchor_var.get()),
+                investigation_anchor=float(investigation_anchor_var.get()),
+            )
+            output_packet(codes)
+            messagebox.showinfo(
+                "Completed",
+                f"Created {manifest['metrics']['queue_row_count']} review rows.\n\n"
+                f"Output: {output_dir / OUTPUT_CSV}\n\n"
+                "Copy the VRQ001B1-8 packet from the terminal.",
+            )
+        except Exception as error:
+            output_packet([0] * 32)
+            messagebox.showerror("Video Review Queue Builder", str(error))
+
+    ttk.Button(frame, text="Build review queue", command=execute).grid(
+        row=6, column=0, columnspan=3, pady=14
+    )
+    root.mainloop()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Build a deterministic video review queue.")
+    parser.add_argument("--input", type=Path)
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--window-radius", type=int, default=50)
+    parser.add_argument("--valid-anchor", type=float, default=6500)
+    parser.add_argument("--investigation-anchor", type=float, default=38239)
+    args = parser.parse_args()
+
+    if args.input is None:
+        run_gui()
+        return
+
+    try:
+        input_path = args.input.expanduser().resolve()
+        output_dir = (
+            args.output_dir.expanduser().resolve()
+            if args.output_dir
+            else input_path.parent
+        )
+        codes, _ = build_review_queue(
+            input_path=input_path,
+            output_dir=output_dir,
+            window_radius_frames=args.window_radius,
+            valid_anchor=args.valid_anchor,
+            investigation_anchor=args.investigation_anchor,
+        )
+        output_packet(codes)
+    except Exception as error:
+        output_packet([0] * 32)
+        print(f"ERROR-{type(error).__name__}-{error}", file=sys.stderr)
+        raise
+
+
+if __name__ == "__main__":
+    main()
