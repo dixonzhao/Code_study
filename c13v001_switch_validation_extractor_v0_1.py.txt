@@ -1,0 +1,451 @@
+#!/usr/bin/env python3
+"""
+C13V001 Switch Validation Extractor v0.1
+
+Read-only validation utility for the output produced by
+camera13_continuity_stitcher_v0_1.py.
+
+It does not recalculate or change the stitched target. It extracts every exact
+source-switch frame, merges nearby switches into review events, marks whether
+the event is covered by the available video, and reports selected checkpoints.
+
+Output (beside selected stitched CSV)
+-------------------------------------
+- C13V001_switch_validation_queue.csv
+- C13V001_checkpoint_snapshot.csv
+- C13V001_return_capsule.txt
+
+ReviewResult codes
+------------------
+1 = Correct continuity bridge; stitched source agrees with visible AKBPTS target
+2 = Incorrect channel selection
+3 = Real visible target/scene change; continuity alone is insufficient
+4 = Unclear / more information required
+5 = Video unavailable
+"""
+
+from __future__ import annotations
+
+import csv
+import math
+import re
+import sys
+from pathlib import Path
+from typing import Any
+
+
+VERSION = "0.1"
+
+
+def normalized_name(value: object) -> str:
+    text = "" if value is None else str(value)
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+
+def choose_input_file() -> Path:
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    root.withdraw()
+    root.update()
+    selected = filedialog.askopenfilename(
+        title="Select camera13_continuity_stitched CSV",
+        filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+    )
+    root.destroy()
+    if not selected:
+        raise RuntimeError("No stitched CSV was selected.")
+    return Path(selected)
+
+
+def request_parameters() -> tuple[int, int, int, list[int]]:
+    import tkinter as tk
+    from tkinter import simpledialog
+
+    root = tk.Tk()
+    root.withdraw()
+    video_end = simpledialog.askinteger(
+        "Video end FrameCount",
+        "Last reviewable video FrameCount:",
+        initialvalue=57597,
+        minvalue=0,
+        parent=root,
+    )
+    merge_gap = simpledialog.askinteger(
+        "Event merge gap",
+        "Merge source switches separated by no more than this many frames:",
+        initialvalue=100,
+        minvalue=0,
+        parent=root,
+    )
+    context = simpledialog.askinteger(
+        "Video review context",
+        "Context frames before and after each switch event:",
+        initialvalue=40,
+        minvalue=0,
+        parent=root,
+    )
+    checkpoint_text = simpledialog.askstring(
+        "Checkpoints",
+        "FrameCounts to extract, separated by commas:",
+        initialvalue="38239",
+        parent=root,
+    )
+    root.destroy()
+    if video_end is None or merge_gap is None or context is None or checkpoint_text is None:
+        raise RuntimeError("Operation was cancelled.")
+    checkpoints = [
+        int(item)
+        for item in re.split(r"[,;\s]+", checkpoint_text.strip())
+        if item.strip()
+    ]
+    return video_end, merge_gap, context, checkpoints
+
+
+def read_csv(path: Path):
+    import pandas as pd
+
+    encodings = ["utf-8-sig", "utf-8", "cp932", "shift_jis", "latin-1"]
+    last_error: Exception | None = None
+    for encoding in encodings:
+        try:
+            return pd.read_csv(path, encoding=encoding, low_memory=False)
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"Stitched CSV could not be read: {last_error}")
+
+
+def find_frame_column(columns: list[str]) -> str:
+    for column in columns:
+        if "framecount" in normalized_name(column):
+            return column
+    for column in columns:
+        if normalized_name(column) == "frame":
+            return column
+    raise RuntimeError("FrameCount column could not be identified.")
+
+
+def find_camera_distance(columns: list[str], camera_id: str, camera_name: str) -> str | None:
+    candidates: list[tuple[int, str]] = []
+    for column in columns:
+        compact = normalized_name(column)
+        if (
+            "canonical" in compact
+            or "continuityerror" in compact
+            or "distancevalid" in compact
+        ):
+            continue
+        if "distance" not in compact:
+            continue
+        score = 0
+        if camera_id in compact:
+            score += 20
+        if camera_name in compact:
+            score += 15
+        if score:
+            candidates.append((score, column))
+    return max(candidates, default=(0, None))[1]
+
+
+def required_columns_present(frame) -> None:
+    required = [
+        "CanonicalCameraSource",
+        "CanonicalSelectionStatus",
+        "CanonicalSelectionReason",
+        "CanonicalSwitchFlag",
+        "CanonicalCameraDistance",
+        "CanonicalContinuityError",
+    ]
+    missing = [column for column in required if column not in frame.columns]
+    if missing:
+        raise RuntimeError(
+            "The selected file is not a compatible stitched output. Missing columns: "
+            + ", ".join(missing)
+        )
+
+
+def previous_valid_source(frame, index: int) -> str:
+    for prior_index in range(index - 1, -1, -1):
+        source = str(frame.iloc[prior_index]["CanonicalCameraSource"])
+        if source in {"CAM1", "CAM3"}:
+            return source
+    return "NONE"
+
+
+def finite_or_blank(value: object) -> float | str:
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else ""
+    except Exception:
+        return ""
+
+
+def group_indices_by_frame(frame_values: list[float], merge_gap: int) -> list[list[int]]:
+    if not frame_values:
+        return []
+    groups: list[list[int]] = [[0]]
+    for index in range(1, len(frame_values)):
+        if frame_values[index] - frame_values[index - 1] <= merge_gap:
+            groups[-1].append(index)
+        else:
+            groups.append([index])
+    return groups
+
+
+def video_availability(review_start: float, review_end: float, video_end: int) -> str:
+    if review_start > video_end:
+        return "NO"
+    if review_end > video_end:
+        return "PARTIAL"
+    return "YES"
+
+
+def unique_output_paths(output_dir: Path) -> tuple[Path, Path, Path]:
+    names = (
+        "C13V001_switch_validation_queue.csv",
+        "C13V001_checkpoint_snapshot.csv",
+        "C13V001_return_capsule.txt",
+    )
+    base = tuple(output_dir / name for name in names)
+    if not any(path.exists() for path in base):
+        return base
+    for number in range(1, 1000):
+        suffix = f"_{number:03d}"
+        candidates = (
+            output_dir / f"C13V001_switch_validation_queue{suffix}.csv",
+            output_dir / f"C13V001_checkpoint_snapshot{suffix}.csv",
+            output_dir / f"C13V001_return_capsule{suffix}.txt",
+        )
+        if not any(path.exists() for path in candidates):
+            return candidates
+    raise RuntimeError("No free output suffix is available from _001 to _999.")
+
+
+def build_outputs(path: Path, frame, video_end: int, merge_gap: int, context: int, checkpoints: list[int]):
+    import pandas as pd
+
+    required_columns_present(frame)
+    columns = [str(column) for column in frame.columns]
+    frame_column = find_frame_column(columns)
+    cam1_distance_column = find_camera_distance(columns, "221", "cam1")
+    cam3_distance_column = find_camera_distance(columns, "251", "cam3")
+
+    work = frame.copy()
+    work[frame_column] = pd.to_numeric(work[frame_column], errors="coerce")
+    work["CanonicalSwitchFlag"] = pd.to_numeric(
+        work["CanonicalSwitchFlag"], errors="coerce"
+    ).fillna(0).astype(int)
+    work = work[work[frame_column].notna()].copy()
+    work = work.sort_values(frame_column, kind="stable").reset_index(drop=True)
+
+    switch_positions = work.index[work["CanonicalSwitchFlag"] == 1].tolist()
+    switch_rows: list[dict[str, Any]] = []
+    for switch_number, position in enumerate(switch_positions, start=1):
+        row = work.iloc[position]
+        switch_frame = float(row[frame_column])
+        from_source = previous_valid_source(work, position)
+        to_source = str(row["CanonicalCameraSource"])
+        switch_rows.append(
+            {
+                "SwitchNumber": switch_number,
+                "FrameCount": switch_frame,
+                "FromSource": from_source,
+                "ToSource": to_source,
+                "Transition": f"{from_source}>{to_source}",
+                "SelectionStatus": str(row["CanonicalSelectionStatus"]),
+                "SelectionReason": str(row["CanonicalSelectionReason"]),
+                "CanonicalDistance": finite_or_blank(row["CanonicalCameraDistance"]),
+                "CanonicalContinuityError": finite_or_blank(row["CanonicalContinuityError"]),
+                "CAM1Distance": finite_or_blank(row[cam1_distance_column])
+                if cam1_distance_column
+                else "",
+                "CAM3Distance": finite_or_blank(row[cam3_distance_column])
+                if cam3_distance_column
+                else "",
+            }
+        )
+
+    switch_frames = [float(item["FrameCount"]) for item in switch_rows]
+    groups = group_indices_by_frame(switch_frames, merge_gap)
+    events: list[dict[str, Any]] = []
+    for event_number, group in enumerate(groups, start=1):
+        selected_rows = [switch_rows[index] for index in group]
+        first_frame = float(selected_rows[0]["FrameCount"])
+        last_frame = float(selected_rows[-1]["FrameCount"])
+        review_start = max(float(work[frame_column].min()), first_frame - context)
+        review_end = last_frame + context
+        errors = [
+            float(item["CanonicalContinuityError"])
+            for item in selected_rows
+            if item["CanonicalContinuityError"] != ""
+        ]
+        events.append(
+            {
+                "EventID": f"E{event_number:02d}",
+                "FirstSwitchFrame": int(first_frame) if first_frame.is_integer() else first_frame,
+                "LastSwitchFrame": int(last_frame) if last_frame.is_integer() else last_frame,
+                "SwitchFrames": ";".join(
+                    str(int(value)) if float(value).is_integer() else str(value)
+                    for value in [item["FrameCount"] for item in selected_rows]
+                ),
+                "SwitchCount": len(selected_rows),
+                "ReviewStartFrame": int(review_start) if review_start.is_integer() else review_start,
+                "ReviewEndFrame": int(review_end) if review_end.is_integer() else review_end,
+                "VideoAvailable": video_availability(review_start, review_end, video_end),
+                "Transitions": ";".join(item["Transition"] for item in selected_rows),
+                "Statuses": ";".join(sorted({item["SelectionStatus"] for item in selected_rows})),
+                "Reasons": ";".join(sorted({item["SelectionReason"] for item in selected_rows})),
+                "MaximumContinuityError": max(errors) if errors else "",
+                "ReviewResult": "",
+                "ReviewMemo": "",
+            }
+        )
+
+    checkpoint_rows: list[dict[str, Any]] = []
+    for checkpoint in checkpoints:
+        if work.empty:
+            continue
+        nearest_position = (work[frame_column] - checkpoint).abs().idxmin()
+        row = work.loc[nearest_position]
+        actual_frame = float(row[frame_column])
+        checkpoint_rows.append(
+            {
+                "RequestedFrame": checkpoint,
+                "ActualNearestFrame": int(actual_frame) if actual_frame.is_integer() else actual_frame,
+                "FrameDifference": actual_frame - checkpoint,
+                "CanonicalCameraSource": str(row["CanonicalCameraSource"]),
+                "CanonicalSelectionStatus": str(row["CanonicalSelectionStatus"]),
+                "CanonicalSelectionReason": str(row["CanonicalSelectionReason"]),
+                "CanonicalSwitchFlag": int(row["CanonicalSwitchFlag"]),
+                "CanonicalDistance": finite_or_blank(row["CanonicalCameraDistance"]),
+                "CanonicalContinuityError": finite_or_blank(row["CanonicalContinuityError"]),
+                "CAM1Distance": finite_or_blank(row[cam1_distance_column])
+                if cam1_distance_column
+                else "",
+                "CAM3Distance": finite_or_blank(row[cam3_distance_column])
+                if cam3_distance_column
+                else "",
+            }
+        )
+
+    events_frame = pd.DataFrame(events)
+    checkpoints_frame = pd.DataFrame(checkpoint_rows)
+    queue_path, checkpoint_path, capsule_path = unique_output_paths(path.parent)
+    events_frame.to_csv(queue_path, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_MINIMAL)
+    checkpoints_frame.to_csv(
+        checkpoint_path, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_MINIMAL
+    )
+
+    reviewable_events = sum(event["VideoAvailable"] != "NO" for event in events)
+    event_switch_sum = sum(int(event["SwitchCount"]) for event in events)
+    lines = [
+        f"C13V001X-v{VERSION}",
+        f"INPUT-{path.name}",
+        f"SWITCH_ROWS-{len(switch_rows)}",
+        f"EVENTS-{len(events)}",
+        f"VIDEO_REVIEWABLE_EVENTS-{reviewable_events}",
+        f"VIDEO_UNAVAILABLE_EVENTS-{len(events) - reviewable_events}",
+        f"EVENT_SWITCH_SUM-{event_switch_sum}",
+        f"CLOSURE-{'OK' if event_switch_sum == len(switch_rows) else 'ERROR'}",
+        f"FRAME_COLUMN-{frame_column}",
+        f"CAM1_DISTANCE_COLUMN-{cam1_distance_column or 'NOT_FOUND'}",
+        f"CAM3_DISTANCE_COLUMN-{cam3_distance_column or 'NOT_FOUND'}",
+        "",
+        "EVENTS",
+    ]
+    for event in events:
+        frame_hex = ".".join(
+            format(int(value), "05X")
+            for value in str(event["SwitchFrames"]).split(";")
+            if value
+        )
+        lines.append(
+            f"{event['EventID']}"
+            f"-F{event['SwitchFrames']}"
+            f"-H{frame_hex}"
+            f"-N{event['SwitchCount']}"
+            f"-V{event['VideoAvailable']}"
+            f"-T{event['Transitions']}"
+            f"-E{event['MaximumContinuityError']}"
+        )
+    lines.extend(["", "CHECKPOINTS"])
+    for item in checkpoint_rows:
+        lines.append(
+            f"K{item['RequestedFrame']}"
+            f"-F{item['ActualNearestFrame']}"
+            f"-S{item['CanonicalCameraSource']}"
+            f"-Q{item['CanonicalSelectionStatus']}"
+            f"-W{item['CanonicalSwitchFlag']}"
+            f"-D{item['CanonicalDistance']}"
+            f"-D1{item['CAM1Distance']}"
+            f"-D3{item['CAM3Distance']}"
+        )
+    lines.extend(
+        [
+            "",
+            "REVIEW_CODES",
+            "1-CORRECT_CONTINUITY_BRIDGE",
+            "2-INCORRECT_CHANNEL_SELECTION",
+            "3-REAL_TARGET_OR_SCENE_CHANGE",
+            "4-UNCLEAR",
+            "5-VIDEO_UNAVAILABLE",
+        ]
+    )
+    capsule_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return queue_path, checkpoint_path, capsule_path
+
+
+def main() -> int:
+    try:
+        input_path = choose_input_file()
+        video_end, merge_gap, context, checkpoints = request_parameters()
+        frame = read_csv(input_path)
+        queue_path, checkpoint_path, capsule_path = build_outputs(
+            input_path,
+            frame,
+            video_end,
+            merge_gap,
+            context,
+            checkpoints,
+        )
+        print("C13V001 switch validation extraction completed.")
+        print(f"Queue: {queue_path}")
+        print(f"Checkpoints: {checkpoint_path}")
+        print(f"Return capsule: {capsule_path}")
+
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showinfo(
+                "C13V001 completed",
+                "Switch validation extraction completed.\n\n"
+                f"Queue:\n{queue_path.name}\n\n"
+                f"Checkpoints:\n{checkpoint_path.name}\n\n"
+                f"Please return:\n{capsule_path.name}",
+            )
+            root.destroy()
+        except Exception:
+            pass
+        return 0
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror("C13V001 error", str(exc))
+            root.destroy()
+        except Exception:
+            pass
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
