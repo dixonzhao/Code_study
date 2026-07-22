@@ -450,6 +450,7 @@ def profile(path: Path, config: dict, output_dir: Path):
     frame_rows = []
     switch_rows = []
     counts = Counter()
+    selector_value_counts = Counter()
     dynamic_mapping_configured = bool(config.get("cam_a_id") and config.get("cam_b_id"))
     constant_mapping_configured = (
         config.get("cam_a_selector_value") is not None
@@ -494,6 +495,10 @@ def profile(path: Path, config: dict, output_dir: Path):
             counts["cam_a_conflict"] += 1
         if cam_b_conflict:
             counts["cam_b_conflict"] += 1
+        if reference_id_conflict:
+            counts["selector_conflict"] += 1
+        if reference_id is not None:
+            selector_value_counts[reference_id] += 1
 
         selected = "UNKNOWN"
         selection_reason = "SELECTOR_UNAVAILABLE_OR_CONFLICTING"
@@ -662,6 +667,10 @@ def profile(path: Path, config: dict, output_dir: Path):
         "target_mapping": {
             "mode": mapping_mode,
             "mapping_ready": mapping_ready,
+            "selector_value_top20": [
+                {"value": value, "frame_count": count}
+                for value, count in selector_value_counts.most_common(20)
+            ],
         },
         "counts": dict(counts),
         "rates": {
@@ -691,6 +700,7 @@ def profile(path: Path, config: dict, output_dir: Path):
                 f"backward_transitions={backward_transitions}",
                 f"mapping_mode={mapping_mode}",
                 f"mapping_ready={mapping_ready}",
+                f"selector_value_top20={selector_value_counts.most_common(20)}",
                 f"counts={dict(counts)}",
                 f"elapsed_seconds={time.perf_counter() - started_perf:.3f}",
                 f"input_unchanged={input_unchanged}",
