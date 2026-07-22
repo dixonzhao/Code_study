@@ -36,7 +36,7 @@ Review Queue是有意富集的检查样本，其中包含：
 
 完成后使用以下程序压缩回传：
 
-    video_review_label_encoder_v0_1.py
+    video_review_label_encoder_v0_2.py
 
 Encoder只读取填好的CSV，不会修改CSV。
 
@@ -294,24 +294,28 @@ ReviewerNotes不是必填项。
 1. 保存CSV。
 2. 如果Excel询问是否保持CSV格式，选择保持CSV格式。
 3. 关闭Excel，避免文件仍被占用或保存未完成。
-4. 运行video_review_label_encoder_v0_1.py。
+4. 运行video_review_label_encoder_v0_2.py。
 5. 选择填好的video_review_queue_v0_1.csv。
 6. Encoder会检查：
    - ReviewID是否仍为Q001、Q002……的原始顺序；
    - 是否存在删除、重复或重排行；
    - 五个必填字段是否都只包含0、1、2、3；
    - 输入CSV在编码过程中是否保持不变。
-7. 将终端输出的VRQ001L1 Packet完整输入给ChatGPT/Codex。
+7. 将终端输出的VRQ001L2 Packet完整输入给ChatGPT/Codex。
 
 输出示例：
 
-    VRQ001L1-6-N24
+    VRQ001L2-6-N24
     B1-166-155-155-155
     B2-155-166-155-259
     B3-155-165-156-355
     B4-155-155-165-156
     B5-165-155-155-155
     B6-166-155-155-155
+    K1-01C97-01CA1-01CC0-01D22
+    K2-01D80-01E10-01E90-01F04
+    R1-014-400-020-100
+    R2-004-040-080-200
     S1-2222
     S2-2222
     S3-2211
@@ -319,7 +323,8 @@ ReviewerNotes不是必填项。
     X2-Q008
     X3-Q012
 
-每个Q只占三个十六进制字符。用户不需要理解或手动解码这些字符。
+其中B记录每个Q的五个标签，K记录KeyFrame，R记录ReasonCodes。用户不需要
+理解或手动解码这些字符。
 
 其中：
 
@@ -341,7 +346,6 @@ VRQ001人工复核完成需要满足：
 - 每个ReviewID都填写五个必填数字标签；
 - Selector被否定或证据不足的Case在必要时有短备注；
 - Encoder没有报告空白、非法值、删除行、重复行或排序变化；
-- VRQ001L1 Packet已经返回；
+- VRQ001L2 Packet已经返回；
 - 能够根据复核结果对Camera Selector和Maximum SignalAgeFrames = 1作出：
   Keep、Modify或Reject决定。
-

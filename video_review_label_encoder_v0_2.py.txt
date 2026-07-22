@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-VRQ001 Video Review Label Encoder v0.1
+VRQ001 Video Review Label Encoder v0.2
 
 Read a completed video_review_queue_v0_1.csv without modifying it and encode
 five 0..3 review labels per ReviewID into a compact hexadecimal return packet.
+Version 0.2 also returns KeyFrame and ReasonCodes so a manually reduced and
+renumbered queue remains traceable.
 
 GUI:
-    python video_review_label_encoder_v0_1.py
+    python video_review_label_encoder_v0_2.py
 
 CLI:
-    python video_review_label_encoder_v0_1.py --input video_review_queue_v0_1.csv
+    python video_review_label_encoder_v0_2.py --input video_review_queue_v0_1.csv
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-VERSION = "0.1"
+VERSION = "0.2"
 REQUIRED_LABEL_COLUMNS = [
     "CameraTargetVisible",
     "SelectedCameraMatchesDisplayedTarget",
@@ -34,8 +36,23 @@ REQUIRED_LABEL_COLUMNS = [
     "VideoReviewResult",
 ]
 
-OUTPUT_MANIFEST = "video_review_label_manifest_v0_1.json"
-OUTPUT_LOG = "video_review_label_log_v0_1.txt"
+OUTPUT_MANIFEST = "video_review_label_manifest_v0_2.json"
+OUTPUT_LOG = "video_review_label_log_v0_2.txt"
+
+REASON_BITS = {
+    "VALID_START_ANCHOR": 0,
+    "INVESTIGATION_ANCHOR": 1,
+    "CAMERA_ID_COVERAGE": 2,
+    "SELECTION_STATUS_EXCEPTION": 3,
+    "RECOGNITION_TRANSITION": 4,
+    "RECOGNITION_CONFLICT": 5,
+    "MULTI_CAMERA_UPDATE": 6,
+    "MAX_SELECTED_SIGNAL_AGE": 7,
+    "POSITIVE_DISCREPANCY_EXTREME": 8,
+    "NEGATIVE_DISCREPANCY_EXTREME": 9,
+    "STABLE_CONTROL": 10,
+    "INVESTIGATION_CONTROL": 11,
+}
 
 
 def fast_fingerprint(path: Path, block_size: int = 1024 * 1024) -> str:
@@ -78,6 +95,40 @@ def unpack_labels(packed: int) -> list[int]:
     return [(packed >> (position * 2)) & 0b11 for position in range(5)]
 
 
+def parse_key_frame(value, review_id: str) -> int:
+    import pandas as pd
+
+    if pd.isna(value) or str(value).strip() == "":
+        raise ValueError(f"{review_id}: KeyFrame is blank")
+    try:
+        number = float(str(value).strip())
+    except ValueError as error:
+        raise ValueError(f"{review_id}: KeyFrame must be an integer") from error
+    if not number.is_integer() or number < 0 or number > 0xFFFFF:
+        raise ValueError(f"{review_id}: KeyFrame must be an integer from 0 to 1048575")
+    return int(number)
+
+
+def pack_reasons(value, review_id: str):
+    if value is None:
+        text = ""
+    else:
+        text = str(value).strip()
+    reasons = [item.strip() for item in text.split("|") if item.strip()]
+    mask = 0
+    unknown = []
+    for reason in reasons:
+        if reason in REASON_BITS:
+            mask |= 1 << REASON_BITS[reason]
+        else:
+            unknown.append(reason)
+    if unknown:
+        raise ValueError(
+            f"{review_id}: unsupported ReasonCodes: " + ", ".join(unknown)
+        )
+    return mask, reasons
+
+
 def count_code(value: int) -> int:
     if value <= 0:
         return 0
@@ -97,7 +148,7 @@ def encode_review(input_path: Path, output_dir: Path):
     started = time.perf_counter()
     frame = pd.read_csv(input_path, low_memory=False)
 
-    required = ["ReviewID", *REQUIRED_LABEL_COLUMNS]
+    required = ["ReviewID", "KeyFrame", "ReasonCodes", *REQUIRED_LABEL_COLUMNS]
     missing = [column for column in required if column not in frame.columns]
     if missing:
         raise ValueError("Missing required review columns: " + ", ".join(missing))
@@ -120,12 +171,17 @@ def encode_review(input_path: Path, output_dir: Path):
         )
 
     packed_values = []
+    key_frames = []
+    reason_masks = []
+    reason_lists = []
     decoded_rows = []
     incomplete_ids = []
     for _, row in frame.iterrows():
         review_id = row["ReviewID"]
         try:
             labels = [parse_label(row[column], review_id, column) for column in REQUIRED_LABEL_COLUMNS]
+            key_frame = parse_key_frame(row["KeyFrame"], review_id)
+            reason_mask, reasons = pack_reasons(row["ReasonCodes"], review_id)
         except ValueError:
             incomplete_ids.append(review_id)
             raise
@@ -133,8 +189,13 @@ def encode_review(input_path: Path, output_dir: Path):
         if unpack_labels(packed) != labels:
             raise RuntimeError(f"Internal round-trip failure at {review_id}")
         packed_values.append(packed)
+        key_frames.append(key_frame)
+        reason_masks.append(reason_mask)
+        reason_lists.append(reasons)
         decoded_rows.append({
             "ReviewID": review_id,
+            "KeyFrame": key_frame,
+            "ReasonCodes": reasons,
             **{column: value for column, value in zip(REQUIRED_LABEL_COLUMNS, labels)},
         })
 
@@ -145,6 +206,9 @@ def encode_review(input_path: Path, output_dir: Path):
         column: dict(Counter(row[column] for row in decoded_rows))
         for column in REQUIRED_LABEL_COLUMNS
     }
+    reason_counts = Counter(
+        reason for reasons in reason_lists for reason in reasons
+    )
     contradicted_ids = [
         row["ReviewID"] for row in decoded_rows if row["VideoReviewResult"] == 2
     ]
@@ -169,6 +233,11 @@ def encode_review(input_path: Path, output_dir: Path):
         "review_ids_sequential": actual_ids == expected_ids,
         "required_label_columns_complete": True,
         "all_rows_encoded": len(packed_values) == len(frame),
+        "all_keyframes_encoded": len(key_frames) == len(frame),
+        "all_reason_masks_encoded": len(reason_masks) == len(frame),
+        "keyframe_min": min(key_frames),
+        "keyframe_max": max(key_frames),
+        "reason_counts": dict(reason_counts),
         "all_overall_results_reviewed": all_reviewed,
         "contradicted_review_ids": contradicted_ids,
         "insufficient_evidence_review_ids": insufficient_ids,
@@ -187,12 +256,16 @@ def encode_review(input_path: Path, output_dir: Path):
         },
         "label_order_in_each_hex_code": REQUIRED_LABEL_COLUMNS,
         "packing": "2 bits per label, first listed label in least-significant bits; 3 uppercase hexadecimal characters per ReviewID",
+        "keyframe_packing": "5 uppercase hexadecimal characters per ReviewID",
+        "reason_bit_registry": REASON_BITS,
+        "reason_packing": "12-bit mask; 3 uppercase hexadecimal characters per ReviewID",
         "metrics": metrics,
         "interpretation_limits": [
             "The encoded labels are human engineering observations, not ground truth.",
             "Radar is a provisional reference and does not determine selector correctness.",
             "The enriched review queue cannot estimate event prevalence or false-positive rate.",
             "Notes for contradicted or insufficient-evidence cases must be returned separately when needed.",
+            "RadarMeasurementPlausible and any other extra CSV columns are optional and ignored by this encoder.",
         ],
     }
     manifest_path.write_text(
@@ -224,19 +297,41 @@ def encode_review(input_path: Path, output_dir: Path):
         2 if log_path.exists() else 1,
         count_code(len(contradicted_ids)),
         count_code(len(insufficient_ids)),
+        2 if len(key_frames) == len(frame) else 1,
+        2 if len(reason_masks) == len(frame) else 1,
+        2 if all(0 <= value <= 0xFFFFF for value in key_frames) else 1,
+        2 if all(0 <= value <= 0xFFF for value in reason_masks) else 1,
     ]
-    return packed_values, codes, manifest
+    return packed_values, key_frames, reason_masks, codes, manifest
 
 
-def print_packet(packed_values: list[int], codes: list[int], manifest: dict):
+def print_packet(
+    packed_values: list[int],
+    key_frames: list[int],
+    reason_masks: list[int],
+    codes: list[int],
+    manifest: dict,
+):
     blocks = [packed_values[index:index + 4] for index in range(0, len(packed_values), 4)]
-    print(f"VRQ001L1-{len(blocks)}-N{len(packed_values)}")
+    key_blocks = [key_frames[index:index + 4] for index in range(0, len(key_frames), 4)]
+    reason_blocks = [reason_masks[index:index + 4] for index in range(0, len(reason_masks), 4)]
+    print(f"VRQ001L2-{len(blocks)}-N{len(packed_values)}")
     for index, block in enumerate(blocks, start=1):
         print(f"B{index}-" + "-".join(f"{value:03X}" for value in block))
+    for index, block in enumerate(key_blocks, start=1):
+        print(f"K{index}-" + "-".join(f"{value:05X}" for value in block))
+    for index, block in enumerate(reason_blocks, start=1):
+        print(f"R{index}-" + "-".join(f"{value:03X}" for value in block))
     status_blocks = [codes[index:index + 4] for index in range(0, len(codes), 4)]
     for index, block in enumerate(status_blocks, start=1):
         print(f"S{index}-" + "".join(str(value) for value in block))
-    checksum = (sum(packed_values) + sum(codes) + len(packed_values)) % 16
+    checksum = (
+        sum(packed_values)
+        + sum(key_frames)
+        + sum(reason_masks)
+        + sum(codes)
+        + len(packed_values)
+    ) % 16
     print(f"C-{checksum:X}")
     contradicted = manifest["metrics"]["contradicted_review_ids"]
     insufficient = manifest["metrics"]["insufficient_evidence_review_ids"]
@@ -251,7 +346,7 @@ def run_gui():
     from tkinter import filedialog, messagebox, ttk
 
     root = tk.Tk()
-    root.title("VRQ001 Video Review Label Encoder v0.1")
+    root.title("VRQ001 Video Review Label Encoder v0.2")
     root.geometry("760x260")
     root.resizable(True, False)
 
@@ -300,12 +395,12 @@ def run_gui():
             if not input_path.is_file():
                 raise ValueError("Select a valid completed review CSV.")
             output_dir = Path(output_var.get()).expanduser() if output_var.get() else input_path.parent
-            packed, codes, manifest = encode_review(input_path, output_dir)
-            print_packet(packed, codes, manifest)
+            packed, key_frames, reason_masks, codes, manifest = encode_review(input_path, output_dir)
+            print_packet(packed, key_frames, reason_masks, codes, manifest)
             messagebox.showinfo(
                 "Completed",
                 f"Encoded {len(packed)} review rows.\n\n"
-                "Copy the VRQ001L1 packet from the terminal.\n"
+                "Copy the VRQ001L2 packet from the terminal.\n"
                 "Also return short notes for X2/X3 ReviewIDs when useful.",
             )
         except Exception as error:
@@ -330,8 +425,8 @@ def main():
     input_path = args.input.expanduser().resolve()
     output_dir = args.output_dir.expanduser().resolve() if args.output_dir else input_path.parent
     try:
-        packed, codes, manifest = encode_review(input_path, output_dir)
-        print_packet(packed, codes, manifest)
+        packed, key_frames, reason_masks, codes, manifest = encode_review(input_path, output_dir)
+        print_packet(packed, key_frames, reason_masks, codes, manifest)
     except Exception as error:
         print(f"ERROR-{type(error).__name__}-{error}", file=sys.stderr)
         raise
