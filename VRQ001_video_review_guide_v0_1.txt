@@ -1,0 +1,222 @@
+VRQ001 Video Review Guide v0.1
+
+Purpose
+-------
+
+This review checks whether the Recognition_ID-selected Camera candidate is
+visually and temporally plausible. It does not determine root cause, sensor
+accuracy, or whether Radar or Camera is correct.
+
+The queue is deliberately enriched with transitions, rare Camera IDs,
+conflicts, data-quality exceptions, discrepancy tails, and controls. It must
+not be used to estimate event prevalence or false-positive rate.
+
+
+1. Files
+
+Input review form:
+
+    video_review_queue_v0_1.csv
+
+After review, this same CSV is read by:
+
+    video_review_label_encoder_v0_1.py
+
+The encoder is read-only. It does not modify the completed CSV.
+
+
+2. Review Order
+
+Review the rows in ReviewID order: Q001, Q002, Q003, and so on.
+
+For each row:
+
+1. Open the Stereo Camera video or StcamViewer.
+2. Go to WindowStartFrame.
+3. Watch through KeyFrame to WindowEndFrame.
+4. Use video, Camera overlay/tracking information, object continuity,
+   SelectedCameraCANID, lateral position, switching evidence, and the Camera
+   waveform when available.
+5. Do not decide that the selected Camera is correct merely because its
+   distance is close to Radar.
+6. Fill the five required numeric review fields below.
+7. Add a short ReviewerNotes entry only when useful.
+
+RadarMeasurementPlausible is optional in VRQ001 and may remain blank. Radar
+does not provide a corresponding object ID and is not ground truth.
+
+
+3. Required Numeric Labels
+
+Enter only one digit, 0 to 3, in each required field.
+
+
+3.1 CameraTargetVisible
+
+0 = NOT_REVIEWED
+1 = CLEARLY_VISIBLE
+2 = PARTIALLY_VISIBLE
+3 = NOT_VISIBLE_OR_UNREVIEWABLE
+
+
+3.2 SelectedCameraMatchesDisplayedTarget
+
+This is an engineering plausibility assessment, not proof of physical
+Camera-Radar target identity.
+
+0 = NOT_REVIEWED
+1 = PLAUSIBLE_MATCH
+2 = IMPLAUSIBLE_MATCH
+3 = UNCERTAIN
+
+
+3.3 VisibleTargetSwitchOrJump
+
+0 = NOT_APPLICABLE_OR_NOT_REVIEWED
+1 = NO_VISIBLE_SWITCH_OR_JUMP
+2 = VISIBLE_PLAUSIBLE_TARGET_SWITCH
+3 = VISIBLE_SUSPICIOUS_JUMP
+
+For a Recognition transition, code 2 when the selected target changes in a
+way that is visually consistent with a real cut-in, cut-out, overtaking,
+occlusion, or reference-target change. Code 3 when the numerical/selected
+target jumps without a convincing visible scene change.
+
+
+3.4 CameraTrackingStable
+
+0 = NOT_REVIEWED_OR_UNCLEAR
+1 = STABLE
+2 = UNSTABLE
+3 = LOST
+
+
+3.5 VideoReviewResult
+
+This is the overall selector assessment for the review case.
+
+0 = NOT_REVIEWED
+1 = SELECTOR_SUPPORTED
+2 = SELECTOR_CONTRADICTED
+3 = INSUFFICIENT_EVIDENCE
+
+Use SELECTOR_SUPPORTED when the selected Camera source and its transition or
+continuity are compatible with the visible Camera target behavior.
+
+Use SELECTOR_CONTRADICTED only when there is positive evidence that the
+Recognition_ID-selected Camera source is inconsistent with the displayed or
+tracked Camera target. A large Camera-Radar discrepancy alone is not enough.
+
+Use INSUFFICIENT_EVIDENCE when the scene, overlay, visibility, or available
+signals cannot support a decision.
+
+
+4. Category-Specific Checks
+
+VALID_START_ANCHOR and INVESTIGATION_ANCHOR
+
+- Confirm that the frame window is available and aligned with the video.
+- Check whether behavior around the anchor matches the earlier manual
+  description.
+- FrameCount 38239 is an investigation label, not an algorithm boundary.
+
+CAMERA_ID_COVERAGE
+
+- Check that the selected Camera source corresponds to a plausible displayed
+  or tracked target.
+- Rare IDs are important even if they occur only briefly.
+- Do not remap a rare ID to 0x221 or 0x251 merely because it is uncommon.
+
+RECOGNITION_TRANSITION
+
+- Observe target identity immediately before and after KeyFrame.
+- Determine whether a visible, plausible reference-target change occurred.
+- Distinguish a legitimate target switch from an unexplained numerical jump.
+
+RECOGNITION_CONFLICT
+
+- Check whether the intra-frame state conflict is accompanied by a visible
+  discontinuity.
+- If the video cannot resolve sub-frame ordering, use UNCERTAIN or
+  INSUFFICIENT_EVIDENCE rather than forcing a conclusion.
+
+MULTI_CAMERA_UPDATE
+
+- Multiple Camera candidates may legitimately update in the same FrameCount.
+- Confirm only whether the Recognition_ID-selected candidate remains
+  plausible; do not treat multiple updates as an error by itself.
+
+MAX_SELECTED_SIGNAL_AGE
+
+- Verify that an age of one FrameCount does not visibly break target
+  continuity.
+- This checks the accepted Maximum SignalAgeFrames = 1 gate.
+
+SELECTION_STATUS_EXCEPTION
+
+- For NO_CANDIDATE_UPDATE_OBSERVED, check whether the selected candidate has
+  not yet established a usable track/state.
+- For INVALID_SELECTED_DISTANCE, record what is visible but do not substitute
+  another Camera candidate.
+
+POSITIVE_DISCREPANCY_EXTREME and NEGATIVE_DISCREPANCY_EXTREME
+
+- Check for visible tracking, association, occlusion, curve, or multi-target
+  behavior.
+- Do not call the case an anomaly only because it is in a discrepancy tail.
+- The raw/provisional discrepancy still contains a distance-dependent
+  baseline.
+
+STABLE_CONTROL and INVESTIGATION_CONTROL
+
+- Review controls with the same care as enriched cases.
+- Controls prevent the review from considering only suspicious windows.
+
+
+5. ReviewerNotes
+
+Notes are optional. Add short notes for cases such as:
+
+- cut-in or cut-out
+- multiple nearby targets
+- curve
+- occlusion
+- Camera overlay unavailable
+- target identity unclear
+- visible target stable despite large discrepancy
+- suspicious numerical jump without scene change
+
+Do not write an unsupported root-cause conclusion.
+
+
+6. Encoding and Return
+
+After every Q row has the five required labels:
+
+1. Save the CSV. If Excel asks about preserving CSV format, keep CSV format.
+2. Close Excel so the encoder can read the saved file cleanly.
+3. Run video_review_label_encoder_v0_1.py.
+4. Select the completed video_review_queue_v0_1.csv.
+5. Copy the printed packet beginning with VRQ001L1.
+6. Return that packet to ChatGPT/Codex.
+7. For cases with VideoReviewResult 2 or 3, also return only the ReviewID and a
+   very short note, for example:
+
+       N-Q014-multi target, selected track unclear
+       N-Q027-visible jump without scene change
+
+The three-character hexadecimal code for each Q packs the five labels. The
+encoder and ChatGPT/Codex handle decoding; the user does not need to decode it.
+
+
+7. Completion Standard
+
+VRQ001 review is complete when:
+
+- every queue row has all five required labels;
+- contradictory and insufficient-evidence cases have short notes when useful;
+- the encoder reports zero incomplete or invalid rows;
+- the compact VRQ001L1 packet has been returned;
+- the results support a Keep, Modify, or Reject decision for the selector and
+  Maximum SignalAgeFrames = 1 contract.
+
