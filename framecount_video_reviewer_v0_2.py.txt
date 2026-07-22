@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FrameCount Video Reviewer v0.1
+FrameCount Video Reviewer v0.2
 
 Purpose
 -------
@@ -14,13 +14,16 @@ Main functions
 - Jump directly to an absolute FrameCount.
 - Step by 1, 10, 20, or 100 FrameCounts.
 - Play at 0.10x, 0.25x, 0.50x, 1.00x, or 2.00x.
+- Drag a full-video seek bar and decode only after release.
 - Load an event/review CSV and jump to each event window.
 - Record one review code plus a short memo for each event.
 - Export a full local review CSV and a compact return code TXT.
 
 Dependency
 ----------
-opencv-python (cv2)
+opencv-python (cv2). For an isolated, reversible setup, the package may be
+installed into an ``fvr_vendor`` folder beside this script; the program checks
+that folder before the normal Python environment.
 
 The program uses tkinter from the Python standard library and does not require
 Pillow. All files remain local on the company computer.
@@ -37,7 +40,7 @@ from pathlib import Path
 from typing import Any
 
 
-VERSION = "0.1"
+VERSION = "0.2"
 REVIEW_CODES = {
     "": "Not reviewed",
     "1": "Correct / expected",
@@ -125,12 +128,15 @@ class ReviewEvent:
 
 class FrameCountVideoReviewer:
     def __init__(self) -> None:
+        local_vendor = Path(__file__).resolve().parent / "fvr_vendor"
+        if local_vendor.is_dir():
+            sys.path.insert(0, str(local_vendor))
         try:
             import cv2
         except ImportError as exc:
             raise RuntimeError(
-                "OpenCV is not available. The approved Python environment needs "
-                "the 'opencv-python' package (import name: cv2)."
+                "OpenCV is not available. If company policy permits, install "
+                "'opencv-python' into the isolated fvr_vendor folder beside this script."
             ) from exc
 
         import tkinter as tk
@@ -153,6 +159,7 @@ class FrameCountVideoReviewer:
         self.tk_image = None
         self.playing = False
         self.after_id = None
+        self.seek_dragging = False
 
         self.all_events: list[ReviewEvent] = []
         self.events: list[ReviewEvent] = []
@@ -162,7 +169,8 @@ class FrameCountVideoReviewer:
         self.anchor_video_var = tk.StringVar(value="0")
         self.anchor_framecount_var = tk.StringVar(value="0")
         self.framecount_rate_var = tk.StringVar(value="20")
-        self.mapping_mode_var = tk.StringVar(value="1:1")
+        self.mapping_mode_var = tk.StringVar(value="Rate-based")
+        self.seek_scale_var = tk.DoubleVar(value=0.0)
         self.jump_framecount_var = tk.StringVar(value="")
         self.speed_var = tk.StringVar(value="0.25")
         self.loop_event_var = tk.BooleanVar(value=False)
@@ -214,8 +222,23 @@ class FrameCountVideoReviewer:
             side="left"
         )
 
+        seek_bar = ttk.Frame(video_panel, padding=(6, 0, 6, 2))
+        seek_bar.grid(row=2, column=0, sticky="ew")
+        seek_bar.columnconfigure(0, weight=1)
+        self.seek_scale = ttk.Scale(
+            seek_bar,
+            from_=0,
+            to=1,
+            orient="horizontal",
+            variable=self.seek_scale_var,
+            command=self._on_seek_preview,
+        )
+        self.seek_scale.grid(row=0, column=0, sticky="ew")
+        self.seek_scale.bind("<ButtonPress-1>", self._on_seek_press)
+        self.seek_scale.bind("<ButtonRelease-1>", self._on_seek_release)
+
         controls = ttk.Frame(video_panel, padding=(6, 2, 6, 6))
-        controls.grid(row=2, column=0, sticky="ew")
+        controls.grid(row=3, column=0, sticky="ew")
         ttk.Button(controls, text="⏮ Event Start", command=self.go_event_start).pack(side="left", padx=2)
         ttk.Button(controls, text="-100", command=lambda: self.step_framecount(-100)).pack(side="left", padx=2)
         ttk.Button(controls, text="-20", command=lambda: self.step_framecount(-20)).pack(side="left", padx=2)
@@ -248,7 +271,7 @@ class FrameCountVideoReviewer:
         mapping.columnconfigure(1, weight=1)
         self._entry_row(mapping, 0, "Anchor video frame (0-based)", self.anchor_video_var)
         self._entry_row(mapping, 1, "Anchor CAN FrameCount", self.anchor_framecount_var)
-        self._entry_row(mapping, 2, "FrameCount rate (Hz)", self.framecount_rate_var)
+        self._entry_row(mapping, 2, "CAN FrameCount rate (Hz)", self.framecount_rate_var)
         ttk.Label(mapping, text="Mapping mode").grid(row=3, column=0, sticky="w", pady=2)
         ttk.Combobox(
             mapping,
@@ -389,9 +412,18 @@ class FrameCountVideoReviewer:
     def apply_mapping(self) -> None:
         try:
             anchor_video, anchor_fc, rate, mode = self._mapping_values()
+            if mode == "1:1":
+                relationship = "1 video frame = 1 CAN count; Hz value is ignored"
+            else:
+                fc_per_video = rate / self.video_fps
+                video_per_fc = self.video_fps / rate
+                relationship = (
+                    f"1 video frame = {fc_per_video:.6g} CAN counts; "
+                    f"1 CAN count = {video_per_fc:.6g} video frames"
+                )
             self.mapping_info_var.set(
                 f"Video frame {anchor_video} ↔ CAN FC {anchor_fc}; mode={mode}; "
-                f"video={self.video_fps:.6g} fps, FC={rate:.6g} Hz"
+                f"video={self.video_fps:.6g} fps, FC={rate:.6g} Hz; {relationship}"
             )
             self._update_position_text()
             self.status_var.set("FrameCount mapping applied")
@@ -427,6 +459,8 @@ class FrameCountVideoReviewer:
         detected_fps = float(capture.get(self.cv2.CAP_PROP_FPS))
         self.video_fps = detected_fps if math.isfinite(detected_fps) and detected_fps > 0 else 20.0
         self.total_frames = int(capture.get(self.cv2.CAP_PROP_FRAME_COUNT))
+        self.seek_scale.configure(to=max(self.total_frames - 1, 1))
+        self.seek_scale_var.set(0.0)
         try:
             backend = capture.getBackendName()
         except Exception:
@@ -454,6 +488,8 @@ class FrameCountVideoReviewer:
         reported_next = int(round(self.capture.get(self.cv2.CAP_PROP_POS_FRAMES)))
         actual_index = max(0, reported_next - 1)
         self.current_video_index = actual_index
+        if not self.seek_dragging:
+            self.seek_scale_var.set(float(actual_index))
         self.current_bgr_frame = frame
         self._render_current_frame()
         self._update_position_text()
@@ -474,6 +510,8 @@ class FrameCountVideoReviewer:
             return False
         reported_next = int(round(self.capture.get(self.cv2.CAP_PROP_POS_FRAMES)))
         self.current_video_index = max(0, reported_next - 1)
+        if not self.seek_dragging:
+            self.seek_scale_var.set(float(self.current_video_index))
         self.current_bgr_frame = frame
         self._render_current_frame()
         self._update_position_text()
@@ -517,6 +555,33 @@ class FrameCountVideoReviewer:
         )
 
     # ------------------------------------------------------------- navigation
+    def _on_seek_press(self, _event=None) -> None:
+        self.seek_dragging = True
+        self.stop_playback()
+
+    def _on_seek_preview(self, value: str) -> None:
+        if self.capture is None or not self.seek_dragging:
+            return
+        target_index = max(0, min(int(round(float(value))), max(self.total_frames - 1, 0)))
+        seconds = target_index / self.video_fps
+        try:
+            framecount = self.video_index_to_framecount(target_index)
+            framecount_text = str(framecount)
+        except Exception:
+            framecount_text = "mapping error"
+        self.status_var.set(
+            f"Seek preview: video frame {target_index:,}; CAN FC {framecount_text}; "
+            f"time {seconds:.3f} s (release to load)"
+        )
+
+    def _on_seek_release(self, _event=None) -> None:
+        if self.capture is None:
+            self.seek_dragging = False
+            return
+        target_index = int(round(self.seek_scale_var.get()))
+        self.seek_dragging = False
+        self.show_video_frame(target_index)
+
     def go_to_framecount(self) -> None:
         try:
             target_fc = int(float(self.jump_framecount_var.get()))
