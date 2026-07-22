@@ -1,0 +1,535 @@
+Engineering Study Node Report
+
+Node ID: N-CRS-001
+Date: 2026-07-22
+Title: Recognition_ID Interpretation and Multi-Camera Reference Selector Decision
+Project Area: Multi-rate CAN data processing and camera-radar discrepancy localization
+
+
+1. Purpose of This Node
+
+This node records the transition from a fixed-camera-column analysis model to a dynamic multi-camera reference-selection model.
+
+The immediate engineering objective is not automatic root-cause determination. The objective is to construct a traceable, frame-level camera reference signal that can be compared with the Radar nearest-obstacle signal without silently selecting the Camera candidate that happens to be closest to Radar.
+
+No company dataset, DBC file, production source file, screenshot, or internal document was transferred to create this report. The report is based on manually transcribed signal definitions, compact profiler result packets, and generic read-only inspection logic.
+
+
+2. Confirmed Decode Scope for the Next Dataset
+
+The next P002 decode shall include the following ten CAN IDs:
+
+Camera candidate messages, Channel 2:
+
+- 0x221
+- 0x223
+- 0x251
+- 0x253
+- 0x255
+- 0x257
+- 0x259
+
+Radar message, Channel 1:
+
+- 0x380
+
+ACC/reference-state message:
+
+- 0x5E1
+
+Frame and camera-state message, Channel 2:
+
+- 0x620
+
+
+2.1 Camera signals to retain for every candidate Camera CAN ID
+
+At minimum:
+
+- Distance
+- RelativeSpeed
+- LateralPosition
+- SwitchingFlag
+- ObjectDetectionType
+- MessageCounter
+
+Recommended if the additional size is acceptable:
+
+- LateralSpeed
+- ObjectType
+- Width
+
+
+2.2 Radar signals to retain from 0x380
+
+- DistanceToObject
+- RelativeSpeed
+- PrecedingVehicleDetectionFlag
+
+
+2.3 Reference and system-state signals to retain from 0x5E1
+
+- Recognition_ID
+- VehicleDetect
+- AccSystemStatus
+
+Optional context signals may be retained for later HMI analysis, but they are not part of the first selector model.
+
+
+2.4 Frame and readiness signals to retain from 0x620
+
+- FrameCount
+- HALTState
+- AutoAdjustCompleteState
+
+Lane-line type signals are not required for the first selector model.
+
+
+3. Starting Problem
+
+The initial analysis selected one Camera distance column and treated it as the Camera target for the complete recording.
+
+This assumption became invalid when the observed Camera reference behavior changed between the signals associated with 0x221 and 0x251. A fixed-column model can therefore create false discrepancy events when the system changes its active Camera reference target.
+
+The Radar side does not provide a comparable target ID. It reports the nearest detected obstacle through 0x380. Consequently, direct Camera-ID-to-Radar-ID matching is impossible in the current dataset.
+
+The engineering problem is therefore:
+
+Given several Camera object candidates and one Radar nearest-obstacle measurement, identify the Camera object selected by the vehicle/reference logic using evidence independent of Radar distance, and then calculate the Camera-Radar discrepancy.
+
+
+4. Manually Confirmed Frame Regions
+
+- FrameCount below 6500: vehicle had not entered the useful driving portion; data is currently excluded from the first analysis window.
+- FrameCount 6500 to approximately 38238: visually observed behavior was considered normal/stable for the original investigation.
+- FrameCount around 38239: manually observed onset of obvious 0x221/0x251 distance jumping.
+- FrameCount after approximately 38239: investigation region containing repeated visible changes between the two Camera candidates.
+
+Important interpretation:
+
+FrameCount 38239 is a validation label, not an algorithm rule. The profiler later showed that reference selections also change before this boundary. The boundary is more likely the onset of visually problematic discrepancy behavior, not the first target-selection event.
+
+
+5. Relevant Signal Semantics
+
+
+5.1 Radar 0x380
+
+Available signals:
+
+- DistanceToObject
+- RelativeSpeed
+- PrecedingVehicleDetectionFlag
+
+Radar provides the nearest-obstacle measurement but no corresponding object ID. Radar is therefore a provisional engineering reference, not ground truth.
+
+
+5.2 Camera candidate messages
+
+Available signals include:
+
+- Distance
+- RelativeSpeed
+- LateralPosition
+- LateralSpeed
+- ObjectDetectionType
+- SwitchingFlag
+- Width
+- ObjectType
+- MessageCounter
+
+The most important signals for reference reconstruction are:
+
+- Distance: selected output to compare with Radar after selection is complete.
+- LateralPosition: independent evidence that an object is in or near the ego path.
+- SwitchingFlag: possible switching-state evidence; not yet approved as the primary selector.
+- MessageCounter: freshness/update evidence required because decoded signals are forward-filled.
+- ObjectDetectionType and ObjectType: validity and classification context.
+
+
+5.3 Recognition_ID in 0x5E1
+
+The first hypothesis assumed that Recognition_ID used logical Camera numbers such as 1 and 3. This hypothesis was rejected.
+
+The observed Recognition_ID values were:
+
+- 545.0: 45,501 frame records
+- 593.0: 7,789 frame records
+- 547.0: 1,857 frame records
+- 595.0: 837 frame records
+- 599.0: 451 frame records
+- Additional lower-frequency values: remaining records
+
+These decimal values map directly to hexadecimal Camera CAN IDs:
+
+- 545 decimal = 0x221
+- 547 decimal = 0x223
+- 593 decimal = 0x251
+- 595 decimal = 0x253
+- 597 decimal = 0x255
+- 599 decimal = 0x257
+- 601 decimal = 0x259
+
+This produces a strongly supported working interpretation:
+
+Recognition_ID stores the CAN message ID of the Camera object currently selected by the vehicle/reference logic.
+
+This interpretation is not yet treated as final ground truth. It must remain traceable to DBC semantics, switching evidence, message freshness, and video/engineering review.
+
+
+6. Profiler Evidence
+
+
+6.1 CRL001: incorrect 1/3 mapping test
+
+The first reference-logic profiler used Recognition_ID values 1 and 3.
+
+Result:
+
+- Input and output integrity checks passed.
+- Recognition_ID was present in at least 90% of valid frames.
+- No frames were reliably mapped to Camera 1 or Camera 3 under the 1/3 definition.
+- More than 100 intra-frame Recognition_ID conflicts were present.
+- Both Camera SwitchingFlag signals were present in at least 90% of valid frames.
+- Both MessageCounter signals were present and changed more than 100 times.
+- Radar detection coverage was at least 90%.
+
+Decision:
+
+Reject Recognition_ID=1/3 encoding.
+
+
+6.2 Recognition_ID value inspection
+
+The Recognition_ID value distribution revealed exact decimal equivalents of Camera CAN IDs. SwitchingFlag values were binary:
+
+- 0x221 SwitchingFlag: 0 in 56,095 frames; 1 in 501 frames.
+- 0x251 SwitchingFlag: 0 in 54,797 frames; 1 in 1,799 frames.
+
+Decision:
+
+Modify the selector hypothesis from logical Camera number mapping to decimal CAN-ID mapping.
+
+
+6.3 CRL002: decimal CAN-ID mapping test
+
+The second profiler used:
+
+- 545 decimal / 0x221 as Camera candidate 1
+- 593 decimal / 0x251 as Camera candidate 3
+
+It also changed the frame contract:
+
+- The final decoded value inside each FrameCount was used as the end-of-frame Recognition_ID state.
+- Intra-frame conflicts were preserved as explicit evidence instead of invalidating every conflicted frame.
+- Recognition_ID values not represented by a decoded Camera candidate were marked UNSUPPORTED.
+- No fallback by Radar-distance proximity was allowed.
+
+CRL002 result:
+
+- File parsing, output generation, manifest generation, fingerprinting, and unchanged-input checks passed.
+- Frame order was monotonic in the inspected input.
+- The dataset contained between 50,000 and 200,000 frame records.
+- Recognition_ID non-missing coverage was at least 90%.
+- 0x221/0x251 supported-ID coverage was at least 90%.
+- Both supported Camera IDs appeared in the post-38239 investigation region.
+- Recognition_ID transitions occurred more than 100 times.
+- MessageCounter changes occurred more than 100 times for both decoded Camera candidates.
+- At least 90% of Recognition_ID transitions had nearby MessageCounter-change evidence.
+- SwitchingFlag evidence had partial, but not complete, alignment with Recognition_ID transitions.
+- Selected Camera distance coverage was at least 90% in both the stable and investigation regions.
+- Radar detected coverage was at least 90%.
+- Provisional discrepancy coverage was at least 90%.
+- Unsupported Recognition_ID values were present but represented less than 10% of valid frames.
+- More than 100 intra-frame Camera distance conflicts were recorded.
+
+Interpretation:
+
+The decimal CAN-ID selector hypothesis is strongly supported as the current engineering model. The two-candidate implementation is insufficient for complete coverage because Recognition_ID also selects 0x223, 0x253, 0x255, 0x257, 0x259, and possibly other Camera messages.
+
+
+7. Current Provisional Selection Logic
+
+The next formal implementation candidate is:
+
+For each FrameCount:
+
+1. Preserve original decoded row order.
+2. Determine the end-of-frame Recognition_ID using the final state within that FrameCount.
+3. Convert Recognition_ID to the corresponding Camera CAN ID.
+4. Find the decoded Camera candidate registered for that CAN ID.
+5. If the CAN ID is not decoded, output UNSUPPORTED_REFERENCE_ID. Do not choose another Camera candidate.
+6. Use the selected candidate's MessageCounter to determine whether the signal was freshly updated.
+7. Calculate SignalAgeFrames from the most recent MessageCounter change.
+8. Apply signal-specific validity rules, including detection status and invalid sentinel values.
+9. Preserve LateralPosition, ObjectDetectionType, ObjectType, SwitchingFlag, and freshness metadata with the selected signal.
+10. Only after target selection and validity gating, calculate:
+
+   ProvisionalDiscrepancy = RadarDistanceToObject - SelectedCameraDistance
+
+11. Mark Radar as a provisional reference, not ground truth.
+12. Export unresolved, stale, unsupported, and ambiguous frames instead of silently filling them with another candidate.
+
+
+8. Why Radar-Distance Proximity Must Not Select the Camera Target
+
+The analysis is intended to measure Camera-Radar discrepancy.
+
+If the selector chooses the Camera candidate whose distance is closest to Radar, the algorithm directly minimizes the discrepancy it is supposed to investigate. This creates circular logic and can hide genuine target-selection, synchronization, or measurement problems.
+
+Therefore, target selection must be based on independent information such as:
+
+- Recognition_ID
+- Camera message identity
+- MessageCounter freshness
+- Camera tracking/detection state
+- LateralPosition and path relevance
+- SwitchingFlag as supporting evidence
+- Temporal continuity
+
+Radar distance may be examined after selection, but it must not determine the selected Camera candidate.
+
+
+9. Decisions at This Node
+
+
+KEEP
+
+- FrameCount as the current video/CAN alignment axis.
+- Recognition_ID as the primary Camera reference-selector candidate.
+- Decimal Camera CAN-ID interpretation of Recognition_ID.
+- MessageCounter as freshness and SignalAge evidence.
+- SwitchingFlag as secondary validation evidence.
+- LateralPosition and detection state as independent engineering context.
+- Explicit UNSUPPORTED and INVALID states.
+- Radar as a provisional reference only.
+
+
+REJECT
+
+- Recognition_ID values 1 and 3 as the selector mapping.
+- One fixed Camera distance column for the complete recording.
+- Selecting the Camera candidate closest to Radar.
+- Treating FrameCount 38239 as a hard-coded selector boundary.
+- Treating intra-frame conflict as a reason to silently discard all evidence.
+- Reporting Camera-Radar discrepancy as Camera ground-truth error.
+
+
+MODIFY
+
+- Two-candidate 0x221/0x251 selector: expand to every relevant Camera CAN ID.
+- End-of-frame aggregation: retain the last state but add update provenance and SignalAgeFrames.
+- Forward-filled decoded values: retain for alignment only when freshness metadata is also preserved.
+- Stable/investigation region terminology: interpret 38239 as a visible-behavior boundary, not the first selector transition.
+
+
+10. Known Risks and Open Questions
+
+1. DBC/business semantics of Recognition_ID still require direct confirmation.
+2. End-of-frame final-state selection must be checked against source message order and video timing.
+3. More than 100 intra-frame conflicts exist for Recognition_ID and Camera distance signals.
+4. P002 currently performs unlimited forward fill.
+5. A stale Camera value may appear valid unless SignalAgeFrames and update provenance are retained.
+6. Signal-specific invalid sentinels are not yet fully defined.
+7. SwitchingFlag is binary, but its exact state-machine meaning is not yet confirmed.
+8. Radar has no target ID, so physical Camera-Radar object correspondence remains provisional.
+9. Recognition_ID may reference Camera messages that have not yet been decoded.
+10. Full-log and cross-log reproducibility have not yet been demonstrated.
+11. Video review is still required before treating any discrepancy window as a confirmed engineering event.
+
+
+11. Next Actions
+
+1. Decode the complete Camera candidate set and retain the minimum selector/validity signals defined in Section 2.
+2. Build a Multi-Camera Reference Selector with a CAN-ID-to-column registry.
+3. Generate one canonical row per FrameCount containing:
+
+   - Recognition_ID
+   - SelectedCameraCANID
+   - SelectedCameraDistance
+   - SelectedCameraRelativeSpeed
+   - SelectedCameraLateralPosition
+   - SelectedCameraDetectionType
+   - SelectedCameraSwitchingFlag
+   - SelectedCameraMessageCounter
+   - SelectedCameraSignalAgeFrames
+   - CameraSelectionStatus
+   - RadarDetectionStatus
+   - ProvisionalDiscrepancy
+
+4. Validate selector transitions against SwitchingFlag, MessageCounter, status signals, and video.
+5. Only after the selector contract is stable, return to Baseline, Residual, Threshold, Persistence, and Event Merging.
+
+
+12. Knowledge Map for Later Study
+
+
+12.1 CAN and DBC fundamentals
+
+Topics:
+
+- CAN message identifiers
+- Signal packing and DBC definitions
+- Endianness, signedness, scale, offset, and invalid values
+- Message counters and alive counters
+- Multi-rate CAN buses
+
+Why it matters:
+
+Recognition_ID was understandable only after recognizing that its decimal values were Camera CAN IDs. MessageCounter behavior is required to reconstruct real updates after wide-table forward filling.
+
+Suggested study sources:
+
+- Vector CAN/DBC introductory training material
+- CAN in Automation introductory material
+- An automotive embedded-systems or in-vehicle networking course
+
+
+12.2 Multi-target tracking and data association
+
+Topics:
+
+- Track identity versus measurement identity
+- Nearest-neighbor association
+- Gating
+- Track continuity
+- Multiple Hypothesis Tracking and Joint Probabilistic Data Association as later concepts
+
+Why it matters:
+
+The Camera exposes multiple object candidates while Radar exposes only a nearest-obstacle result. The project must distinguish system-selected reference logic from post-hoc distance matching.
+
+Suggested reference:
+
+- Bar-Shalom, Li, and Kirubarajan, Estimation with Applications to Tracking and Navigation
+
+Only the introductory data-association and gating sections are needed initially.
+
+
+12.3 Asynchronous and multi-rate signal processing
+
+Topics:
+
+- Sample-and-hold behavior
+- Zero-order hold
+- Asynchronous updates
+- Resampling
+- Signal freshness and age
+- Aliasing between update rates
+
+Why it matters:
+
+Forward-filled wide tables can make an old value look continuously measured. MessageCounter and SignalAgeFrames are necessary to distinguish retained state from a new observation.
+
+
+12.4 Missing-data semantics and data provenance
+
+Topics:
+
+- Missing at source versus no update
+- Invalid measurement versus physical zero
+- Imputation provenance
+- Forward-fill limits
+- Validity masks
+
+Why it matters:
+
+The existing workflow can forward-fill in P002 and later zero-fill in P003. Without provenance, downstream analysis cannot determine whether a value is measured, retained, invalid, or synthesized.
+
+
+12.5 Time-series data contracts
+
+Topics:
+
+- Event time versus processing order
+- One-row-per-frame contracts
+- Stable sorting
+- Duplicate keys
+- End-of-frame snapshots
+- Deterministic aggregation
+
+Why it matters:
+
+The input contains multiple rows per FrameCount and more than 100 intra-frame conflicts. A formal aggregation contract is required before lag analysis or event continuity can be trusted.
+
+
+12.6 Finite-state machines and embedded control logic
+
+Topics:
+
+- State transitions
+- Selector logic
+- Hysteresis
+- Debounce and persistence
+- State/status flags
+
+Why it matters:
+
+Recognition_ID and SwitchingFlag may be outputs of an internal reference-selection state machine. Their transition timing should be interpreted as control logic, not only as statistical correlation.
+
+
+12.7 Robust statistics and residual analysis
+
+Topics:
+
+- Conditional baseline
+- Median and MAD
+- Residual
+- Robust thresholds
+- Conditional candidate rate
+
+Why it matters:
+
+Baseline and residual analysis are meaningful only after the correct Camera reference is selected. Robust statistics remain the next static-analysis layer, not the selector itself.
+
+
+12.8 System Identification and dynamic residual models
+
+Topics:
+
+- AR and ARX models
+- Delay and lag
+- Prediction error
+- Innovation
+- Residual whiteness
+
+Why it matters:
+
+Dynamic modeling may later determine whether the remaining discrepancy has memory or delayed drivers. It must not begin until target selection, signal age, and frame aggregation are stable.
+
+Suggested references:
+
+- Keesman, System Identification: An Introduction
+- Ljung, System Identification: Theory for the User, as a deeper later reference
+
+
+12.9 Software architecture and reproducible experiments
+
+Topics:
+
+- Program responsibility
+- Interface contracts
+- Schema registries
+- Data lineage
+- Read-only validators
+- Experiment logs and decision logs
+
+Why it matters:
+
+The current toolchain has duplicated sorting and missing-value responsibilities. A reproducible selector requires stable interfaces and traceable assumptions, not only a working Python function.
+
+Suggested reference:
+
+- Kleppmann, Designing Data-Intensive Applications, especially data models, dataflow, and stream-processing concepts
+
+
+13. Node Exit Condition
+
+This node is complete when:
+
+- The ten confirmed CAN IDs have been decoded into a new P002 output.
+- Every Recognition_ID value used in the selected analysis interval can be mapped to a decoded Camera candidate or explicitly marked unsupported.
+- The Multi-Camera Reference Selector exports deterministic, one-row-per-FrameCount output with freshness and validity metadata.
+- The selector is validated against SwitchingFlag, MessageCounter, system states, and selected video windows.
+
+Until those conditions are met, downstream discrepancy, baseline, residual, and event outputs remain provisional.
