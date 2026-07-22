@@ -1,0 +1,503 @@
+Engineering Study Node Report
+
+Task ID: MCRS001
+Date: 2026-07-22
+Title: Multi-Camera Canonical Reference Selector and Frame-Level Data Contract v0.1
+Project Area: Multi-rate CAN data processing, target-reference reconstruction, and camera-radar discrepancy localization
+Status: COMPLETE
+
+
+1. Executive Outcome
+
+MCRS001 established a deterministic, one-row-per-FrameCount Camera reference
+dataset from seven possible Stereo Camera object-message sources.
+
+The selected Camera candidate is determined only from Recognition_ID and the
+corresponding Camera CAN message identity. Radar distance is never used to
+choose the Camera candidate. This avoids circular logic in the later
+Camera-Radar discrepancy analysis.
+
+The task also restored update provenance lost by P002 wide-table forward fill.
+MessageCounter changes are used to reconstruct real Camera updates, and every
+selected signal carries SignalAgeFrames. The final accepted stale-data gate is:
+
+    Maximum selected SignalAgeFrames = 1
+
+After this gate was enabled, no selected record in the valid analysis region
+was classified as STALE_SELECTED_SIGNAL.
+
+The resulting interface is frozen as:
+
+    Canonical Dataset Contract v0.1
+
+This contract is sufficiently stable for the next task, VRQ001, which performs
+structured video review of selector transitions, rare Camera IDs, data-quality
+exceptions, and control frames.
+
+This outcome does not prove that Radar is ground truth, that Recognition_ID is
+the final business-approved target definition, or that a large discrepancy is
+a Camera error. Those interpretations remain explicitly outside this node.
+
+
+2. Task Objective
+
+The original decoded dataset contained several forward-filled Camera object
+distance columns. A fixed Camera column could not represent the entire drive
+because the vehicle/reference logic selected different Camera object messages
+at different times.
+
+MCRS001 therefore had five objectives:
+
+1. Support every observed Camera object CAN ID selected by Recognition_ID.
+2. Reconstruct which Camera candidate was selected at each FrameCount.
+3. Preserve update freshness after P002 forward fill.
+4. Produce exactly one canonical record per FrameCount.
+5. Calculate a provisional Camera-Radar discrepancy only after selection,
+   validity, freshness, and Radar-detection gates pass.
+
+The task was a data-contract and selector task, not an anomaly-detection or
+root-cause task.
+
+
+3. Input Scope
+
+The expanded P002 decode included the following CAN messages.
+
+Camera candidate messages, Channel 2:
+
+- 0x221
+- 0x223
+- 0x251
+- 0x253
+- 0x255
+- 0x257
+- 0x259
+
+Each Camera candidate retained at least:
+
+- Distance
+- RelativeSpeed
+- LateralPosition
+- SwitchingFlag
+- ObjectDetectionType
+- MessageCounter
+
+Radar message, Channel 1:
+
+- 0x380 DistanceToObject
+- 0x380 RelativeSpeed
+- 0x380 PrecedingVehicleDetectionFlag
+
+Reference-selection and system-state message:
+
+- 0x5E1 Recognition_ID
+- Optional ACC/reference-state context signals
+
+Frame and readiness message, Channel 2:
+
+- 0x620 FrameCount
+- Optional HALTState and AutoAdjustCompleteState
+
+The input was a reduced P002 decode containing the required Camera, Radar,
+FrameCount, and selected IMU/context signals. P003 was not used for this task,
+because its default blank-to-zero operation would remove missing-data
+provenance required by the selector.
+
+
+4. Confirmed Working Interpretation of Recognition_ID
+
+Recognition_ID values corresponded to decimal forms of Camera CAN message IDs:
+
+- 545 decimal = 0x221
+- 547 decimal = 0x223
+- 593 decimal = 0x251
+- 595 decimal = 0x253
+- 597 decimal = 0x255
+- 599 decimal = 0x257
+- 601 decimal = 0x259
+
+This interpretation was derived from observed values and then tested against
+the expanded decoded dataset. All seven supported Camera IDs appeared in the
+valid analysis region.
+
+The interpretation is accepted as the current engineering selector contract.
+It is not represented as final business or DBC ground truth until direct
+semantic confirmation and video validation are complete.
+
+
+5. Canonical Selection Method
+
+For every FrameCount, the selector performs the following operations:
+
+1. Preserve source row order within the decoded input.
+2. Use the final state within the FrameCount as the end-of-frame global state.
+3. Interpret Recognition_ID as the decimal CAN ID of the selected Camera
+   candidate.
+4. Reconstruct each Camera candidate's true update events from MessageCounter
+   changes.
+5. Forward the most recent candidate state only while retaining:
+   - LastUpdateFrame
+   - SignalAgeFrames
+   - UpdatedThisFrame
+   - UpdatesInFrame
+6. Select only the Camera candidate named by Recognition_ID.
+7. Never substitute a different Camera candidate because its distance is closer
+   to Radar.
+8. Apply explicit selection-status classification.
+9. Accept a selected signal only when SignalAgeFrames is not greater than 1.
+10. Calculate ProvisionalDiscrepancy only when:
+    - CameraSelectionStatus is SELECTED_VALID;
+    - Radar detection is active;
+    - Radar distance is valid.
+
+The discrepancy definition is:
+
+    ProvisionalDiscrepancy
+        = RadarDistanceToObject - SelectedCameraDistance
+
+This field is a provisional inter-sensor discrepancy. It is not Camera error,
+Radar error, ground-truth error, or a final residual.
+
+
+6. Explicit Selection Status Contract
+
+Every canonical frame receives one CameraSelectionStatus:
+
+- PRE_VALID_FRAME
+- SELECTED_VALID
+- UNSUPPORTED_RECOGNITION_ID
+- MISSING_RECOGNITION_ID
+- NO_CANDIDATE_UPDATE_OBSERVED
+- INVALID_SELECTED_DISTANCE
+- STALE_SELECTED_SIGNAL
+
+The selector does not silently replace an invalid, unsupported, missing, or
+stale candidate with another Camera column.
+
+Within the 53,521 valid-region frames selecting one of the seven supported
+Camera CAN IDs:
+
+- SELECTED_VALID: 53,480
+- INVALID_SELECTED_DISTANCE: 1
+- NO_CANDIDATE_UPDATE_OBSERVED: 40
+- STALE_SELECTED_SIGNAL after the final age gate: 0
+
+The count of 40 NO_CANDIDATE_UPDATE_OBSERVED frames follows directly from the
+supported-selection total after subtracting SELECTED_VALID, the single invalid
+distance, and zero stale frames. These records occur before a usable update has
+been observed for the candidate selected by Recognition_ID and remain explicit
+data-quality states.
+
+
+7. Camera Selection Distribution
+
+Valid-region Recognition_ID selections were distributed as follows:
+
+- 0x221: 44,789 frames, approximately 83.68 percent
+- 0x223: 826 frames, approximately 1.54 percent
+- 0x251: 7,684 frames, approximately 14.36 percent
+- 0x253: 90 frames, approximately 0.17 percent
+- 0x255: 45 frames, approximately 0.08 percent
+- 0x257: 84 frames, approximately 0.16 percent
+- 0x259: 3 frames, approximately 0.006 percent
+
+Total supported selections:
+
+    53,521 frames
+
+Engineering interpretation:
+
+- 0x221 is the dominant selected Camera object message.
+- 0x251 is a meaningful secondary selected message and cannot be treated as an
+  exceptional one-time condition.
+- 0x223, 0x253, 0x255, 0x257, and 0x259 are rare but real selections. They must
+  remain supported and must not be silently remapped to 0x221 or 0x251.
+- 0x259 has only three selected frames in this log, so its behavior cannot be
+  generalized from the current dataset.
+
+
+8. Freshness and Update-Provenance Results
+
+Final selected-signal age metrics were:
+
+- SelectedCameraSignalAgeFrames median: 0.0
+- SelectedCameraSignalAgeFrames 95th percentile: 0.0
+- SelectedCameraSignalAgeFrames maximum: 1.0
+
+The initial MCRS001 run reported freshness but did not reject stale values.
+The final MCRS001R run enabled:
+
+    Maximum selected SignalAgeFrames = 1
+
+Compact verification result:
+
+    MCRS001R
+    A1-2222 A2-2222 A3-4441 A4-4444 A5-4444
+    A6-4441 A7-2222 A8-2222 A9-2422 A10-2222 C-8
+
+The change in A6 from the earlier report-only state to the final accepted state
+confirmed that the stale gate was enabled and the valid-region stale rate was
+zero.
+
+This result supports a strict age limit without discarding currently valid
+selected records. It does not authorize unlimited forward fill for future
+datasets. The age distribution must be checked again when the log, decoder
+configuration, or signal update rate changes.
+
+
+9. Structural Validation Results
+
+Static and compact-packet validation confirmed:
+
+- Input parsing completed successfully.
+- Output CSV, manifest, unsupported-reference report, transition report, and
+  log were generated successfully.
+- Input size and modification time were unchanged.
+- FrameCount was monotonic.
+- Canonical FrameCount was unique.
+- The input contained between 50,000 and 200,000 canonical frame records.
+- Both the stable and investigation regions were present.
+- Recognition_ID non-missing coverage was at least 90 percent.
+- Supported Recognition_ID coverage was at least 90 percent.
+- Unsupported Recognition_ID rate in the inspected valid region was zero.
+- Selector-valid coverage was at least 90 percent in the full valid region,
+  stable region, and investigation region.
+- Radar-detected and provisional-discrepancy coverage were each at least
+  90 percent.
+- Recognition_ID transitions occurred more than 100 times.
+- At least 90 percent of transitions were near a Camera update.
+- At least 90 percent of selected Camera records were updated in the same
+  FrameCount.
+- More than 100 Recognition_ID intra-frame conflict frames were preserved.
+- More than 100 frames with multiple candidate Camera updates were preserved.
+- Every required mapping was complete.
+- Optional mapping coverage was at least 90 percent.
+- All seven supported Camera CAN IDs appeared.
+
+These checks establish internal consistency and provenance coverage. They do
+not by themselves prove that the selected Camera object is the same physical
+object measured by Radar.
+
+
+10. Provisional Discrepancy Results
+
+For the current canonical selected dataset:
+
+- ProvisionalDiscrepancy median: 1.9425 m
+- Absolute ProvisionalDiscrepancy 95th percentile: approximately 2.6240 m
+
+An earlier exploratory distance-bin analysis reported:
+
+- 0 to 5 m: 1.8975 m
+- 5 to 10 m: 1.9125 m
+- 10 to 15 m: 2.0300 m
+- 15 to 20 m: 2.0675 m
+- 20 to 25 m: 2.1200 m
+
+The earlier result is retained as supporting evidence, not as the final
+baseline, because it was calculated before the canonical multi-Camera selector
+was frozen.
+
+Combined interpretation:
+
+- The raw/provisional discrepancy contains an approximately 2 m normal offset.
+- The offset is not a single constant; it appears to increase gradually with
+  distance over the observed range.
+- A zero-centered raw-discrepancy threshold would therefore be invalid.
+- A final distance-dependent baseline must be estimated again from the frozen
+  canonical dataset.
+- The current evidence does not yet determine whether a binned median, smooth
+  curve, robust regression, or another simple baseline form is best.
+
+
+11. Output Files and Interface
+
+MCRS001 produced:
+
+- multi_camera_canonical_frame_v0_1.csv
+- multi_camera_reference_transitions_v0_1.csv
+- multi_camera_unsupported_references_v0_1.csv
+- multi_camera_selector_manifest_v0_1.json
+- multi_camera_selector_log_v0_1.txt
+
+The canonical output contains at least:
+
+- FrameCount and region
+- Recognition_ID
+- SelectedCameraCANID_Decimal and SelectedCameraCANID_Hex
+- Selected Camera distance, relative speed, lateral position, switching flag,
+  object-detection type, and message counter
+- SelectedCameraLastUpdateFrame
+- SelectedCameraSignalAgeFrames
+- SelectedCameraUpdatedThisFrame
+- Per-candidate update and age diagnostics
+- CameraSelectionStatus
+- Radar distance, relative speed, and detection status
+- Recognition transition and intra-frame conflict evidence
+- ProvisionalDiscrepancy
+
+This file is the approved input for VRQ001 and the later formal baseline
+experiment. P003 zero filling is not permitted between MCRS001 and those tasks.
+
+
+12. Decisions
+
+KEEP
+
+- FrameCount as the only currently trusted Camera/video alignment axis.
+- Recognition_ID decimal CAN-ID mapping as the engineering Camera selector.
+- All seven observed Camera candidate messages.
+- MessageCounter-change reconstruction of real Camera updates.
+- One canonical record per FrameCount.
+- Explicit freshness, validity, conflict, and unsupported-state metadata.
+- Maximum selected SignalAgeFrames of 1 for the current dataset.
+- Radar as a provisional reference only.
+- ProvisionalDiscrepancy as a pre-baseline diagnostic field.
+
+REJECT
+
+- A fixed 0x221 or 0x251 Camera column for the complete recording.
+- Recognition_ID values 1 and 3 as candidate identifiers.
+- Selecting the Camera target by minimum distance to Radar.
+- Silent fallback to another Camera candidate.
+- Unlimited forward-filled selected signals without age metadata.
+- P003 default blank-to-zero filling before selector/baseline validation.
+- Treating FrameCount 38239 as a selector rule.
+- Treating ProvisionalDiscrepancy as Camera ground-truth error.
+- Applying an anomaly threshold directly around zero to the raw discrepancy.
+
+MODIFY
+
+- The earlier two-Camera selector was expanded to seven Camera candidates.
+- The initial report-only age metric was converted into a formal maximum-age
+  gate of 1 FrameCount.
+- The earlier distance-bin baseline observation must be repeated with the
+  frozen canonical dataset before formal adoption.
+
+
+13. Limitations and Open Questions
+
+1. Recognition_ID semantics remain an engineering interpretation pending
+   direct DBC/business confirmation.
+2. Radar provides no corresponding object ID and is not ground truth.
+3. Physical Camera-Radar target correspondence has not been proven.
+4. Video review of rare IDs, transitions, conflicts, and controls is not part
+   of MCRS001; it is delegated to VRQ001.
+5. Signal-specific invalid sentinels are not yet complete for every signal.
+6. ObjectDetectionType and SwitchingFlag semantics are not yet approved as
+   hard validity gates.
+7. The contract has been tested on one expanded decoded log, not across
+   multiple videos or logs.
+8. The selected age limit must be revalidated when sampling rates, decoder
+   behavior, or datasets change.
+9. MessageCounter wrap, reset, and abnormal-counter behavior require cross-log
+   validation even though ordinary counter changes were sufficient here.
+10. The current drive contains little data beyond approximately 30 m, so the
+   observed distance trend cannot be extrapolated to longer ranges.
+11. The final distance-dependent baseline has not yet been fitted on the frozen
+   canonical output.
+12. Provisional-discrepancy tail samples are enriched investigation cases and
+    cannot estimate population event rate or false-positive rate.
+
+
+14. Handoff to the Next Task
+
+Next task:
+
+    VRQ001 - Video Review Queue and Selector Plausibility Validation
+
+VRQ001 reads multi_camera_canonical_frame_v0_1.csv and generates a small,
+deterministic queue covering:
+
+- FrameCount 6500 and 38239 anchors
+- every selected Camera CAN ID
+- representative Recognition_ID transitions
+- Recognition_ID conflicts
+- multiple-Camera-update evidence
+- maximum selected-signal age
+- selection-status exceptions
+- positive and negative provisional-discrepancy tails
+- stable and investigation-region controls
+
+VRQ001 must validate selector plausibility against the displayed/tracked Camera
+target. It must not use the enriched review sample to estimate overall anomaly
+prevalence or root cause.
+
+After VRQ001 closes, the next formal modeling task is to re-estimate and test
+the distance-dependent baseline on the frozen canonical dataset.
+
+
+15. Knowledge Topics for Later Study
+
+CAN and DBC
+
+- CAN message IDs and decimal/hexadecimal representation
+- DBC signal semantics, invalid sentinels, counters, and status bits
+- Multi-rate bus behavior
+
+Asynchronous signal processing
+
+- Sample-and-hold and zero-order hold
+- Update provenance
+- Signal age and stale-data gates
+- Resampling and aliasing between update rates
+
+Target tracking and data association
+
+- Track identity versus measurement identity
+- Target continuity and switching
+- Gating and nearest-neighbor association
+- Why association cannot be chosen using the error metric being evaluated
+
+Time-series data contracts
+
+- One-row-per-frame snapshots
+- Stable ordering and duplicate keys
+- End-of-frame aggregation
+- Deterministic transforms and data lineage
+
+Robust statistics
+
+- Conditional median baseline
+- Median absolute deviation
+- Distance-dependent structure
+- Residual and robust threshold definitions
+
+System Identification, for a later phase
+
+- AR and ARX models
+- Delay and residual memory
+- Prediction error and innovation
+- Residual whiteness testing
+
+Suggested long-term references remain:
+
+- Keesman, System Identification: An Introduction
+- Ljung, System Identification: Theory for the User, for deeper later study
+- An introductory CAN/DBC reference from Vector or CAN in Automation
+- Bar-Shalom, Li, and Kirubarajan, introductory data-association sections
+- Kleppmann, Designing Data-Intensive Applications, for data contracts and
+  reproducible dataflow concepts
+
+
+16. Node Exit Criteria and Closure
+
+MCRS001 exit criteria were:
+
+- The seven supported Camera CAN IDs were decoded and mapped.
+- Recognition_ID either selected a registered Camera candidate or produced an
+  explicit non-valid status.
+- MessageCounter update provenance and SignalAgeFrames were exported.
+- The final maximum selected SignalAgeFrames gate was configured and verified.
+- The output contained one deterministic row per FrameCount.
+- Required outputs and manifest were generated without modifying the input.
+- The contract retained conflicts and did not select by Radar-distance
+  proximity.
+
+All MCRS001 exit criteria are satisfied.
+
+Final status:
+
+    COMPLETE - Canonical Dataset Contract v0.1 frozen.
+
+The next independent validation task is VRQ001.
