@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-VERSION = "camera_reference_logic_profiler_v0.1"
+VERSION = "camera_reference_logic_profiler_v0.2"
 NONE_ROLE = "<NONE>"
 
 
@@ -115,7 +115,7 @@ def configuration_dialog(columns):
         from tkinter import messagebox, ttk
 
         root = tk.Tk()
-        root.title("Camera Reference Logic Profiler v0.1")
+        root.title("Camera Reference Logic Profiler v0.2")
         root.attributes("-topmost", True)
         root.resizable(True, True)
 
@@ -149,8 +149,9 @@ def configuration_dialog(columns):
             root,
             text=(
                 "Map each role to its decoded column. Camera 1 and Camera 3 roles must use "
-                "their own 0x221/0x251 columns. This program tests Recognition_ID=1/3; "
-                "it does not assume the hypothesis is correct and never selects by Radar closeness."
+                "their own 0x221/0x251 columns. This program tests whether Recognition_ID "
+                "contains the decimal Camera CAN ID (0x221=545, 0x251=593). It uses the "
+                "end-of-frame state, preserves conflict flags, and never selects by Radar closeness."
             ),
             wraplength=840,
             justify="left",
@@ -186,8 +187,8 @@ def configuration_dialog(columns):
         entry_specs = [
             ("Valid driving start Framecount", "valid_start", "6500"),
             ("Observed switching-region start Framecount", "switch_start", "38239"),
-            ("Recognition_ID value for Camera 1", "recognition_cam1", "1"),
-            ("Recognition_ID value for Camera 3", "recognition_cam3", "3"),
+            ("Recognition_ID value for Camera 1 / 0x221", "recognition_cam1", "545"),
+            ("Recognition_ID value for Camera 3 / 0x251", "recognition_cam3", "593"),
             ("Radar detected flag value", "radar_detected_value", "1"),
             ("Radar invalid sentinel(s), comma separated", "radar_sentinels", ""),
             ("Camera invalid sentinel(s), comma separated", "camera_sentinels", "0"),
@@ -435,7 +436,8 @@ def profile(path: Path, config: dict, output_dir: Path):
         ["PRE_VALID", "STABLE"],
         default="SWITCH",
     )
-    frame["recognition_selector"] = "UNKNOWN"
+    frame["recognition_selector"] = "UNSUPPORTED"
+    frame.loc[frame["recognition_id"].isna(), "recognition_selector"] = "MISSING"
     rec_conflict = frame["recognition_id_intra_frame_conflict"]
     match_cam1 = np.isclose(
         frame["recognition_id"], config["recognition_cam1"], rtol=0, atol=1e-12, equal_nan=False
@@ -443,8 +445,8 @@ def profile(path: Path, config: dict, output_dir: Path):
     match_cam3 = np.isclose(
         frame["recognition_id"], config["recognition_cam3"], rtol=0, atol=1e-12, equal_nan=False
     )
-    frame.loc[match_cam1 & ~rec_conflict, "recognition_selector"] = "CAM1"
-    frame.loc[match_cam3 & ~rec_conflict, "recognition_selector"] = "CAM3"
+    frame.loc[match_cam1, "recognition_selector"] = "CAM1"
+    frame.loc[match_cam3, "recognition_selector"] = "CAM3"
 
     previous_selector = frame["recognition_selector"].shift(1)
     mapped_now = frame["recognition_selector"].isin(["CAM1", "CAM3"])
@@ -582,7 +584,10 @@ def profile(path: Path, config: dict, output_dir: Path):
         "recognition_nonmissing_rate_valid": boolean_rate(
             frame["recognition_id"].notna(), valid_mask
         ),
-        "recognition_1_or_3_rate_valid": boolean_rate(mapped_mask, valid_mask),
+        "recognition_supported_id_rate_valid": boolean_rate(mapped_mask, valid_mask),
+        "recognition_unsupported_id_rate_valid": boolean_rate(
+            frame["recognition_selector"].eq("UNSUPPORTED"), valid_mask
+        ),
         "stable_selector_dominance": stable_dominance,
         "recognition_transition_count": int(transition_mask.sum()),
         "transition_flag_change_near_rate": boolean_rate(
@@ -639,10 +644,10 @@ def profile(path: Path, config: dict, output_dir: Path):
         after_stat.st_size == before_stat.st_size
         and after_stat.st_mtime_ns == before_stat.st_mtime_ns
     )
-    frame_path = output_dir / "camera_reference_frame_profile_v0_1.csv"
-    transition_path = output_dir / "camera_reference_transition_events_v0_1.csv"
-    manifest_path = output_dir / "camera_reference_manifest_v0_1.json"
-    log_path = output_dir / "camera_reference_log_v0_1.txt"
+    frame_path = output_dir / "camera_reference_frame_profile_v0_2.csv"
+    transition_path = output_dir / "camera_reference_transition_events_v0_2.csv"
+    manifest_path = output_dir / "camera_reference_manifest_v0_2.json"
+    log_path = output_dir / "camera_reference_log_v0_2.txt"
 
     frame.to_csv(frame_path, index=False, encoding="utf-8-sig")
     transitions.to_csv(transition_path, index=False, encoding="utf-8-sig")
@@ -684,7 +689,9 @@ def profile(path: Path, config: dict, output_dir: Path):
         },
         "optional_signal_distributions": optional_distributions,
         "interpretation_limits": [
-            "Recognition_ID=1/3 is a hypothesis under test, not an approved selector rule.",
+            "Recognition_ID decimal CAN-ID mapping is a hypothesis under test, not an approved selector rule.",
+            "The last decoded row inside each Framecount is used as the end-of-frame state; intra-frame conflicts remain visible in output.",
+            "Recognition_ID values outside the two decoded candidates are marked UNSUPPORTED and are never reassigned by distance.",
             "Radar is a provisional reference and has no target ID in this dataset.",
             "Provisional discrepancy is diagnostic only and must not be reported as camera error.",
             "The observed 38239 boundary is a validation label, not an algorithm rule.",
@@ -745,7 +752,7 @@ def profile(path: Path, config: dict, output_dir: Path):
         2 if pre_mask.any() else 1,
         2 if switch_mask.any() else 1,
         rate_code(metrics["recognition_nonmissing_rate_valid"]),
-        rate_code(metrics["recognition_1_or_3_rate_valid"]),
+        rate_code(metrics["recognition_supported_id_rate_valid"]),
         stable_code,
         switch_both_code,
         count_code(metrics["recognition_transition_count"]),
@@ -766,14 +773,14 @@ def profile(path: Path, config: dict, output_dir: Path):
         count_code(metrics["camera_distance_conflict_frame_count"]),
         optional_rate("halt_state"),
         optional_rate("auto_adjust_complete"),
-        2 if pre_mask.any() else 1,
+        rate_code(metrics["recognition_unsupported_id_rate_valid"]),
         2,
     ]
     return codes, manifest
 
 
 def output_packet(codes):
-    print("CRL001B1-8")
+    print("CRL002B1-8")
     for index in range(8):
         block = codes[index * 4 : (index + 1) * 4]
         print(f"A{index + 1}-" + "".join(str(value) for value in block))
@@ -795,7 +802,7 @@ def main():
         zero_packet()
         return
     output_dir = Path(__file__).resolve().parent / (
-        "camera_reference_logic_profile_v0_1_"
+        "camera_reference_logic_profile_v0_2_"
         + datetime.now().strftime("%Y%m%d_%H%M%S")
     )
     codes, _ = profile(path, config, output_dir)
@@ -808,7 +815,7 @@ if __name__ == "__main__":
     except Exception as exc:
         try:
             Path(__file__).resolve().with_name(
-                "camera_reference_logic_profiler_v0_1_FATAL.txt"
+                "camera_reference_logic_profiler_v0_2_FATAL.txt"
             ).write_text(f"{type(exc).__name__}: {exc}\n", encoding="utf-8")
         except Exception:
             pass
