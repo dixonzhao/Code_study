@@ -1,0 +1,860 @@
+#!/usr/bin/env python3
+"""
+FrameCount Video Reviewer v0.1
+
+Purpose
+-------
+Review test videos by external CAN FrameCount instead of coarse time jumps.
+
+Main functions
+--------------
+- Open AVI/MP4/MOV/MKV through OpenCV.
+- Map video frame index to an external FrameCount using an anchor.
+- Support 1:1 mapping or rate-based mapping.
+- Jump directly to an absolute FrameCount.
+- Step by 1, 10, 20, or 100 FrameCounts.
+- Play at 0.10x, 0.25x, 0.50x, 1.00x, or 2.00x.
+- Load an event/review CSV and jump to each event window.
+- Record one review code plus a short memo for each event.
+- Export a full local review CSV and a compact return code TXT.
+
+Dependency
+----------
+opencv-python (cv2)
+
+The program uses tkinter from the Python standard library and does not require
+Pillow. All files remain local on the company computer.
+"""
+
+from __future__ import annotations
+
+import csv
+import math
+import re
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+
+VERSION = "0.1"
+REVIEW_CODES = {
+    "": "Not reviewed",
+    "1": "Correct / expected",
+    "2": "Incorrect / mismatch",
+    "3": "Real target or scene change",
+    "4": "Unclear",
+    "5": "Video unavailable",
+}
+
+
+def normalized_name(value: object) -> str:
+    text = "" if value is None else str(value)
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+
+def compact_text(value: object, limit: int = 40) -> str:
+    text = " ".join(str(value).replace("\r", " ").replace("\n", " ").split())
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def read_delimited_file(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+    encodings = ["utf-8-sig", "utf-8", "cp932", "shift_jis", "latin-1"]
+    last_error: Exception | None = None
+    for encoding in encodings:
+        try:
+            sample = path.read_text(encoding=encoding, errors="strict")[:8192]
+            try:
+                dialect = csv.Sniffer().sniff(sample, delimiters=",\t;")
+            except csv.Error:
+                dialect = csv.excel
+            with path.open("r", encoding=encoding, newline="") as handle:
+                reader = csv.DictReader(handle, dialect=dialect)
+                fieldnames = [str(name) for name in (reader.fieldnames or [])]
+                rows = [
+                    {str(key): "" if value is None else str(value) for key, value in row.items()}
+                    for row in reader
+                ]
+            if not fieldnames:
+                raise RuntimeError("The event file has no header row.")
+            return fieldnames, rows
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"Event file could not be read: {last_error}")
+
+
+def find_column(fieldnames: list[str], candidates: tuple[str, ...]) -> str | None:
+    normalized = {normalized_name(name): name for name in fieldnames}
+    for candidate in candidates:
+        key = normalized_name(candidate)
+        if key in normalized:
+            return normalized[key]
+    for candidate in candidates:
+        key = normalized_name(candidate)
+        for normalized_field, original in normalized.items():
+            if key and key in normalized_field:
+                return original
+    return None
+
+
+def parse_number(value: object) -> float | None:
+    try:
+        number = float(str(value).strip())
+        return number if math.isfinite(number) else None
+    except Exception:
+        return None
+
+
+@dataclass
+class ReviewEvent:
+    event_id: str
+    start_framecount: int
+    end_framecount: int
+    original: dict[str, str] = field(default_factory=dict)
+    review_result: str = ""
+    memo: str = ""
+
+    def display_text(self) -> str:
+        result = self.review_result or "-"
+        return (
+            f"{self.event_id} | FC {self.start_framecount}–{self.end_framecount} "
+            f"| R{result}"
+        )
+
+
+class FrameCountVideoReviewer:
+    def __init__(self) -> None:
+        try:
+            import cv2
+        except ImportError as exc:
+            raise RuntimeError(
+                "OpenCV is not available. The approved Python environment needs "
+                "the 'opencv-python' package (import name: cv2)."
+            ) from exc
+
+        import tkinter as tk
+        from tkinter import ttk
+
+        self.cv2 = cv2
+        self.tk = tk
+        self.ttk = ttk
+        self.root = tk.Tk()
+        self.root.title(f"FrameCount Video Reviewer v{VERSION}")
+        self.root.geometry("1480x920")
+        self.root.minsize(1050, 700)
+
+        self.capture = None
+        self.video_path: Path | None = None
+        self.video_fps = 20.0
+        self.total_frames = 0
+        self.current_video_index = -1
+        self.current_bgr_frame = None
+        self.tk_image = None
+        self.playing = False
+        self.after_id = None
+
+        self.all_events: list[ReviewEvent] = []
+        self.events: list[ReviewEvent] = []
+        self.current_event_index = -1
+        self.event_file_path: Path | None = None
+
+        self.anchor_video_var = tk.StringVar(value="0")
+        self.anchor_framecount_var = tk.StringVar(value="0")
+        self.framecount_rate_var = tk.StringVar(value="20")
+        self.mapping_mode_var = tk.StringVar(value="1:1")
+        self.jump_framecount_var = tk.StringVar(value="")
+        self.speed_var = tk.StringVar(value="0.25")
+        self.loop_event_var = tk.BooleanVar(value=False)
+        self.review_code_var = tk.StringVar(value="")
+        self.memo_var = tk.StringVar(value="")
+        self.event_filter_var = tk.StringVar(value="")
+
+        self.video_info_var = tk.StringVar(value="No video loaded")
+        self.position_var = tk.StringVar(value="Video frame: — | FrameCount: — | Time: —")
+        self.mapping_info_var = tk.StringVar(value="Mapping not configured")
+        self.event_info_var = tk.StringVar(value="No event file loaded")
+        self.status_var = tk.StringVar(value="Ready")
+
+        self._build_ui()
+        self._bind_keys()
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+
+    # ------------------------------------------------------------------ UI
+    def _build_ui(self) -> None:
+        tk = self.tk
+        ttk = self.ttk
+
+        main = ttk.Frame(self.root, padding=8)
+        main.pack(fill="both", expand=True)
+        main.columnconfigure(0, weight=4)
+        main.columnconfigure(1, weight=1)
+        main.rowconfigure(1, weight=1)
+
+        toolbar = ttk.Frame(main)
+        toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        ttk.Button(toolbar, text="Open Video", command=self.open_video).pack(side="left", padx=2)
+        ttk.Button(toolbar, text="Load Event CSV", command=self.load_event_csv).pack(side="left", padx=2)
+        ttk.Button(toolbar, text="Export Reviews", command=self.export_reviews).pack(side="left", padx=2)
+        ttk.Button(toolbar, text="Save Screenshot", command=self.save_screenshot).pack(side="left", padx=2)
+        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=8)
+        ttk.Label(toolbar, textvariable=self.video_info_var).pack(side="left", padx=4)
+
+        video_panel = ttk.Frame(main, relief="sunken")
+        video_panel.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
+        video_panel.rowconfigure(0, weight=1)
+        video_panel.columnconfigure(0, weight=1)
+        self.video_canvas = tk.Canvas(video_panel, background="black", highlightthickness=0)
+        self.video_canvas.grid(row=0, column=0, sticky="nsew")
+        self.video_canvas.bind("<Configure>", lambda event: self._render_current_frame())
+
+        position_bar = ttk.Frame(video_panel, padding=(6, 4))
+        position_bar.grid(row=1, column=0, sticky="ew")
+        ttk.Label(position_bar, textvariable=self.position_var, font=("TkDefaultFont", 12, "bold")).pack(
+            side="left"
+        )
+
+        controls = ttk.Frame(video_panel, padding=(6, 2, 6, 6))
+        controls.grid(row=2, column=0, sticky="ew")
+        ttk.Button(controls, text="⏮ Event Start", command=self.go_event_start).pack(side="left", padx=2)
+        ttk.Button(controls, text="-100", command=lambda: self.step_framecount(-100)).pack(side="left", padx=2)
+        ttk.Button(controls, text="-20", command=lambda: self.step_framecount(-20)).pack(side="left", padx=2)
+        ttk.Button(controls, text="-10", command=lambda: self.step_framecount(-10)).pack(side="left", padx=2)
+        ttk.Button(controls, text="◀ -1", command=lambda: self.step_video_frames(-1)).pack(side="left", padx=2)
+        self.play_button = ttk.Button(controls, text="▶ Play", command=self.toggle_play)
+        self.play_button.pack(side="left", padx=6)
+        ttk.Button(controls, text="+1 ▶", command=lambda: self.step_video_frames(1)).pack(side="left", padx=2)
+        ttk.Button(controls, text="+10", command=lambda: self.step_framecount(10)).pack(side="left", padx=2)
+        ttk.Button(controls, text="+20", command=lambda: self.step_framecount(20)).pack(side="left", padx=2)
+        ttk.Button(controls, text="+100", command=lambda: self.step_framecount(100)).pack(side="left", padx=2)
+        ttk.Button(controls, text="Event End ⏭", command=self.go_event_end).pack(side="left", padx=2)
+        ttk.Label(controls, text="Speed").pack(side="left", padx=(12, 2))
+        ttk.Combobox(
+            controls,
+            textvariable=self.speed_var,
+            values=["0.10", "0.25", "0.50", "1.00", "2.00"],
+            state="readonly",
+            width=6,
+        ).pack(side="left")
+        ttk.Checkbutton(controls, text="Loop event", variable=self.loop_event_var).pack(side="left", padx=8)
+
+        side = ttk.Frame(main)
+        side.grid(row=1, column=1, sticky="nsew")
+        side.columnconfigure(0, weight=1)
+        side.rowconfigure(3, weight=1)
+
+        mapping = ttk.LabelFrame(side, text="FrameCount Mapping", padding=8)
+        mapping.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        mapping.columnconfigure(1, weight=1)
+        self._entry_row(mapping, 0, "Anchor video frame (0-based)", self.anchor_video_var)
+        self._entry_row(mapping, 1, "Anchor CAN FrameCount", self.anchor_framecount_var)
+        self._entry_row(mapping, 2, "FrameCount rate (Hz)", self.framecount_rate_var)
+        ttk.Label(mapping, text="Mapping mode").grid(row=3, column=0, sticky="w", pady=2)
+        ttk.Combobox(
+            mapping,
+            textvariable=self.mapping_mode_var,
+            values=["1:1", "Rate-based"],
+            state="readonly",
+            width=14,
+        ).grid(row=3, column=1, sticky="ew", pady=2)
+        ttk.Button(mapping, text="Apply Mapping", command=self.apply_mapping).grid(
+            row=4, column=0, columnspan=2, sticky="ew", pady=(6, 2)
+        )
+        ttk.Label(mapping, textvariable=self.mapping_info_var, wraplength=330).grid(
+            row=5, column=0, columnspan=2, sticky="w", pady=2
+        )
+
+        jump = ttk.LabelFrame(side, text="Jump to CAN FrameCount", padding=8)
+        jump.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        jump.columnconfigure(0, weight=1)
+        self.jump_entry = ttk.Entry(jump, textvariable=self.jump_framecount_var)
+        self.jump_entry.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.jump_entry.bind("<Return>", lambda event: self.go_to_framecount())
+        ttk.Button(jump, text="Go", command=self.go_to_framecount).grid(row=0, column=1)
+
+        event_header = ttk.LabelFrame(side, text="Event Navigation", padding=8)
+        event_header.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        event_header.columnconfigure(1, weight=1)
+        ttk.Label(event_header, text="Filter event IDs").grid(row=0, column=0, sticky="w", padx=2)
+        filter_entry = ttk.Entry(event_header, textvariable=self.event_filter_var)
+        filter_entry.grid(row=0, column=1, sticky="ew", padx=2)
+        filter_entry.bind("<Return>", lambda event: self.apply_event_filter())
+        ttk.Button(event_header, text="Apply", command=self.apply_event_filter).grid(row=0, column=2, padx=2)
+        ttk.Button(event_header, text="Previous", command=self.previous_event).grid(row=1, column=0, padx=2)
+        ttk.Button(event_header, text="Next", command=self.next_event).grid(row=1, column=2, padx=2)
+        ttk.Label(event_header, textvariable=self.event_info_var, wraplength=330).grid(
+            row=2, column=0, columnspan=3, sticky="w", pady=(4, 0)
+        )
+
+        event_list_frame = ttk.Frame(side)
+        event_list_frame.grid(row=3, column=0, sticky="nsew", pady=(0, 6))
+        event_list_frame.rowconfigure(0, weight=1)
+        event_list_frame.columnconfigure(0, weight=1)
+        self.event_listbox = tk.Listbox(event_list_frame, exportselection=False, height=12)
+        event_scroll = ttk.Scrollbar(event_list_frame, orient="vertical", command=self.event_listbox.yview)
+        self.event_listbox.configure(yscrollcommand=event_scroll.set)
+        self.event_listbox.grid(row=0, column=0, sticky="nsew")
+        event_scroll.grid(row=0, column=1, sticky="ns")
+        self.event_listbox.bind("<<ListboxSelect>>", self._on_event_selected)
+
+        review = ttk.LabelFrame(side, text="Current Event Review", padding=8)
+        review.grid(row=4, column=0, sticky="ew")
+        review.columnconfigure(1, weight=1)
+        ttk.Label(review, text="Result code").grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Combobox(
+            review,
+            textvariable=self.review_code_var,
+            values=list(REVIEW_CODES.keys()),
+            state="readonly",
+            width=5,
+        ).grid(row=0, column=1, sticky="w", pady=2)
+        ttk.Label(review, text="1 correct, 2 wrong, 3 scene, 4 unclear, 5 unavailable", wraplength=300).grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=2
+        )
+        ttk.Label(review, text="Short memo").grid(row=2, column=0, sticky="w", pady=2)
+        ttk.Entry(review, textvariable=self.memo_var).grid(row=2, column=1, sticky="ew", pady=2)
+        ttk.Button(review, text="Save Event Review", command=self.save_current_event_review).grid(
+            row=3, column=0, columnspan=2, sticky="ew", pady=(6, 2)
+        )
+
+        status = ttk.Label(main, textvariable=self.status_var, relief="sunken", anchor="w")
+        status.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+
+    def _entry_row(self, parent, row: int, label: str, variable) -> None:
+        self.ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=2)
+        self.ttk.Entry(parent, textvariable=variable).grid(row=row, column=1, sticky="ew", pady=2)
+
+    def _bind_keys(self) -> None:
+        self.root.bind("<space>", lambda event: self._run_shortcut(event, self.toggle_play))
+        self.root.bind(
+            "<Left>", lambda event: self._run_shortcut(event, lambda: self.step_video_frames(-1))
+        )
+        self.root.bind(
+            "<Right>", lambda event: self._run_shortcut(event, lambda: self.step_video_frames(1))
+        )
+        self.root.bind(
+            "<Shift-Left>", lambda event: self._run_shortcut(event, lambda: self.step_framecount(-10))
+        )
+        self.root.bind(
+            "<Shift-Right>", lambda event: self._run_shortcut(event, lambda: self.step_framecount(10))
+        )
+        self.root.bind(
+            "<Control-Left>", lambda event: self._run_shortcut(event, lambda: self.step_framecount(-100))
+        )
+        self.root.bind(
+            "<Control-Right>", lambda event: self._run_shortcut(event, lambda: self.step_framecount(100))
+        )
+        self.root.bind("<Up>", lambda event: self._run_shortcut(event, self.previous_event))
+        self.root.bind("<Down>", lambda event: self._run_shortcut(event, self.next_event))
+        self.root.bind("g", lambda event: self._focus_jump_entry(event))
+
+    def _run_shortcut(self, event, action):
+        if event.widget.winfo_class() in {"Entry", "TEntry", "TCombobox", "Text"}:
+            return None
+        action()
+        return "break"
+
+    def _focus_jump_entry(self, event):
+        if event.widget.winfo_class() in {"Entry", "TEntry", "TCombobox", "Text"}:
+            return None
+        self.jump_entry.focus_set()
+        return "break"
+
+    # ----------------------------------------------------------- video mapping
+    def _mapping_values(self) -> tuple[int, int, float, str]:
+        anchor_video = int(float(self.anchor_video_var.get()))
+        anchor_framecount = int(float(self.anchor_framecount_var.get()))
+        rate = float(self.framecount_rate_var.get())
+        mode = self.mapping_mode_var.get()
+        if rate <= 0:
+            raise ValueError("FrameCount rate must be greater than zero.")
+        if mode not in {"1:1", "Rate-based"}:
+            raise ValueError("Unknown mapping mode.")
+        return anchor_video, anchor_framecount, rate, mode
+
+    def video_index_to_framecount(self, video_index: int) -> int:
+        anchor_video, anchor_fc, rate, mode = self._mapping_values()
+        delta = video_index - anchor_video
+        if mode == "1:1":
+            return anchor_fc + delta
+        return anchor_fc + int(round(delta * rate / self.video_fps))
+
+    def framecount_to_video_index(self, framecount: int) -> int:
+        anchor_video, anchor_fc, rate, mode = self._mapping_values()
+        delta = framecount - anchor_fc
+        if mode == "1:1":
+            return anchor_video + delta
+        return anchor_video + int(round(delta * self.video_fps / rate))
+
+    def apply_mapping(self) -> None:
+        try:
+            anchor_video, anchor_fc, rate, mode = self._mapping_values()
+            self.mapping_info_var.set(
+                f"Video frame {anchor_video} ↔ CAN FC {anchor_fc}; mode={mode}; "
+                f"video={self.video_fps:.6g} fps, FC={rate:.6g} Hz"
+            )
+            self._update_position_text()
+            self.status_var.set("FrameCount mapping applied")
+        except Exception as exc:
+            self._show_error("Mapping error", exc)
+
+    # --------------------------------------------------------------- video I/O
+    def open_video(self) -> None:
+        from tkinter import filedialog
+
+        selected = filedialog.askopenfilename(
+            title="Open test video",
+            filetypes=[
+                ("Video files", "*.avi *.mp4 *.mov *.mkv *.wmv *.mpg *.mpeg"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not selected:
+            return
+        self.stop_playback()
+        if self.capture is not None:
+            self.capture.release()
+        capture = self.cv2.VideoCapture(selected)
+        if not capture.isOpened():
+            raise_error = RuntimeError(
+                "The video could not be opened by OpenCV. The codec may not be supported "
+                "in this Python environment."
+            )
+            self._show_error("Video open error", raise_error)
+            return
+        self.capture = capture
+        self.video_path = Path(selected)
+        detected_fps = float(capture.get(self.cv2.CAP_PROP_FPS))
+        self.video_fps = detected_fps if math.isfinite(detected_fps) and detected_fps > 0 else 20.0
+        self.total_frames = int(capture.get(self.cv2.CAP_PROP_FRAME_COUNT))
+        try:
+            backend = capture.getBackendName()
+        except Exception:
+            backend = "unknown"
+        self.video_info_var.set(
+            f"{self.video_path.name} | {self.total_frames:,} frames | "
+            f"{self.video_fps:.6g} fps | backend {backend}"
+        )
+        self.anchor_video_var.set("0")
+        if not self.anchor_framecount_var.get().strip():
+            self.anchor_framecount_var.set("0")
+        self.apply_mapping()
+        self.show_video_frame(0)
+
+    def show_video_frame(self, target_index: int) -> None:
+        if self.capture is None:
+            return
+        self.stop_playback()
+        target_index = max(0, min(int(target_index), max(self.total_frames - 1, 0)))
+        self.capture.set(self.cv2.CAP_PROP_POS_FRAMES, target_index)
+        ok, frame = self.capture.read()
+        if not ok:
+            self.status_var.set(f"Failed to decode video frame {target_index}")
+            return
+        reported_next = int(round(self.capture.get(self.cv2.CAP_PROP_POS_FRAMES)))
+        actual_index = max(0, reported_next - 1)
+        self.current_video_index = actual_index
+        self.current_bgr_frame = frame
+        self._render_current_frame()
+        self._update_position_text()
+        if actual_index != target_index:
+            self.status_var.set(
+                f"Requested video frame {target_index}; decoder reported frame {actual_index}. "
+                "Check the visible FrameCount overlay."
+            )
+        else:
+            self.status_var.set(f"Video frame {actual_index} loaded")
+
+    def _read_next_frame(self) -> bool:
+        if self.capture is None:
+            return False
+        ok, frame = self.capture.read()
+        if not ok:
+            self.stop_playback()
+            return False
+        reported_next = int(round(self.capture.get(self.cv2.CAP_PROP_POS_FRAMES)))
+        self.current_video_index = max(0, reported_next - 1)
+        self.current_bgr_frame = frame
+        self._render_current_frame()
+        self._update_position_text()
+        return True
+
+    def _render_current_frame(self) -> None:
+        if self.current_bgr_frame is None:
+            return
+        width = max(self.video_canvas.winfo_width(), 320)
+        height = max(self.video_canvas.winfo_height(), 240)
+        frame_height, frame_width = self.current_bgr_frame.shape[:2]
+        scale = min(width / frame_width, height / frame_height)
+        display_width = max(1, int(frame_width * scale))
+        display_height = max(1, int(frame_height * scale))
+        if display_width != frame_width or display_height != frame_height:
+            display = self.cv2.resize(
+                self.current_bgr_frame,
+                (display_width, display_height),
+                interpolation=self.cv2.INTER_AREA if scale < 1 else self.cv2.INTER_LINEAR,
+            )
+        else:
+            display = self.current_bgr_frame
+        rgb = self.cv2.cvtColor(display, self.cv2.COLOR_BGR2RGB)
+        ppm = f"P6 {display_width} {display_height} 255\n".encode("ascii") + rgb.tobytes()
+        self.tk_image = self.tk.PhotoImage(data=ppm, format="PPM")
+        self.video_canvas.delete("all")
+        self.video_canvas.create_image(width // 2, height // 2, image=self.tk_image, anchor="center")
+
+    def _update_position_text(self) -> None:
+        if self.current_video_index < 0:
+            return
+        seconds = self.current_video_index / self.video_fps
+        try:
+            framecount = self.video_index_to_framecount(self.current_video_index)
+            framecount_text = str(framecount)
+        except Exception:
+            framecount_text = "mapping error"
+        self.position_var.set(
+            f"Video frame: {self.current_video_index:,}/{max(self.total_frames - 1, 0):,} | "
+            f"CAN FrameCount: {framecount_text} | Time: {seconds:.3f} s"
+        )
+
+    # ------------------------------------------------------------- navigation
+    def go_to_framecount(self) -> None:
+        try:
+            target_fc = int(float(self.jump_framecount_var.get()))
+            target_video = self.framecount_to_video_index(target_fc)
+            self.show_video_frame(target_video)
+        except Exception as exc:
+            self._show_error("FrameCount jump error", exc)
+
+    def step_video_frames(self, delta: int) -> None:
+        if self.current_video_index < 0:
+            return
+        self.show_video_frame(self.current_video_index + int(delta))
+
+    def step_framecount(self, delta: int) -> None:
+        if self.current_video_index < 0:
+            return
+        try:
+            current_fc = self.video_index_to_framecount(self.current_video_index)
+            target_video = self.framecount_to_video_index(current_fc + int(delta))
+            self.show_video_frame(target_video)
+        except Exception as exc:
+            self._show_error("FrameCount step error", exc)
+
+    def toggle_play(self) -> None:
+        if self.capture is None:
+            return
+        if self.playing:
+            self.stop_playback()
+        else:
+            self.playing = True
+            self.play_button.configure(text="⏸ Pause")
+            self._schedule_next_frame()
+
+    def stop_playback(self) -> None:
+        self.playing = False
+        if hasattr(self, "play_button"):
+            self.play_button.configure(text="▶ Play")
+        if self.after_id is not None:
+            try:
+                self.root.after_cancel(self.after_id)
+            except Exception:
+                pass
+            self.after_id = None
+
+    def _schedule_next_frame(self) -> None:
+        if not self.playing:
+            return
+        if self.loop_event_var.get() and 0 <= self.current_event_index < len(self.events):
+            event = self.events[self.current_event_index]
+            current_fc = self.video_index_to_framecount(self.current_video_index)
+            if current_fc >= event.end_framecount:
+                self.show_video_frame(self.framecount_to_video_index(event.start_framecount))
+                self.playing = True
+                self.play_button.configure(text="⏸ Pause")
+        if not self._read_next_frame():
+            return
+        try:
+            speed = max(float(self.speed_var.get()), 0.01)
+        except Exception:
+            speed = 0.25
+        delay_ms = max(1, int(round(1000.0 / (self.video_fps * speed))))
+        self.after_id = self.root.after(delay_ms, self._schedule_next_frame)
+
+    # -------------------------------------------------------------- event CSV
+    def load_event_csv(self) -> None:
+        from tkinter import filedialog
+
+        selected = filedialog.askopenfilename(
+            title="Load event/review CSV",
+            filetypes=[("CSV or TSV", "*.csv *.tsv *.txt"), ("All files", "*.*")],
+        )
+        if not selected:
+            return
+        try:
+            path = Path(selected)
+            fieldnames, rows = read_delimited_file(path)
+            start_column = find_column(
+                fieldnames,
+                ("ReviewStartFrame", "StartFrame", "StartFrameCount", "WindowStart", "FrameStart"),
+            )
+            end_column = find_column(
+                fieldnames,
+                ("ReviewEndFrame", "EndFrame", "EndFrameCount", "WindowEnd", "FrameEnd"),
+            )
+            id_column = find_column(fieldnames, ("EventID", "WindowID", "QueueID", "ID"))
+            result_column = find_column(fieldnames, ("ReviewResult", "VideoReviewResult"))
+            memo_column = find_column(fieldnames, ("ReviewMemo", "Memo", "Comment"))
+            if start_column is None or end_column is None:
+                raise RuntimeError(
+                    "Start/end FrameCount columns were not found. Supported examples: "
+                    "ReviewStartFrame/ReviewEndFrame or StartFrame/EndFrame.\n\n"
+                    f"Headers: {', '.join(fieldnames)}"
+                )
+
+            events: list[ReviewEvent] = []
+            for row_number, row in enumerate(rows, start=1):
+                start_value = parse_number(row.get(start_column, ""))
+                end_value = parse_number(row.get(end_column, ""))
+                if start_value is None or end_value is None:
+                    continue
+                event_id = row.get(id_column, "") if id_column else ""
+                event_id = event_id.strip() or f"E{row_number:03d}"
+                result = row.get(result_column, "").strip() if result_column else ""
+                memo = row.get(memo_column, "").strip() if memo_column else ""
+                events.append(
+                    ReviewEvent(
+                        event_id=event_id,
+                        start_framecount=int(round(start_value)),
+                        end_framecount=int(round(end_value)),
+                        original=row,
+                        review_result=result if result in REVIEW_CODES else "",
+                        memo=memo,
+                    )
+                )
+            if not events:
+                raise RuntimeError("No valid event rows were found.")
+            self.all_events = events
+            self.events = list(events)
+            self.event_file_path = path
+            self.current_event_index = -1
+            self._refresh_event_list()
+            self.event_info_var.set(
+                f"{path.name}: {len(events)} events | columns {start_column} / {end_column}"
+            )
+            self.select_event(0)
+            self.status_var.set(f"Loaded {len(events)} review events")
+        except Exception as exc:
+            self._show_error("Event CSV error", exc)
+
+    def _refresh_event_list(self) -> None:
+        self.event_listbox.delete(0, self.tk.END)
+        for event in self.events:
+            self.event_listbox.insert(self.tk.END, event.display_text())
+
+    def apply_event_filter(self) -> None:
+        if not self.all_events:
+            return
+        requested = [
+            item.strip()
+            for item in re.split(r"[,;\s]+", self.event_filter_var.get().strip())
+            if item.strip()
+        ]
+        if not requested:
+            self.events = list(self.all_events)
+        else:
+            requested_normalized = {normalized_name(item) for item in requested}
+            self.events = [
+                event
+                for event in self.all_events
+                if normalized_name(event.event_id) in requested_normalized
+            ]
+        self.current_event_index = -1
+        self._refresh_event_list()
+        file_name = self.event_file_path.name if self.event_file_path else "event file"
+        self.event_info_var.set(
+            f"{file_name}: showing {len(self.events)} of {len(self.all_events)} events"
+        )
+        if self.events:
+            self.select_event(0)
+        else:
+            self.review_code_var.set("")
+            self.memo_var.set("")
+            self.status_var.set("No event IDs matched the filter")
+
+    def _on_event_selected(self, _event=None) -> None:
+        selection = self.event_listbox.curselection()
+        if selection:
+            self.select_event(int(selection[0]))
+
+    def select_event(self, index: int) -> None:
+        if not self.events:
+            return
+        index = max(0, min(index, len(self.events) - 1))
+        self.current_event_index = index
+        self.event_listbox.selection_clear(0, self.tk.END)
+        self.event_listbox.selection_set(index)
+        self.event_listbox.see(index)
+        event = self.events[index]
+        self.review_code_var.set(event.review_result)
+        self.memo_var.set(event.memo)
+        try:
+            self.show_video_frame(self.framecount_to_video_index(event.start_framecount))
+            self.status_var.set(
+                f"{event.event_id}: FC {event.start_framecount}–{event.end_framecount}"
+            )
+        except Exception as exc:
+            self._show_error("Event navigation error", exc)
+
+    def previous_event(self) -> None:
+        if self.events:
+            self.select_event(max(0, self.current_event_index - 1))
+
+    def next_event(self) -> None:
+        if self.events:
+            self.select_event(min(len(self.events) - 1, self.current_event_index + 1))
+
+    def go_event_start(self) -> None:
+        if 0 <= self.current_event_index < len(self.events):
+            self.show_video_frame(
+                self.framecount_to_video_index(self.events[self.current_event_index].start_framecount)
+            )
+
+    def go_event_end(self) -> None:
+        if 0 <= self.current_event_index < len(self.events):
+            self.show_video_frame(
+                self.framecount_to_video_index(self.events[self.current_event_index].end_framecount)
+            )
+
+    def save_current_event_review(self) -> None:
+        if not (0 <= self.current_event_index < len(self.events)):
+            return
+        code = self.review_code_var.get().strip()
+        if code not in REVIEW_CODES:
+            self._show_error("Review code error", RuntimeError("Review code must be 1–5 or blank."))
+            return
+        event = self.events[self.current_event_index]
+        event.review_result = code
+        event.memo = self.memo_var.get().strip()
+        self._refresh_event_list()
+        self.event_listbox.selection_set(self.current_event_index)
+        self.event_listbox.see(self.current_event_index)
+        self.status_var.set(
+            f"Saved {event.event_id}: R{code or '-'} {compact_text(event.memo)}"
+        )
+
+    def export_reviews(self) -> None:
+        if not self.events:
+            self._show_error("Export error", RuntimeError("No event file is loaded."))
+            return
+        if 0 <= self.current_event_index < len(self.events):
+            self.save_current_event_review()
+        output_dir = self.event_file_path.parent if self.event_file_path else Path.cwd()
+        csv_path = self._unique_path(output_dir / "framecount_video_review_results_v0_1.csv")
+        code_path = self._unique_path(output_dir / "VIDEO_REVIEW_RETURN_CODE.txt")
+        fieldnames = [
+            "EventID",
+            "StartFrameCount",
+            "EndFrameCount",
+            "ReviewResult",
+            "ReviewMemo",
+        ]
+        with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for event in self.events:
+                writer.writerow(
+                    {
+                        "EventID": event.event_id,
+                        "StartFrameCount": event.start_framecount,
+                        "EndFrameCount": event.end_framecount,
+                        "ReviewResult": event.review_result,
+                        "ReviewMemo": event.memo,
+                    }
+                )
+
+        reviewed = [event for event in self.events if event.review_result]
+        code_parts = [f"{event.event_id}:{event.review_result}" for event in reviewed]
+        lines = [
+            f"VRV1-N{len(self.events)}-R{len(reviewed)}-" + "-".join(code_parts),
+        ]
+        memo_number = 0
+        for event in reviewed:
+            if event.memo:
+                memo_number += 1
+                lines.append(f"M{memo_number}-{event.event_id}:{compact_text(event.memo, 80)}")
+        code_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.status_var.set(f"Review output saved: {csv_path.name} / {code_path.name}")
+        self._show_info(
+            "Reviews exported",
+            f"Full local output:\n{csv_path}\n\nCompact return code:\n{code_path}",
+        )
+
+    # ----------------------------------------------------------- screenshots
+    def save_screenshot(self) -> None:
+        if self.current_bgr_frame is None or self.video_path is None:
+            return
+        try:
+            framecount = self.video_index_to_framecount(self.current_video_index)
+            path = self._unique_path(
+                self.video_path.parent
+                / f"review_FC{framecount}_VF{self.current_video_index}.png"
+            )
+            if not self.cv2.imwrite(str(path), self.current_bgr_frame):
+                raise RuntimeError("OpenCV failed to write the screenshot.")
+            self.status_var.set(f"Screenshot saved locally: {path.name}")
+        except Exception as exc:
+            self._show_error("Screenshot error", exc)
+
+    # --------------------------------------------------------------- helpers
+    def _unique_path(self, path: Path) -> Path:
+        if not path.exists():
+            return path
+        for number in range(1, 1000):
+            candidate = path.with_name(f"{path.stem}_{number:03d}{path.suffix}")
+            if not candidate.exists():
+                return candidate
+        raise RuntimeError("No free output suffix is available from _001 to _999.")
+
+    def _show_error(self, title: str, error: Exception) -> None:
+        from tkinter import messagebox
+
+        self.status_var.set(f"ERROR: {error}")
+        messagebox.showerror(title, str(error), parent=self.root)
+
+    def _show_info(self, title: str, message: str) -> None:
+        from tkinter import messagebox
+
+        messagebox.showinfo(title, message, parent=self.root)
+
+    def run(self) -> None:
+        self.root.mainloop()
+
+    def close(self) -> None:
+        self.stop_playback()
+        if self.capture is not None:
+            self.capture.release()
+        self.root.destroy()
+
+
+def main() -> int:
+    try:
+        app = FrameCountVideoReviewer()
+        app.run()
+        return 0
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror("FrameCount Video Reviewer error", str(exc))
+            root.destroy()
+        except Exception:
+            pass
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
