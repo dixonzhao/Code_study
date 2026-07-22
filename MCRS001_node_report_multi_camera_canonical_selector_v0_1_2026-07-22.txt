@@ -2,41 +2,45 @@ Engineering Study Node Report
 
 Task ID: MCRS001
 Date: 2026-07-22
-Title: Multi-Camera Canonical Reference Selector and Frame-Level Data Contract v0.1
+Title: Recognition-Referenced Multi-Camera Dataset and Selector Hypothesis Test v0.1
 Project Area: Multi-rate CAN data processing, target-reference reconstruction, and camera-radar discrepancy localization
-Status: COMPLETE
+Status: COMPLETE - Recognition_ID target-selector hypothesis REJECTED by VRQ001
 
 
 1. Executive Outcome
 
-MCRS001 established a deterministic, one-row-per-FrameCount Camera reference
-dataset from seven possible Stereo Camera object-message sources.
-
-The selected Camera candidate is determined only from Recognition_ID and the
-corresponding Camera CAN message identity. Radar distance is never used to
-choose the Camera candidate. This avoids circular logic in the later
-Camera-Radar discrepancy analysis.
+MCRS001 established a deterministic, one-row-per-FrameCount dataset that maps
+Recognition_ID to one of seven Stereo Camera object-message sources. Radar
+distance was never used to choose the Camera candidate, avoiding circular
+selection logic.
 
 The task also restored update provenance lost by P002 wide-table forward fill.
-MessageCounter changes are used to reconstruct real Camera updates, and every
-selected signal carries SignalAgeFrames. The final accepted stale-data gate is:
+MessageCounter changes were used to reconstruct real Camera updates, and every
+Recognition-referenced signal carries SignalAgeFrames. The tested stale-data
+gate was:
 
     Maximum selected SignalAgeFrames = 1
 
-After this gate was enabled, no selected record in the valid analysis region
+After this gate was enabled, no referenced record in the valid analysis region
 was classified as STALE_SELECTED_SIGNAL.
 
-The resulting interface is frozen as:
+VRQ001 then tested whether the Recognition_ID-referenced Camera source matched
+the visible/controlled Camera target. Of 16 reviewable records, 12 contradicted
+the selector hypothesis, four supported it, and two additional records were
+unreviewable because the available video ended at FrameCount 57597.
 
-    Canonical Dataset Contract v0.1
+The formal outcome is therefore:
 
-This contract is sufficiently stable for the next task, VRQ001, which performs
-structured video review of selector transitions, rare Camera IDs, data-quality
-exceptions, and control frames.
+    REJECT: Recognition_ID alone is the active Camera/AKBPTS target selector.
 
-This outcome does not prove that Radar is ground truth, that Recognition_ID is
-the final business-approved target definition, or that a large discrepancy is
-a Camera error. Those interpretations remain explicitly outside this node.
+The one-row-per-FrameCount, MessageCounter provenance, SignalAge, conflict, and
+explicit-status mechanisms remain valid engineering assets. The existing
+output is retained as a Recognition-referenced diagnostic dataset, not as the
+approved Camera target input for baseline or discrepancy modeling.
+
+Recognition_ID decimal values still map to Camera CAN message IDs. What was
+rejected is the additional semantic assumption that this mapping identifies
+the current visible/controlled Camera target.
 
 
 2. Task Objective
@@ -120,9 +124,9 @@ This interpretation was derived from observed values and then tested against
 the expanded decoded dataset. All seven supported Camera IDs appeared in the
 valid analysis region.
 
-The interpretation is accepted as the current engineering selector contract.
-It is not represented as final business or DBC ground truth until direct
-semantic confirmation and video validation are complete.
+The decimal CAN-ID interpretation is retained. The stronger interpretation
+that Recognition_ID identifies the current active Camera/AKBPTS target was
+subsequently rejected by VRQ001 video validation.
 
 
 5. Canonical Selection Method
@@ -235,14 +239,15 @@ Compact verification result:
     A1-2222 A2-2222 A3-4441 A4-4444 A5-4444
     A6-4441 A7-2222 A8-2222 A9-2422 A10-2222 C-8
 
-The change in A6 from the earlier report-only state to the final accepted state
-confirmed that the stale gate was enabled and the valid-region stale rate was
-zero.
+The change in A6 from the earlier report-only state to the final configured
+state confirmed that the stale gate was enabled and the valid-region stale
+rate was zero.
 
-This result supports a strict age limit without discarding currently valid
-selected records. It does not authorize unlimited forward fill for future
-datasets. The age distribution must be checked again when the log, decoder
-configuration, or signal update rate changes.
+This result shows that a strict age limit did not discard the currently
+Recognition-referenced records. VRQ001 did not validate its business use for
+the true Camera target. It does not authorize unlimited forward fill for future
+datasets. The age distribution must be checked again when the target semantics,
+log, decoder configuration, or signal update rate changes.
 
 
 9. Structural Validation Results
@@ -294,20 +299,22 @@ An earlier exploratory distance-bin analysis reported:
 - 15 to 20 m: 2.0675 m
 - 20 to 25 m: 2.1200 m
 
-The earlier result is retained as supporting evidence, not as the final
-baseline, because it was calculated before the canonical multi-Camera selector
-was frozen.
+The earlier result remains a historical exploratory observation. It is not
+accepted as baseline evidence because the active Camera target was not
+reliably selected in either the earlier or current Recognition_ID-based data.
 
 Combined interpretation:
 
-- The raw/provisional discrepancy contains an approximately 2 m normal offset.
-- The offset is not a single constant; it appears to increase gradually with
-  distance over the observed range.
-- A zero-centered raw-discrepancy threshold would therefore be invalid.
-- A final distance-dependent baseline must be estimated again from the frozen
-  canonical dataset.
-- The current evidence does not yet determine whether a binned median, smooth
-  curve, robust regression, or another simple baseline form is best.
+- The Recognition_ID-referenced discrepancy has a descriptive median near
+  2 m and a descriptive distance trend in the earlier analysis.
+- After VRQ001, this structure may mix normal sensor offset with wrong Camera
+  target selection, Radar target mismatch, invalid no-target values, and
+  synchronization effects.
+- It cannot currently be called a normal-condition baseline.
+- A zero-centered raw-discrepancy threshold remains invalid, but no replacement
+  baseline should be fitted until the active Camera target is identified.
+- Choice of binned median, smooth curve, robust regression, or another baseline
+  form is deferred.
 
 
 11. Output Files and Interface
@@ -336,8 +343,10 @@ The canonical output contains at least:
 - Recognition transition and intra-frame conflict evidence
 - ProvisionalDiscrepancy
 
-This file is the approved input for VRQ001 and the later formal baseline
-experiment. P003 zero filling is not permitted between MCRS001 and those tasks.
+This file was the approved input for VRQ001. It is not approved as the Camera
+target input for the formal baseline experiment after VRQ001 rejected the
+selector hypothesis. P003 zero filling remains prohibited because it would
+remove the provenance needed for the next semantics investigation.
 
 
 12. Decisions
@@ -345,14 +354,17 @@ experiment. P003 zero filling is not permitted between MCRS001 and those tasks.
 KEEP
 
 - FrameCount as the only currently trusted Camera/video alignment axis.
-- Recognition_ID decimal CAN-ID mapping as the engineering Camera selector.
+- Recognition_ID decimal values as references to Camera CAN message IDs.
+- Recognition_ID as diagnostic internal-state information.
 - All seven observed Camera candidate messages.
 - MessageCounter-change reconstruction of real Camera updates.
 - One canonical record per FrameCount.
 - Explicit freshness, validity, conflict, and unsupported-state metadata.
-- Maximum selected SignalAgeFrames of 1 for the current dataset.
+- Maximum referenced SignalAgeFrames of 1 as a tested provenance gate; its use
+  for the eventual true target must be revalidated.
 - Radar as a provisional reference only.
-- ProvisionalDiscrepancy as a pre-baseline diagnostic field.
+- ProvisionalDiscrepancy only as a diagnostic field for this rejected
+  hypothesis, not as baseline input.
 
 REJECT
 
@@ -365,14 +377,19 @@ REJECT
 - Treating FrameCount 38239 as a selector rule.
 - Treating ProvisionalDiscrepancy as Camera ground-truth error.
 - Applying an anomaly threshold directly around zero to the raw discrepancy.
+- Recognition_ID alone as the active Camera/AKBPTS target selector.
+- Using the current Recognition_ID-selected ProvisionalDiscrepancy for formal
+  baseline or anomaly modeling.
 
 MODIFY
 
 - The earlier two-Camera selector was expanded to seven Camera candidates.
 - The initial report-only age metric was converted into a formal maximum-age
   gate of 1 FrameCount.
-- The earlier distance-bin baseline observation must be repeated with the
-  frozen canonical dataset before formal adoption.
+- Fields currently named SelectedCamera should be interpreted or renamed as
+  RecognitionReferencedCamera until the true target semantics are identified.
+- The earlier distance-bin baseline must not be repeated until the true Camera
+  target-selection signal is established.
 
 
 13. Limitations and Open Questions
@@ -381,8 +398,8 @@ MODIFY
    direct DBC/business confirmation.
 2. Radar provides no corresponding object ID and is not ground truth.
 3. Physical Camera-Radar target correspondence has not been proven.
-4. Video review of rare IDs, transitions, conflicts, and controls is not part
-   of MCRS001; it is delegated to VRQ001.
+4. VRQ001 video review rejected Recognition_ID alone as the active target
+   selector.
 5. Signal-specific invalid sentinels are not yet complete for every signal.
 6. ObjectDetectionType and SwitchingFlag semantics are not yet approved as
    hard validity gates.
@@ -394,22 +411,22 @@ MODIFY
    validation even though ordinary counter changes were sufficient here.
 10. The current drive contains little data beyond approximately 30 m, so the
    observed distance trend cannot be extrapolated to longer ranges.
-11. The final distance-dependent baseline has not yet been fitted on the frozen
-   canonical output.
+11. The final distance-dependent baseline is blocked until the active Camera
+   target semantics are identified and validated.
 12. Provisional-discrepancy tail samples are enriched investigation cases and
     cannot estimate population event rate or false-positive rate.
 
 
 14. Handoff to the Next Task
 
-Next task:
+Completed downstream task:
 
     VRQ001 - Video Review Queue and Selector Plausibility Validation
 
-VRQ001 reads multi_camera_canonical_frame_v0_1.csv and generates a small,
-deterministic queue covering:
+VRQ001 generated and reviewed a deterministic queue covering:
 
-- FrameCount 6500 and 38239 anchors
+- the original 6500 and 38239 anchors; VRQ001 subsequently corrected the formal
+  on-road valid-start boundary to approximately FrameCount 7329
 - every selected Camera CAN ID
 - representative Recognition_ID transitions
 - Recognition_ID conflicts
@@ -419,12 +436,10 @@ deterministic queue covering:
 - positive and negative provisional-discrepancy tails
 - stable and investigation-region controls
 
-VRQ001 must validate selector plausibility against the displayed/tracked Camera
-target. It must not use the enriched review sample to estimate overall anomaly
-prevalence or root cause.
-
-After VRQ001 closes, the next formal modeling task is to re-estimate and test
-the distance-dependent baseline on the frozen canonical dataset.
+VRQ001 rejected the target-selector hypothesis. The next task is not baseline
+modeling. It is a focused semantics/alignment investigation using AKBPTS or
+other displayed/controlled-target evidence, relevant 0x5E1 states, Camera
+candidate status, MessageCounter timing, and FrameCount alignment.
 
 
 15. Knowledge Topics for Later Study
@@ -494,10 +509,14 @@ MCRS001 exit criteria were:
 - The contract retained conflicts and did not select by Radar-distance
   proximity.
 
-All MCRS001 exit criteria are satisfied.
+The implementation and structural-validation exit criteria are satisfied. The
+subsequent selector-plausibility exit criterion produced a Reject decision,
+which is a valid experimental closure rather than a successful selector
+deployment.
 
 Final status:
 
-    COMPLETE - Canonical Dataset Contract v0.1 frozen.
+    COMPLETE - Recognition_ID active-target selector hypothesis rejected.
 
-The next independent validation task is VRQ001.
+The frame/provenance contract is retained. Target semantics must be redesigned
+before baseline, residual, threshold, or event analysis resumes.
