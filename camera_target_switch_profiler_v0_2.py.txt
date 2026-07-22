@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-VERSION = "camera_target_switch_profile_v0.1"
+VERSION = "camera_target_switch_profile_v0.2"
 CHUNK_SIZE = 500_000
 NONE_ROLE = "<NONE>"
 
@@ -128,7 +128,7 @@ def configuration_dialog(columns, detected_frame):
         from tkinter import messagebox, ttk
 
         root = tk.Tk()
-        root.title("Camera Target Switch Profiler v0.1")
+        root.title("Camera Target Switch Profiler v0.2")
         root.attributes("-topmost", True)
         root.resizable(True, False)
 
@@ -141,7 +141,7 @@ def configuration_dialog(columns, detected_frame):
             ("Radar / provisional reference distance", "radar_distance", False),
             ("Camera Candidate A distance (for example Channel 1)", "cam_a_distance", False),
             ("Camera Candidate B distance (for example Channel 3)", "cam_b_distance", False),
-            ("Reference / selected object ID", "reference_id", True),
+            ("Active target selector / Reference ID", "reference_id", True),
             ("Candidate A target/object ID", "cam_a_id", True),
             ("Candidate B target/object ID", "cam_b_id", True),
         ]
@@ -150,7 +150,8 @@ def configuration_dialog(columns, detected_frame):
         tk.Label(
             root,
             text=(
-                "Select raw candidate columns. Optional ID fields enable ID-based selection. "
+                "Select two candidate distances and the active-target selector when available. "
+                "Use fixed selector values (default A=1, B=3) when candidate ID columns do not exist. "
                 "The profiler never selects by closeness to Radar."
             ),
             wraplength=760,
@@ -172,7 +173,26 @@ def configuration_dialog(columns, detected_frame):
                 box.current(0)
             boxes[key] = box
 
-        sentinel_start = len(labels) + 1
+        selector_value_start = len(labels) + 1
+        tk.Label(root, text="Candidate A selector value (blank disables constant mapping)").grid(
+            row=selector_value_start, column=0, padx=12, pady=4, sticky="w"
+        )
+        cam_a_selector_value = ttk.Entry(root, width=76)
+        cam_a_selector_value.insert(0, "1")
+        cam_a_selector_value.grid(
+            row=selector_value_start, column=1, padx=12, pady=4, sticky="ew"
+        )
+
+        tk.Label(root, text="Candidate B selector value (blank disables constant mapping)").grid(
+            row=selector_value_start + 1, column=0, padx=12, pady=4, sticky="w"
+        )
+        cam_b_selector_value = ttk.Entry(root, width=76)
+        cam_b_selector_value.insert(0, "3")
+        cam_b_selector_value.grid(
+            row=selector_value_start + 1, column=1, padx=12, pady=4, sticky="ew"
+        )
+
+        sentinel_start = selector_value_start + 2
         tk.Label(root, text="Radar invalid sentinel(s), comma separated").grid(
             row=sentinel_start, column=0, padx=12, pady=4, sticky="w"
         )
@@ -213,6 +233,29 @@ def configuration_dialog(columns, detected_frame):
                 messagebox.showerror("Invalid threshold", "Jump threshold must be numeric.")
                 return
 
+            def optional_number(entry, label):
+                text = entry.get().strip()
+                if not text:
+                    return None
+                try:
+                    return float(text)
+                except ValueError as exc:
+                    raise ValueError(f"{label} must be numeric or blank.") from exc
+
+            try:
+                selector_a = optional_number(cam_a_selector_value, "Candidate A selector value")
+                selector_b = optional_number(cam_b_selector_value, "Candidate B selector value")
+            except ValueError as exc:
+                messagebox.showerror("Invalid selector value", str(exc))
+                return
+            if selector_a is not None and selector_b is not None and math.isclose(
+                selector_a, selector_b, rel_tol=0, abs_tol=1e-12
+            ):
+                messagebox.showerror(
+                    "Duplicate selector value", "Candidate A and B selector values must differ."
+                )
+                return
+
             config = {key: box.get() for key, box in boxes.items()}
             for key in ["reference_id", "cam_a_id", "cam_b_id"]:
                 if config[key] == NONE_ROLE:
@@ -222,6 +265,8 @@ def configuration_dialog(columns, detected_frame):
                     "radar_sentinels": sorted(parse_sentinels(radar_sentinel.get())),
                     "cam_a_sentinels": sorted(parse_sentinels(cam_a_sentinel.get())),
                     "cam_b_sentinels": sorted(parse_sentinels(cam_b_sentinel.get())),
+                    "cam_a_selector_value": selector_a,
+                    "cam_b_selector_value": selector_b,
                     "jump_threshold": threshold,
                     "confirmed": True,
                 }
@@ -257,6 +302,12 @@ def configuration_dialog(columns, detected_frame):
             "reference_id": optional("Reference ID index (blank none): "),
             "cam_a_id": optional("Camera A ID index (blank none): "),
             "cam_b_id": optional("Camera B ID index (blank none): "),
+            "cam_a_selector_value": float(
+                input("Camera A selector constant [1]: ").strip() or "1"
+            ),
+            "cam_b_selector_value": float(
+                input("Camera B selector constant [3]: ").strip() or "3"
+            ),
             "radar_sentinels": sorted(parse_sentinels(input("Radar sentinels: "))),
             "cam_a_sentinels": sorted(parse_sentinels(input("Camera A sentinels: "))),
             "cam_b_sentinels": sorted(parse_sentinels(input("Camera B sentinels: "))),
@@ -399,6 +450,19 @@ def profile(path: Path, config: dict, output_dir: Path):
     frame_rows = []
     switch_rows = []
     counts = Counter()
+    dynamic_mapping_configured = bool(config.get("cam_a_id") and config.get("cam_b_id"))
+    constant_mapping_configured = (
+        config.get("cam_a_selector_value") is not None
+        and config.get("cam_b_selector_value") is not None
+    )
+    mapping_mode = (
+        "DYNAMIC_CANDIDATE_IDS"
+        if dynamic_mapping_configured
+        else "FIXED_SELECTOR_VALUES"
+        if constant_mapping_configured
+        else "UNRESOLVED"
+    )
+    mapping_ready = bool(config.get("reference_id")) and mapping_mode != "UNRESOLVED"
     last_segment = None
     last_selected = None
     last_selected_discrepancy = None
@@ -432,22 +496,31 @@ def profile(path: Path, config: dict, output_dir: Path):
             counts["cam_b_conflict"] += 1
 
         selected = "UNKNOWN"
-        selection_reason = "ID_FIELDS_UNAVAILABLE"
-        if reference_id is not None and cam_a_id is not None and cam_b_id is not None:
-            match_a = math.isclose(reference_id, cam_a_id, rel_tol=0, abs_tol=1e-12)
-            match_b = math.isclose(reference_id, cam_b_id, rel_tol=0, abs_tol=1e-12)
+        selection_reason = "SELECTOR_UNAVAILABLE_OR_CONFLICTING"
+        comparison_a = None
+        comparison_b = None
+        if reference_id is not None and mapping_mode == "DYNAMIC_CANDIDATE_IDS":
+            comparison_a = cam_a_id
+            comparison_b = cam_b_id
+        elif reference_id is not None and mapping_mode == "FIXED_SELECTOR_VALUES":
+            comparison_a = config["cam_a_selector_value"]
+            comparison_b = config["cam_b_selector_value"]
+
+        if reference_id is not None and comparison_a is not None and comparison_b is not None:
+            match_a = math.isclose(reference_id, comparison_a, rel_tol=0, abs_tol=1e-12)
+            match_b = math.isclose(reference_id, comparison_b, rel_tol=0, abs_tol=1e-12)
             if match_a and not match_b:
                 selected = "A"
-                selection_reason = "REFERENCE_ID_MATCH_A"
+                selection_reason = f"SELECTOR_MATCH_A_{mapping_mode}"
             elif match_b and not match_a:
                 selected = "B"
-                selection_reason = "REFERENCE_ID_MATCH_B"
+                selection_reason = f"SELECTOR_MATCH_B_{mapping_mode}"
             elif match_a and match_b:
                 selected = "AMBIGUOUS"
-                selection_reason = "REFERENCE_ID_MATCH_BOTH"
+                selection_reason = f"SELECTOR_MATCH_BOTH_{mapping_mode}"
             else:
                 selected = "UNMATCHED"
-                selection_reason = "REFERENCE_ID_MATCH_NONE"
+                selection_reason = f"SELECTOR_MATCH_NONE_{mapping_mode}"
 
         selected_distance = cam_a if selected == "A" else cam_b if selected == "B" else None
         discrepancy = (
@@ -458,14 +531,14 @@ def profile(path: Path, config: dict, output_dir: Path):
 
         if selected in {"A", "B"}:
             counts[f"selected_{selected.lower()}"] += 1
-            counts["id_selected"] += 1
+            counts["selector_selected"] += 1
             selected_sequence.append((segment, selected))
         elif selected == "UNMATCHED":
-            counts["id_unmatched"] += 1
+            counts["selector_unmatched"] += 1
         elif selected == "AMBIGUOUS":
-            counts["id_ambiguous"] += 1
+            counts["selector_ambiguous"] += 1
         else:
-            counts["id_unknown"] += 1
+            counts["selector_unknown"] += 1
 
         is_switch = (
             selected in {"A", "B"}
@@ -533,19 +606,16 @@ def profile(path: Path, config: dict, output_dir: Path):
     counts["back_and_forth"] = back_and_forth
 
     total_frames = len(frame_rows)
-    id_fields_complete = all(
-        config.get(key) for key in ["reference_id", "cam_a_id", "cam_b_id"]
-    )
     input_after = path.stat()
     input_unchanged = (
         input_after.st_size == before_stat.st_size
         and input_after.st_mtime_ns == before_stat.st_mtime_ns
     )
 
-    frame_path = output_dir / "camera_target_frame_profile_v0_1.csv"
-    switch_path = output_dir / "camera_target_switch_events_v0_1.csv"
-    manifest_path = output_dir / "camera_target_switch_manifest_v0_1.json"
-    log_path = output_dir / "camera_target_switch_log_v0_1.txt"
+    frame_path = output_dir / "camera_target_frame_profile_v0_2.csv"
+    switch_path = output_dir / "camera_target_switch_events_v0_2.csv"
+    manifest_path = output_dir / "camera_target_switch_manifest_v0_2.json"
+    log_path = output_dir / "camera_target_switch_log_v0_2.txt"
 
     frame_fields = list(frame_rows[0].keys()) if frame_rows else []
     with frame_path.open("w", encoding="utf-8-sig", newline="") as handle:
@@ -589,6 +659,10 @@ def profile(path: Path, config: dict, output_dir: Path):
             "segment_count": segment_id + 1 if total_frames else 0,
             "backward_transition_count": backward_transitions,
         },
+        "target_mapping": {
+            "mode": mapping_mode,
+            "mapping_ready": mapping_ready,
+        },
         "counts": dict(counts),
         "rates": {
             key: value / max(1, total_frames)
@@ -598,7 +672,7 @@ def profile(path: Path, config: dict, output_dir: Path):
         "interpretation_limits": [
             "Radar is a provisional reference, not ground truth.",
             "The profiler never chooses a camera candidate by distance closeness to Radar.",
-            "Without complete ID fields, target selection remains unresolved.",
+            "Without a selector column and a valid dynamic-ID or fixed-value mapping, target selection remains unresolved.",
             "Configured sentinel values are local test assumptions and require business confirmation.",
             "A switch is an engineering review candidate, not root cause.",
         ],
@@ -615,7 +689,8 @@ def profile(path: Path, config: dict, output_dir: Path):
                 f"total_frames={total_frames}",
                 f"segment_count={segment_id + 1 if total_frames else 0}",
                 f"backward_transitions={backward_transitions}",
-                f"id_fields_complete={id_fields_complete}",
+                f"mapping_mode={mapping_mode}",
+                f"mapping_ready={mapping_ready}",
                 f"counts={dict(counts)}",
                 f"elapsed_seconds={time.perf_counter() - started_perf:.3f}",
                 f"input_unchanged={input_unchanged}",
@@ -629,9 +704,9 @@ def profile(path: Path, config: dict, output_dir: Path):
     rate_b = counts["cam_b_available"] / max(1, total_frames)
     rate_both = counts["both_available"] / max(1, total_frames)
     rate_neither = counts["neither_available"] / max(1, total_frames)
-    id_mapped_rate = counts["id_selected"] / max(1, total_frames)
-    selected_a_rate = counts["selected_a"] / max(1, counts["id_selected"])
-    selected_b_rate = counts["selected_b"] / max(1, counts["id_selected"])
+    selector_mapped_rate = counts["selector_selected"] / max(1, total_frames)
+    selected_a_rate = counts["selected_a"] / max(1, counts["selector_selected"])
+    selected_b_rate = counts["selected_b"] / max(1, counts["selector_selected"])
 
     if total_frames < 100_000:
         frame_bucket = 1
@@ -640,8 +715,14 @@ def profile(path: Path, config: dict, output_dir: Path):
     else:
         frame_bucket = 3
 
-    id_field_code = 3 if id_fields_complete else (
-        1 if config.get("reference_id") else 2 if config.get("cam_a_id") or config.get("cam_b_id") else 0
+    mapping_code = (
+        3
+        if mapping_ready and mapping_mode == "DYNAMIC_CANDIDATE_IDS"
+        else 2
+        if mapping_ready and mapping_mode == "FIXED_SELECTOR_VALUES"
+        else 1
+        if config.get("reference_id")
+        else 0
     )
 
     codes = [
@@ -657,16 +738,16 @@ def profile(path: Path, config: dict, output_dir: Path):
         rate_code(rate_neither),
         count_code(counts["cam_a_conflict"]),
         count_code(counts["cam_b_conflict"]),
-        id_field_code,
-        rate_code(id_mapped_rate) if id_fields_complete else 0,
-        rate_code(selected_a_rate) if counts["id_selected"] else 0,
-        rate_code(selected_b_rate) if counts["id_selected"] else 0,
-        count_code(counts["switch"]) if counts["id_selected"] else 0,
-        2 if counts["back_and_forth"] > 0 else 1 if counts["id_selected"] else 0,
-        count_code(counts["id_unmatched"]) if id_fields_complete else 0,
-        count_code(counts["id_ambiguous"]) if id_fields_complete else 0,
-        rate_code(counts["id_selected"] / max(1, total_frames)) if id_fields_complete else 0,
-        rate_code(sum(1 for row in frame_rows if row["selected_discrepancy"] is not None) / max(1, total_frames)) if id_fields_complete else 0,
+        mapping_code,
+        rate_code(selector_mapped_rate) if mapping_ready else 0,
+        rate_code(selected_a_rate) if counts["selector_selected"] else 0,
+        rate_code(selected_b_rate) if counts["selector_selected"] else 0,
+        count_code(counts["switch"]) if counts["selector_selected"] else 0,
+        2 if counts["back_and_forth"] > 0 else 1 if counts["selector_selected"] else 0,
+        count_code(counts["selector_unmatched"]) if mapping_ready else 0,
+        count_code(counts["selector_ambiguous"]) if mapping_ready else 0,
+        rate_code(counts["selector_selected"] / max(1, total_frames)) if mapping_ready else 0,
+        rate_code(sum(1 for row in frame_rows if row["selected_discrepancy"] is not None) / max(1, total_frames)) if mapping_ready else 0,
         count_code(counts["switch_jump_over_threshold"]) if counts["switch"] else 1,
         2 if input_unchanged else 1,
     ]
@@ -674,7 +755,7 @@ def profile(path: Path, config: dict, output_dir: Path):
 
 
 def output_packet(codes):
-    print("CTS001B1-6")
+    print("CTS002B1-6")
     for index in range(6):
         block = codes[index * 4 : (index + 1) * 4]
         print(f"A{index + 1}-" + "".join(str(value) for value in block))
@@ -697,7 +778,7 @@ def main():
         return
 
     output_dir = Path(__file__).resolve().parent / (
-        "camera_target_switch_profile_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+        "camera_target_switch_profile_v0_2_" + datetime.now().strftime("%Y%m%d_%H%M%S")
     )
     output_dir.mkdir(parents=True, exist_ok=False)
     codes, _ = profile(path, config, output_dir)
@@ -709,7 +790,7 @@ if __name__ == "__main__":
         main()
     except Exception as exc:
         try:
-            Path(__file__).resolve().with_name("camera_target_switch_FATAL.txt").write_text(
+            Path(__file__).resolve().with_name("camera_target_switch_v0_2_FATAL.txt").write_text(
                 f"{type(exc).__name__}: {exc}\n", encoding="utf-8"
             )
         except Exception:
