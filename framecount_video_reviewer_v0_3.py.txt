@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FrameCount Video Reviewer v0.2
+FrameCount Video Reviewer v0.3
 
 Purpose
 -------
@@ -16,6 +16,8 @@ Main functions
 - Play at 0.10x, 0.25x, 0.50x, 1.00x, or 2.00x.
 - Drag a full-video seek bar and decode only after release.
 - Load an event/review CSV and jump to each event window.
+- Load a narrow synchronized CAN CSV and show the current FrameCount row.
+- Keep nearby CAM1 / CAM3 / Canonical values visible during video review.
 - Record one review code plus a short memo for each event.
 - Export a full local review CSV and a compact return code TXT.
 
@@ -32,6 +34,7 @@ Pillow. All files remain local on the company computer.
 from __future__ import annotations
 
 import csv
+import bisect
 import math
 import re
 import sys
@@ -40,7 +43,7 @@ from pathlib import Path
 from typing import Any
 
 
-VERSION = "0.2"
+VERSION = "0.3"
 REVIEW_CODES = {
     "": "Not reviewed",
     "1": "Correct / expected",
@@ -147,8 +150,8 @@ class FrameCountVideoReviewer:
         self.ttk = ttk
         self.root = tk.Tk()
         self.root.title(f"FrameCount Video Reviewer v{VERSION}")
-        self.root.geometry("1480x920")
-        self.root.minsize(1050, 700)
+        self.root.geometry("1840x920")
+        self.root.minsize(1280, 700)
 
         self.capture = None
         self.video_path: Path | None = None
@@ -166,6 +169,12 @@ class FrameCountVideoReviewer:
         self.current_event_index = -1
         self.event_file_path: Path | None = None
 
+        self.signal_file_path: Path | None = None
+        self.signal_frame_column: str | None = None
+        self.signal_display_columns: list[str] = []
+        self.signal_records: list[tuple[int, dict[str, str]]] = []
+        self.signal_framecounts: list[int] = []
+
         self.anchor_video_var = tk.StringVar(value="0")
         self.anchor_framecount_var = tk.StringVar(value="0")
         self.framecount_rate_var = tk.StringVar(value="20")
@@ -177,11 +186,15 @@ class FrameCountVideoReviewer:
         self.review_code_var = tk.StringVar(value="")
         self.memo_var = tk.StringVar(value="")
         self.event_filter_var = tk.StringVar(value="")
+        self.signal_range_var = tk.StringVar(value="15")
 
         self.video_info_var = tk.StringVar(value="No video loaded")
         self.position_var = tk.StringVar(value="Video frame: — | FrameCount: — | Time: —")
         self.mapping_info_var = tk.StringVar(value="Mapping not configured")
         self.event_info_var = tk.StringVar(value="No event file loaded")
+        self.signal_info_var = tk.StringVar(
+            value="No signal CSV loaded. Recommended: c13v002_subgraph_v0_1.csv"
+        )
         self.status_var = tk.StringVar(value="Ready")
 
         self._build_ui()
@@ -197,12 +210,14 @@ class FrameCountVideoReviewer:
         main.pack(fill="both", expand=True)
         main.columnconfigure(0, weight=4)
         main.columnconfigure(1, weight=1)
+        main.columnconfigure(2, weight=2)
         main.rowconfigure(1, weight=1)
 
         toolbar = ttk.Frame(main)
-        toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        toolbar.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 6))
         ttk.Button(toolbar, text="Open Video", command=self.open_video).pack(side="left", padx=2)
         ttk.Button(toolbar, text="Load Event CSV", command=self.load_event_csv).pack(side="left", padx=2)
+        ttk.Button(toolbar, text="Load Signal CSV", command=self.load_signal_csv).pack(side="left", padx=2)
         ttk.Button(toolbar, text="Export Reviews", command=self.export_reviews).pack(side="left", padx=2)
         ttk.Button(toolbar, text="Save Screenshot", command=self.save_screenshot).pack(side="left", padx=2)
         ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=8)
@@ -340,8 +355,61 @@ class FrameCountVideoReviewer:
             row=3, column=0, columnspan=2, sticky="ew", pady=(6, 2)
         )
 
+        signal_panel = ttk.LabelFrame(main, text="Synchronized CAN Table", padding=8)
+        signal_panel.grid(row=1, column=2, sticky="nsew", padx=(8, 0))
+        signal_panel.columnconfigure(0, weight=1)
+        signal_panel.rowconfigure(2, weight=1)
+
+        ttk.Label(signal_panel, textvariable=self.signal_info_var, wraplength=470).grid(
+            row=0, column=0, columnspan=3, sticky="ew", pady=(0, 6)
+        )
+        ttk.Label(signal_panel, text="Display range ±FrameCount (15 = 31 rows)").grid(
+            row=1, column=0, sticky="w", padx=(0, 4)
+        )
+        ttk.Entry(signal_panel, textvariable=self.signal_range_var, width=8).grid(
+            row=1, column=1, sticky="w", padx=(0, 4)
+        )
+        ttk.Button(signal_panel, text="Refresh", command=self.refresh_signal_table).grid(
+            row=1, column=2, sticky="e"
+        )
+
+        signal_table_frame = ttk.Frame(signal_panel)
+        signal_table_frame.grid(row=2, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
+        signal_table_frame.columnconfigure(0, weight=1)
+        signal_table_frame.rowconfigure(0, weight=1)
+        self.signal_tree = ttk.Treeview(
+            signal_table_frame,
+            show="headings",
+            selectmode="browse",
+            height=30,
+        )
+        signal_y_scroll = ttk.Scrollbar(
+            signal_table_frame, orient="vertical", command=self.signal_tree.yview
+        )
+        signal_x_scroll = ttk.Scrollbar(
+            signal_table_frame, orient="horizontal", command=self.signal_tree.xview
+        )
+        self.signal_tree.configure(
+            yscrollcommand=signal_y_scroll.set,
+            xscrollcommand=signal_x_scroll.set,
+        )
+        self.signal_tree.grid(row=0, column=0, sticky="nsew")
+        signal_y_scroll.grid(row=0, column=1, sticky="ns")
+        signal_x_scroll.grid(row=1, column=0, sticky="ew")
+        self.signal_tree.tag_configure("current", background="#fff2a8", foreground="#000000")
+        self.signal_tree.bind("<Double-1>", self._on_signal_row_double_click)
+
+        ttk.Label(
+            signal_panel,
+            text=(
+                "Yellow = exact/nearest CAN row for the displayed video frame. "
+                "Double-click a row to jump the video."
+            ),
+            wraplength=470,
+        ).grid(row=3, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+
         status = ttk.Label(main, textvariable=self.status_var, relief="sunken", anchor="w")
-        status.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        status.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(6, 0))
 
     def _entry_row(self, parent, row: int, label: str, variable) -> None:
         self.ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=2)
@@ -382,6 +450,172 @@ class FrameCountVideoReviewer:
             return None
         self.jump_entry.focus_set()
         return "break"
+
+    # -------------------------------------------------------- synchronized CAN
+    def _signal_display_columns(self, fieldnames: list[str], frame_column: str) -> list[str]:
+        # The review-data CSV owns the human-visible schema. The Viewer keeps
+        # every supplied column and only moves FrameCount to the first position.
+        return [frame_column] + [column for column in fieldnames if column != frame_column]
+
+    def _signal_heading(self, column: str) -> str:
+        compact = normalized_name(column)
+        if "framecount" in compact or compact == "frame":
+            return "FrameCount"
+        if "canonical" in compact and "distance" in compact:
+            return "Canonical"
+        if ("221" in compact or "cam1" in compact or "camera1" in compact) and "distance" in compact:
+            return "CAM1"
+        if ("251" in compact or "cam3" in compact or "camera3" in compact) and "distance" in compact:
+            return "CAM3"
+        return compact_text(column, 18)
+
+    def _format_signal_value(self, value: object) -> str:
+        text = "" if value is None else str(value).strip()
+        if not text:
+            return ""
+        try:
+            number = float(text)
+            if math.isfinite(number):
+                if number.is_integer() and abs(number) < 1e12:
+                    return str(int(number))
+                return f"{number:.6g}"
+        except Exception:
+            pass
+        return compact_text(text, 20)
+
+    def load_signal_csv(self) -> None:
+        from tkinter import filedialog
+
+        selected = filedialog.askopenfilename(
+            title="Load synchronized narrow CAN CSV",
+            filetypes=[("CSV or TSV", "*.csv *.tsv *.txt"), ("All files", "*.*")],
+        )
+        if not selected:
+            return
+        try:
+            path = Path(selected)
+            fieldnames, rows = read_delimited_file(path)
+            frame_column = find_column(
+                fieldnames,
+                ("FrameCount", "CANFrameCount", "ID_620_FrameCount", "Frame"),
+            )
+            if frame_column is None:
+                raise RuntimeError(
+                    "FrameCount column was not found in the signal CSV.\n\n"
+                    f"Headers: {', '.join(fieldnames)}"
+                )
+            display_columns = self._signal_display_columns(fieldnames, frame_column)
+            if len(display_columns) < 2:
+                raise RuntimeError("The review-data CSV does not contain a displayable signal column.")
+
+            # One row per FrameCount. When duplicates exist, keep the final row,
+            # matching the C13V001 collapse contract.
+            by_framecount: dict[int, dict[str, str]] = {}
+            for row in rows:
+                frame_value = parse_number(row.get(frame_column, ""))
+                if frame_value is None:
+                    continue
+                by_framecount[int(round(frame_value))] = row
+            if not by_framecount:
+                raise RuntimeError("No numeric FrameCount rows were found in the signal CSV.")
+
+            self.signal_file_path = path
+            self.signal_frame_column = frame_column
+            self.signal_display_columns = display_columns
+            self.signal_records = sorted(by_framecount.items(), key=lambda item: item[0])
+            self.signal_framecounts = [item[0] for item in self.signal_records]
+
+            self.signal_tree.delete(*self.signal_tree.get_children())
+            tree_columns = [f"c{index}" for index in range(len(display_columns))]
+            self.signal_tree.configure(columns=tree_columns)
+            for tree_column, source_column in zip(tree_columns, display_columns):
+                heading = self._signal_heading(source_column)
+                self.signal_tree.heading(tree_column, text=heading)
+                width = 92 if source_column == frame_column else 116
+                self.signal_tree.column(
+                    tree_column,
+                    width=width,
+                    minwidth=75,
+                    anchor="e",
+                    stretch=True,
+                )
+
+            self.signal_info_var.set(
+                f"{path.name}: {len(self.signal_records):,} unique FrameCounts | "
+                f"{len(display_columns)} displayed columns"
+            )
+            self.refresh_signal_table()
+            self.status_var.set(f"Loaded synchronized CAN table: {path.name}")
+        except Exception as exc:
+            self._show_error("Signal CSV error", exc)
+
+    def refresh_signal_table(self) -> None:
+        if not self.signal_records or self.current_video_index < 0:
+            return
+        try:
+            half_range = max(1, int(float(self.signal_range_var.get())))
+            current_fc = self.video_index_to_framecount(self.current_video_index)
+        except Exception as exc:
+            self._show_error("Signal table refresh error", exc)
+            return
+
+        left = bisect.bisect_left(self.signal_framecounts, current_fc - half_range)
+        right = bisect.bisect_right(self.signal_framecounts, current_fc + half_range)
+        insertion = bisect.bisect_left(self.signal_framecounts, current_fc)
+        nearest_candidates = [
+            index
+            for index in (insertion - 1, insertion)
+            if 0 <= index < len(self.signal_framecounts)
+        ]
+        nearest_index = min(
+            nearest_candidates,
+            key=lambda index: (abs(self.signal_framecounts[index] - current_fc), index),
+        )
+        if right <= left:
+            left = nearest_index
+            right = nearest_index + 1
+
+        self.signal_tree.delete(*self.signal_tree.get_children())
+        current_item = ""
+        for record_index in range(left, right):
+            frame_value, row = self.signal_records[record_index]
+            values: list[str] = []
+            for column in self.signal_display_columns:
+                if column == self.signal_frame_column:
+                    values.append(str(frame_value))
+                else:
+                    values.append(self._format_signal_value(row.get(column, "")))
+            item_id = f"signal_{record_index}"
+            tags = ("current",) if record_index == nearest_index else ()
+            self.signal_tree.insert("", "end", iid=item_id, values=values, tags=tags)
+            if record_index == nearest_index:
+                current_item = item_id
+
+        if current_item:
+            self.signal_tree.selection_set(current_item)
+            self.signal_tree.focus(current_item)
+            self.signal_tree.see(current_item)
+        nearest_fc = self.signal_framecounts[nearest_index]
+        delta = nearest_fc - current_fc
+        relation = "exact" if delta == 0 else f"nearest Δ{delta:+d}"
+        file_name = self.signal_file_path.name if self.signal_file_path else "signal CSV"
+        self.signal_info_var.set(
+            f"{file_name} | video FC {current_fc} → CAN FC {nearest_fc} ({relation}) | "
+            f"showing {max(0, right - left)} rows"
+        )
+
+    def _on_signal_row_double_click(self, _event=None) -> None:
+        selection = self.signal_tree.selection()
+        if not selection:
+            return
+        values = self.signal_tree.item(selection[0], "values")
+        if not values:
+            return
+        try:
+            framecount = int(float(values[0]))
+            self.show_video_frame(self.framecount_to_video_index(framecount))
+        except Exception as exc:
+            self._show_error("Signal-row navigation error", exc)
 
     # ----------------------------------------------------------- video mapping
     def _mapping_values(self) -> tuple[int, int, float, str]:
@@ -553,6 +787,8 @@ class FrameCountVideoReviewer:
             f"Video frame: {self.current_video_index:,}/{max(self.total_frames - 1, 0):,} | "
             f"CAN FrameCount: {framecount_text} | Time: {seconds:.3f} s"
         )
+        if framecount_text != "mapping error":
+            self.refresh_signal_table()
 
     # ------------------------------------------------------------- navigation
     def _on_seek_press(self, _event=None) -> None:

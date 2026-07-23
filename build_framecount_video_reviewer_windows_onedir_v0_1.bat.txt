@@ -1,0 +1,85 @@
+@echo off
+setlocal EnableExtensions
+cd /d "%~dp0"
+
+echo ============================================================
+echo FrameCount Video Reviewer v0.3 - Windows onedir builder
+echo ============================================================
+echo.
+
+set "PY_CMD=python"
+where python >nul 2>nul
+if errorlevel 1 set "PY_CMD=py"
+
+%PY_CMD% --version >nul 2>nul
+if errorlevel 1 (
+    echo ERROR: Python was not found.
+    echo Install or enable the approved company Python environment first.
+    pause
+    exit /b 1
+)
+
+if not exist "framecount_video_reviewer_v0_3.py" if exist "framecount_video_reviewer_v0_3.py.txt" (
+    copy /y "framecount_video_reviewer_v0_3.py.txt" "framecount_video_reviewer_v0_3.py" >nul
+)
+
+if not exist "framecount_video_reviewer_v0_3.py" (
+    echo ERROR: framecount_video_reviewer_v0_3.py.txt was not found beside this builder.
+    echo Place the downloaded Reviewer and builder in the same folder.
+    pause
+    exit /b 1
+)
+
+echo [1/3] Checking OpenCV...
+%PY_CMD% -c "import cv2" >nul 2>nul
+if errorlevel 1 (
+    echo OpenCV is missing. Installing opencv-python into the user environment...
+    %PY_CMD% -m pip install --user opencv-python
+    if errorlevel 1 goto :build_failed
+)
+
+echo [2/3] Checking PyInstaller...
+%PY_CMD% -c "import PyInstaller" >nul 2>nul
+if errorlevel 1 (
+    echo PyInstaller is missing. Installing it into the user environment...
+    %PY_CMD% -m pip install --user pyinstaller
+    if errorlevel 1 goto :build_failed
+)
+
+echo [3/3] Building the approved onedir package...
+%PY_CMD% -m PyInstaller ^
+    --noconfirm ^
+    --clean ^
+    --windowed ^
+    --onedir ^
+    --name FrameCountVideoReviewer_v0_3 ^
+    --hidden-import cv2 ^
+    --collect-all cv2 ^
+    "framecount_video_reviewer_v0_3.py"
+
+if errorlevel 1 goto :build_failed
+
+echo.
+echo ============================================================
+echo BUILD COMPLETE
+echo ============================================================
+echo Program folder:
+echo   %CD%\dist\FrameCountVideoReviewer_v0_3
+echo.
+echo Start program:
+echo   dist\FrameCountVideoReviewer_v0_3\FrameCountVideoReviewer_v0_3.exe
+echo.
+echo IMPORTANT:
+echo - Keep the complete FrameCountVideoReviewer_v0_3 folder together.
+echo - Do not move the EXE out of that folder by itself.
+echo - Test video loading, Rate-based V10/C20 mapping, Event CSV loading,
+echo   and Review export before formal use.
+pause
+exit /b 0
+
+:build_failed
+echo.
+echo BUILD FAILED.
+echo Copy the last visible error message for technical review.
+pause
+exit /b 1
