@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FrameCount Video Reviewer v0.3
+FrameCount Video Reviewer v0.3.1
 
 Purpose
 -------
@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any
 
 
-VERSION = "0.3"
+VERSION = "0.3.1"
 REVIEW_CODES = {
     "": "Not reviewed",
     "1": "Correct / expected",
@@ -150,8 +150,8 @@ class FrameCountVideoReviewer:
         self.ttk = ttk
         self.root = tk.Tk()
         self.root.title(f"FrameCount Video Reviewer v{VERSION}")
-        self.root.geometry("1840x920")
-        self.root.minsize(1280, 700)
+        self.root.geometry("1480x920")
+        self.root.minsize(1050, 700)
 
         self.capture = None
         self.video_path: Path | None = None
@@ -187,6 +187,7 @@ class FrameCountVideoReviewer:
         self.memo_var = tk.StringVar(value="")
         self.event_filter_var = tk.StringVar(value="")
         self.signal_range_var = tk.StringVar(value="15")
+        self.signal_lag_var = tk.StringVar(value="0")
 
         self.video_info_var = tk.StringVar(value="No video loaded")
         self.position_var = tk.StringVar(value="Video frame: — | FrameCount: — | Time: —")
@@ -198,6 +199,7 @@ class FrameCountVideoReviewer:
         self.status_var = tk.StringVar(value="Ready")
 
         self._build_ui()
+        self._build_signal_window()
         self._bind_keys()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
@@ -210,14 +212,16 @@ class FrameCountVideoReviewer:
         main.pack(fill="both", expand=True)
         main.columnconfigure(0, weight=4)
         main.columnconfigure(1, weight=1)
-        main.columnconfigure(2, weight=2)
         main.rowconfigure(1, weight=1)
 
         toolbar = ttk.Frame(main)
-        toolbar.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+        toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
         ttk.Button(toolbar, text="Open Video", command=self.open_video).pack(side="left", padx=2)
         ttk.Button(toolbar, text="Load Event CSV", command=self.load_event_csv).pack(side="left", padx=2)
         ttk.Button(toolbar, text="Load Signal CSV", command=self.load_signal_csv).pack(side="left", padx=2)
+        ttk.Button(toolbar, text="Show CAN Window", command=self.show_signal_window).pack(
+            side="left", padx=2
+        )
         ttk.Button(toolbar, text="Export Reviews", command=self.export_reviews).pack(side="left", padx=2)
         ttk.Button(toolbar, text="Save Screenshot", command=self.save_screenshot).pack(side="left", padx=2)
         ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=8)
@@ -254,27 +258,57 @@ class FrameCountVideoReviewer:
 
         controls = ttk.Frame(video_panel, padding=(6, 2, 6, 6))
         controls.grid(row=3, column=0, sticky="ew")
-        ttk.Button(controls, text="⏮ Event Start", command=self.go_event_start).pack(side="left", padx=2)
-        ttk.Button(controls, text="-100", command=lambda: self.step_framecount(-100)).pack(side="left", padx=2)
-        ttk.Button(controls, text="-20", command=lambda: self.step_framecount(-20)).pack(side="left", padx=2)
-        ttk.Button(controls, text="-10", command=lambda: self.step_framecount(-10)).pack(side="left", padx=2)
-        ttk.Button(controls, text="◀ -1", command=lambda: self.step_video_frames(-1)).pack(side="left", padx=2)
-        self.play_button = ttk.Button(controls, text="▶ Play", command=self.toggle_play)
+        controls.columnconfigure(0, weight=1)
+        navigation_controls = ttk.Frame(controls)
+        navigation_controls.grid(row=0, column=0, sticky="w")
+        ttk.Button(navigation_controls, text="⏮ Event Start", command=self.go_event_start).pack(
+            side="left", padx=2
+        )
+        ttk.Button(navigation_controls, text="-100", command=lambda: self.step_framecount(-100)).pack(
+            side="left", padx=2
+        )
+        ttk.Button(navigation_controls, text="-20", command=lambda: self.step_framecount(-20)).pack(
+            side="left", padx=2
+        )
+        ttk.Button(navigation_controls, text="-10", command=lambda: self.step_framecount(-10)).pack(
+            side="left", padx=2
+        )
+        ttk.Button(navigation_controls, text="◀ -1", command=lambda: self.step_video_frames(-1)).pack(
+            side="left", padx=2
+        )
+        self.play_button = ttk.Button(navigation_controls, text="▶ Play", command=self.toggle_play)
         self.play_button.pack(side="left", padx=6)
-        ttk.Button(controls, text="+1 ▶", command=lambda: self.step_video_frames(1)).pack(side="left", padx=2)
-        ttk.Button(controls, text="+10", command=lambda: self.step_framecount(10)).pack(side="left", padx=2)
-        ttk.Button(controls, text="+20", command=lambda: self.step_framecount(20)).pack(side="left", padx=2)
-        ttk.Button(controls, text="+100", command=lambda: self.step_framecount(100)).pack(side="left", padx=2)
-        ttk.Button(controls, text="Event End ⏭", command=self.go_event_end).pack(side="left", padx=2)
-        ttk.Label(controls, text="Speed").pack(side="left", padx=(12, 2))
+        ttk.Button(navigation_controls, text="+1 ▶", command=lambda: self.step_video_frames(1)).pack(
+            side="left", padx=2
+        )
+        ttk.Button(navigation_controls, text="+10", command=lambda: self.step_framecount(10)).pack(
+            side="left", padx=2
+        )
+        ttk.Button(navigation_controls, text="+20", command=lambda: self.step_framecount(20)).pack(
+            side="left", padx=2
+        )
+        ttk.Button(navigation_controls, text="+100", command=lambda: self.step_framecount(100)).pack(
+            side="left", padx=2
+        )
+        ttk.Button(navigation_controls, text="Event End ⏭", command=self.go_event_end).pack(
+            side="left", padx=2
+        )
+
+        playback_controls = ttk.Frame(controls)
+        playback_controls.grid(row=1, column=0, sticky="w", pady=(5, 0))
+        ttk.Label(playback_controls, text="Playback speed").pack(side="left", padx=(2, 4))
         ttk.Combobox(
-            controls,
+            playback_controls,
             textvariable=self.speed_var,
             values=["0.10", "0.25", "0.50", "1.00", "2.00"],
             state="readonly",
             width=6,
         ).pack(side="left")
-        ttk.Checkbutton(controls, text="Loop event", variable=self.loop_event_var).pack(side="left", padx=8)
+        ttk.Checkbutton(
+            playback_controls,
+            text="Loop current event",
+            variable=self.loop_event_var,
+        ).pack(side="left", padx=10)
 
         side = ttk.Frame(main)
         side.grid(row=1, column=1, sticky="nsew")
@@ -355,14 +389,47 @@ class FrameCountVideoReviewer:
             row=3, column=0, columnspan=2, sticky="ew", pady=(6, 2)
         )
 
-        signal_panel = ttk.LabelFrame(main, text="Synchronized CAN Table", padding=8)
-        signal_panel.grid(row=1, column=2, sticky="nsew", padx=(8, 0))
-        signal_panel.columnconfigure(0, weight=1)
-        signal_panel.rowconfigure(2, weight=1)
+        status = ttk.Label(main, textvariable=self.status_var, relief="sunken", anchor="w")
+        status.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
 
-        ttk.Label(signal_panel, textvariable=self.signal_info_var, wraplength=470).grid(
-            row=0, column=0, columnspan=3, sticky="ew", pady=(0, 6)
+    def _build_signal_window(self) -> None:
+        ttk = self.ttk
+
+        self.signal_window = self.tk.Toplevel(self.root)
+        self.signal_window.title(f"Synchronized CAN Review Table v{VERSION}")
+        self.signal_window.minsize(520, 500)
+        self.signal_window.protocol("WM_DELETE_WINDOW", self.signal_window.withdraw)
+
+        screen_width = max(self.root.winfo_screenwidth(), 1000)
+        screen_height = max(self.root.winfo_screenheight(), 700)
+        usable_height = max(650, min(920, screen_height - 80))
+        if screen_width >= 1700:
+            main_width = max(1050, int(screen_width * 0.62))
+            signal_width = max(520, screen_width - main_width - 40)
+            self.root.geometry(f"{main_width}x{usable_height}+10+30")
+            self.signal_window.geometry(
+                f"{signal_width}x{usable_height}+{main_width + 20}+30"
+            )
+        else:
+            main_width = max(1050, screen_width - 40)
+            signal_width = max(520, int(screen_width * 0.70))
+            self.root.geometry(f"{main_width}x{usable_height}+10+20")
+            self.signal_window.geometry(f"{signal_width}x{usable_height}+40+60")
+
+        signal_panel = ttk.Frame(self.signal_window, padding=8)
+        signal_panel.pack(fill="both", expand=True)
+        signal_panel.columnconfigure(0, weight=1)
+        signal_panel.rowconfigure(3, weight=1)
+
+        top_bar = ttk.Frame(signal_panel)
+        top_bar.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+        ttk.Button(top_bar, text="Load Review Data CSV", command=self.load_signal_csv).pack(
+            side="left", padx=(0, 6)
         )
+        ttk.Label(top_bar, textvariable=self.signal_info_var, wraplength=620).pack(
+            side="left", fill="x", expand=True
+        )
+
         ttk.Label(signal_panel, text="Display range ±FrameCount (15 = 31 rows)").grid(
             row=1, column=0, sticky="w", padx=(0, 4)
         )
@@ -373,8 +440,25 @@ class FrameCountVideoReviewer:
             row=1, column=2, sticky="e"
         )
 
+        ttk.Label(
+            signal_panel,
+            text="CAN highlight lag offset (CAN highlight = Video FC + offset)",
+        ).grid(row=2, column=0, sticky="w", padx=(0, 4), pady=(4, 0))
+        lag_entry = ttk.Combobox(
+            signal_panel,
+            textvariable=self.signal_lag_var,
+            values=["-10", "-5", "-3", "-2", "-1", "0", "1", "2", "3", "5", "10"],
+            state="normal",
+            width=8,
+        )
+        lag_entry.grid(row=2, column=1, sticky="w", padx=(0, 4), pady=(4, 0))
+        lag_entry.bind("<Return>", lambda _event: self.refresh_signal_table())
+        ttk.Button(signal_panel, text="Apply lag", command=self.refresh_signal_table).grid(
+            row=2, column=2, sticky="e", pady=(4, 0)
+        )
+
         signal_table_frame = ttk.Frame(signal_panel)
-        signal_table_frame.grid(row=2, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
+        signal_table_frame.grid(row=3, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
         signal_table_frame.columnconfigure(0, weight=1)
         signal_table_frame.rowconfigure(0, weight=1)
         self.signal_tree = ttk.Treeview(
@@ -403,13 +487,16 @@ class FrameCountVideoReviewer:
             signal_panel,
             text=(
                 "Yellow = exact/nearest CAN row for the displayed video frame. "
-                "Double-click a row to jump the video."
+                "Double-click a row to jump the video. All columns supplied by the "
+                "Review Data CSV are retained."
             ),
-            wraplength=470,
-        ).grid(row=3, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+            wraplength=720,
+        ).grid(row=4, column=0, columnspan=3, sticky="ew", pady=(6, 0))
 
-        status = ttk.Label(main, textvariable=self.status_var, relief="sunken", anchor="w")
-        status.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+    def show_signal_window(self) -> None:
+        self.signal_window.deiconify()
+        self.signal_window.lift()
+        self.signal_window.focus_force()
 
     def _entry_row(self, parent, row: int, label: str, variable) -> None:
         self.ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=2)
@@ -554,14 +641,16 @@ class FrameCountVideoReviewer:
             return
         try:
             half_range = max(1, int(float(self.signal_range_var.get())))
-            current_fc = self.video_index_to_framecount(self.current_video_index)
+            video_fc = self.video_index_to_framecount(self.current_video_index)
+            lag_offset = int(float(self.signal_lag_var.get()))
+            highlight_fc = video_fc + lag_offset
         except Exception as exc:
             self._show_error("Signal table refresh error", exc)
             return
 
-        left = bisect.bisect_left(self.signal_framecounts, current_fc - half_range)
-        right = bisect.bisect_right(self.signal_framecounts, current_fc + half_range)
-        insertion = bisect.bisect_left(self.signal_framecounts, current_fc)
+        left = bisect.bisect_left(self.signal_framecounts, highlight_fc - half_range)
+        right = bisect.bisect_right(self.signal_framecounts, highlight_fc + half_range)
+        insertion = bisect.bisect_left(self.signal_framecounts, highlight_fc)
         nearest_candidates = [
             index
             for index in (insertion - 1, insertion)
@@ -569,7 +658,7 @@ class FrameCountVideoReviewer:
         ]
         nearest_index = min(
             nearest_candidates,
-            key=lambda index: (abs(self.signal_framecounts[index] - current_fc), index),
+            key=lambda index: (abs(self.signal_framecounts[index] - highlight_fc), index),
         )
         if right <= left:
             left = nearest_index
@@ -596,11 +685,12 @@ class FrameCountVideoReviewer:
             self.signal_tree.focus(current_item)
             self.signal_tree.see(current_item)
         nearest_fc = self.signal_framecounts[nearest_index]
-        delta = nearest_fc - current_fc
+        delta = nearest_fc - highlight_fc
         relation = "exact" if delta == 0 else f"nearest Δ{delta:+d}"
         file_name = self.signal_file_path.name if self.signal_file_path else "signal CSV"
         self.signal_info_var.set(
-            f"{file_name} | video FC {current_fc} → CAN FC {nearest_fc} ({relation}) | "
+            f"{file_name} | video FC {video_fc} + lag {lag_offset:+d} "
+            f"→ target {highlight_fc} → CAN FC {nearest_fc} ({relation}) | "
             f"showing {max(0, right - left)} rows"
         )
 
@@ -612,8 +702,10 @@ class FrameCountVideoReviewer:
         if not values:
             return
         try:
-            framecount = int(float(values[0]))
-            self.show_video_frame(self.framecount_to_video_index(framecount))
+            can_framecount = int(float(values[0]))
+            lag_offset = int(float(self.signal_lag_var.get()))
+            video_framecount = can_framecount - lag_offset
+            self.show_video_frame(self.framecount_to_video_index(video_framecount))
         except Exception as exc:
             self._show_error("Signal-row navigation error", exc)
 
