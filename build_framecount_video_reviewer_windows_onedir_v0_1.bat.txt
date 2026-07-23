@@ -3,7 +3,7 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 
 echo ============================================================
-echo FrameCount Video Reviewer v0.3.2 - Windows onedir builder
+echo FrameCount Video Reviewer v0.4 - Windows onedir builder
 echo ============================================================
 echo.
 
@@ -19,12 +19,12 @@ if errorlevel 1 (
     exit /b 1
 )
 
-if not exist "framecount_video_reviewer_v0_3_2.py" if exist "framecount_video_reviewer_v0_3_2.py.txt" (
-    copy /y "framecount_video_reviewer_v0_3_2.py.txt" "framecount_video_reviewer_v0_3_2.py" >nul
+if not exist "framecount_video_reviewer_v0_4.py" if exist "framecount_video_reviewer_v0_4.py.txt" (
+    copy /y "framecount_video_reviewer_v0_4.py.txt" "framecount_video_reviewer_v0_4.py" >nul
 )
 
-if not exist "framecount_video_reviewer_v0_3_2.py" (
-    echo ERROR: framecount_video_reviewer_v0_3_2.py.txt was not found beside this builder.
+if not exist "framecount_video_reviewer_v0_4.py" (
+    echo ERROR: framecount_video_reviewer_v0_4.py.txt was not found beside this builder.
     echo Place the downloaded Reviewer and builder in the same folder.
     pause
     exit /b 1
@@ -52,10 +52,10 @@ echo [3/3] Building the approved onedir package...
     --clean ^
     --windowed ^
     --onedir ^
-    --name FrameCountVideoReviewer_v0_3_2 ^
+    --name FrameCountVideoReviewer_v0_4 ^
     --hidden-import cv2 ^
     --collect-all cv2 ^
-    "framecount_video_reviewer_v0_3_2.py"
+    "framecount_video_reviewer_v0_4.py"
 
 if errorlevel 1 goto :build_failed
 
@@ -64,13 +64,13 @@ echo ============================================================
 echo BUILD COMPLETE
 echo ============================================================
 echo Program folder:
-echo   %CD%\dist\FrameCountVideoReviewer_v0_3_2
+echo   %CD%\dist\FrameCountVideoReviewer_v0_4
 echo.
 echo Start program:
-echo   dist\FrameCountVideoReviewer_v0_3_2\FrameCountVideoReviewer_v0_3_2.exe
+echo   dist\FrameCountVideoReviewer_v0_4\FrameCountVideoReviewer_v0_4.exe
 echo.
 echo IMPORTANT:
-echo - Keep the complete FrameCountVideoReviewer_v0_3_2 folder together.
+echo - Keep the complete FrameCountVideoReviewer_v0_4 folder together.
 echo - Do not move the EXE out of that folder by itself.
 echo - Test video loading, Rate-based V10/C20 mapping, Event CSV loading,
 echo   and Review export before formal use.

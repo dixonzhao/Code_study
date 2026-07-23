@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FrameCount Video Reviewer v0.3.2
+FrameCount Video Reviewer v0.4
 
 Purpose
 -------
@@ -16,6 +16,7 @@ Main functions
 - Play at 0.10x, 0.25x, 0.50x, 1.00x, or 2.00x.
 - Drag a full-video seek bar and decode only after release.
 - Load an event/review CSV and jump to each event window.
+- Mark and add new Event windows directly while reviewing video.
 - Load a narrow synchronized CAN CSV and show the current FrameCount row.
 - Keep nearby CAM1 / CAM3 / Canonical values visible during video review.
 - Record one review code plus a short memo for each event.
@@ -43,7 +44,7 @@ from pathlib import Path
 from typing import Any
 
 
-VERSION = "0.3.2"
+VERSION = "0.4"
 REVIEW_CODES = {
     "": "Not reviewed",
     "1": "Correct / expected",
@@ -168,6 +169,7 @@ class FrameCountVideoReviewer:
         self.events: list[ReviewEvent] = []
         self.current_event_index = -1
         self.event_file_path: Path | None = None
+        self.pending_event_start: int | None = None
 
         self.signal_file_path: Path | None = None
         self.signal_frame_column: str | None = None
@@ -184,7 +186,6 @@ class FrameCountVideoReviewer:
         self.speed_var = tk.StringVar(value="0.25")
         self.loop_event_var = tk.BooleanVar(value=False)
         self.review_code_var = tk.StringVar(value="")
-        self.memo_var = tk.StringVar(value="")
         self.event_filter_var = tk.StringVar(value="")
         self.signal_range_var = tk.StringVar(value="15")
         self.signal_lag_var = tk.StringVar(value="0")
@@ -193,6 +194,7 @@ class FrameCountVideoReviewer:
         self.position_var = tk.StringVar(value="Video frame: — | FrameCount: — | Time: —")
         self.mapping_info_var = tk.StringVar(value="Mapping not configured")
         self.event_info_var = tk.StringVar(value="No event file loaded")
+        self.pending_event_info_var = tk.StringVar(value="No pending Event start")
         self.signal_info_var = tk.StringVar(
             value="No signal CSV loaded. Recommended: c13v002_subgraph_v0_1.csv"
         )
@@ -317,7 +319,7 @@ class FrameCountVideoReviewer:
         side = ttk.Frame(main)
         side.grid(row=1, column=1, sticky="nsew")
         side.columnconfigure(0, weight=1)
-        side.rowconfigure(3, weight=1)
+        side.rowconfigure(4, weight=1)
 
         mapping = ttk.LabelFrame(side, text="FrameCount Mapping", padding=8)
         mapping.grid(row=0, column=0, sticky="ew", pady=(0, 6))
@@ -362,8 +364,26 @@ class FrameCountVideoReviewer:
             row=2, column=0, columnspan=3, sticky="w", pady=(4, 0)
         )
 
+        quick_event = ttk.LabelFrame(side, text="Quick Event Capture", padding=8)
+        quick_event.grid(row=3, column=0, sticky="ew", pady=(0, 6))
+        quick_event.columnconfigure(0, weight=1)
+        quick_event.columnconfigure(1, weight=1)
+        quick_event.columnconfigure(2, weight=1)
+        ttk.Label(quick_event, textvariable=self.pending_event_info_var, wraplength=320).grid(
+            row=0, column=0, columnspan=3, sticky="ew", pady=(0, 4)
+        )
+        ttk.Button(quick_event, text="1. Mark Start", command=self.mark_new_event_start).grid(
+            row=1, column=0, sticky="ew", padx=(0, 2)
+        )
+        ttk.Button(quick_event, text="2. Finish / Add", command=self.finish_add_event).grid(
+            row=1, column=1, sticky="ew", padx=2
+        )
+        ttk.Button(quick_event, text="Cancel", command=self.cancel_pending_event).grid(
+            row=1, column=2, sticky="ew", padx=(2, 0)
+        )
+
         event_list_frame = ttk.Frame(side)
-        event_list_frame.grid(row=3, column=0, sticky="nsew", pady=(0, 6))
+        event_list_frame.grid(row=4, column=0, sticky="nsew", pady=(0, 6))
         event_list_frame.rowconfigure(0, weight=1)
         event_list_frame.columnconfigure(0, weight=1)
         self.event_listbox = tk.Listbox(event_list_frame, exportselection=False, height=12)
@@ -374,7 +394,7 @@ class FrameCountVideoReviewer:
         self.event_listbox.bind("<<ListboxSelect>>", self._on_event_selected)
 
         review = ttk.LabelFrame(side, text="Current Event Review", padding=8)
-        review.grid(row=4, column=0, sticky="ew")
+        review.grid(row=5, column=0, sticky="ew")
         review.columnconfigure(1, weight=1)
         ttk.Label(review, text="Result code").grid(row=0, column=0, sticky="w", pady=2)
         ttk.Combobox(
@@ -388,9 +408,17 @@ class FrameCountVideoReviewer:
             row=1, column=0, columnspan=2, sticky="w", pady=2
         )
         ttk.Label(review, text="Short memo").grid(row=2, column=0, sticky="w", pady=2)
-        ttk.Entry(review, textvariable=self.memo_var).grid(row=2, column=1, sticky="ew", pady=2)
+        memo_frame = ttk.Frame(review)
+        memo_frame.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=2)
+        memo_frame.columnconfigure(0, weight=1)
+        memo_frame.rowconfigure(0, weight=1)
+        self.memo_text = tk.Text(memo_frame, height=4, wrap="word", undo=True)
+        memo_scroll = ttk.Scrollbar(memo_frame, orient="vertical", command=self.memo_text.yview)
+        self.memo_text.configure(yscrollcommand=memo_scroll.set)
+        self.memo_text.grid(row=0, column=0, sticky="nsew")
+        memo_scroll.grid(row=0, column=1, sticky="ns")
         ttk.Button(review, text="Save Event Review", command=self.save_current_event_review).grid(
-            row=3, column=0, columnspan=2, sticky="ew", pady=(6, 2)
+            row=4, column=0, columnspan=2, sticky="ew", pady=(6, 2)
         )
 
         status = ttk.Label(main, textvariable=self.status_var, relief="sunken", anchor="w")
@@ -977,6 +1005,76 @@ class FrameCountVideoReviewer:
         delay_ms = max(1, int(round(1000.0 / (self.video_fps * speed))))
         self.after_id = self.root.after(delay_ms, self._schedule_next_frame)
 
+    # ----------------------------------------------------------- quick events
+    def _set_memo_text(self, text: str) -> None:
+        self.memo_text.delete("1.0", "end")
+        if text:
+            self.memo_text.insert("1.0", text)
+
+    def _get_memo_text(self) -> str:
+        return self.memo_text.get("1.0", "end-1c").strip()
+
+    def _current_mapped_framecount(self) -> int:
+        if self.current_video_index < 0:
+            raise RuntimeError("Open a video before marking an Event.")
+        return self.video_index_to_framecount(self.current_video_index)
+
+    def _next_user_event_id(self) -> str:
+        used = {event.event_id.upper() for event in self.all_events}
+        for number in range(1, 10000):
+            candidate = f"U{number:03d}"
+            if candidate not in used:
+                return candidate
+        raise RuntimeError("No free user Event ID remains from U001 to U9999.")
+
+    def mark_new_event_start(self) -> None:
+        try:
+            self.pending_event_start = self._current_mapped_framecount()
+            self.pending_event_info_var.set(
+                f"Pending Event start: FC {self.pending_event_start}. "
+                "Navigate to the end and press Finish / Add."
+            )
+            self.status_var.set(f"Marked new Event start at FC {self.pending_event_start}")
+        except Exception as exc:
+            self._show_error("Mark Event start error", exc)
+
+    def cancel_pending_event(self) -> None:
+        self.pending_event_start = None
+        self.pending_event_info_var.set("No pending Event start")
+        self.status_var.set("Pending Event capture cancelled")
+
+    def finish_add_event(self) -> None:
+        try:
+            if self.pending_event_start is None:
+                raise RuntimeError("Press Mark Start before finishing a new Event.")
+            current_framecount = self._current_mapped_framecount()
+            start_framecount = min(self.pending_event_start, current_framecount)
+            end_framecount = max(self.pending_event_start, current_framecount)
+            event = ReviewEvent(
+                event_id=self._next_user_event_id(),
+                start_framecount=start_framecount,
+                end_framecount=end_framecount,
+                original={"EventSource": "IN_GUI_CAPTURE"},
+            )
+            self.all_events.append(event)
+            self.event_filter_var.set("")
+            self.events = list(self.all_events)
+            self.current_event_index = -1
+            self._refresh_event_list()
+            self.pending_event_start = None
+            self.pending_event_info_var.set("No pending Event start")
+            file_name = self.event_file_path.name if self.event_file_path else "in-memory Event list"
+            self.event_info_var.set(
+                f"{file_name}: showing {len(self.events)} of {len(self.all_events)} events"
+            )
+            self.select_event(len(self.events) - 1)
+            self.status_var.set(
+                f"Added {event.event_id}: FC {event.start_framecount}–{event.end_framecount}. "
+                "Add Review code / memo, then export all Events."
+            )
+        except Exception as exc:
+            self._show_error("Add Event error", exc)
+
     # -------------------------------------------------------------- event CSV
     def load_event_csv(self) -> None:
         from tkinter import filedialog
@@ -1075,7 +1173,7 @@ class FrameCountVideoReviewer:
             self.select_event(0)
         else:
             self.review_code_var.set("")
-            self.memo_var.set("")
+            self._set_memo_text("")
             self.status_var.set("No event IDs matched the filter")
 
     def _on_event_selected(self, _event=None) -> None:
@@ -1093,7 +1191,7 @@ class FrameCountVideoReviewer:
         self.event_listbox.see(index)
         event = self.events[index]
         self.review_code_var.set(event.review_result)
-        self.memo_var.set(event.memo)
+        self._set_memo_text(event.memo)
         try:
             self.show_video_frame(self.framecount_to_video_index(event.start_framecount))
             self.status_var.set(
@@ -1131,7 +1229,7 @@ class FrameCountVideoReviewer:
             return
         event = self.events[self.current_event_index]
         event.review_result = code
-        event.memo = self.memo_var.get().strip()
+        event.memo = self._get_memo_text()
         self._refresh_event_list()
         self.event_listbox.selection_set(self.current_event_index)
         self.event_listbox.see(self.current_event_index)
@@ -1140,12 +1238,18 @@ class FrameCountVideoReviewer:
         )
 
     def export_reviews(self) -> None:
-        if not self.events:
-            self._show_error("Export error", RuntimeError("No event file is loaded."))
+        if not self.all_events:
+            self._show_error("Export error", RuntimeError("No Events are available to export."))
             return
         if 0 <= self.current_event_index < len(self.events):
             self.save_current_event_review()
-        output_dir = self.event_file_path.parent if self.event_file_path else Path.cwd()
+        output_dir = (
+            self.event_file_path.parent
+            if self.event_file_path
+            else self.video_path.parent
+            if self.video_path
+            else Path.cwd()
+        )
         csv_path = self._unique_path(output_dir / "framecount_video_review_results_v0_1.csv")
         code_path = self._unique_path(output_dir / "VIDEO_REVIEW_RETURN_CODE.txt")
         fieldnames = [
@@ -1158,7 +1262,7 @@ class FrameCountVideoReviewer:
         with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=fieldnames)
             writer.writeheader()
-            for event in self.events:
+            for event in self.all_events:
                 writer.writerow(
                     {
                         "EventID": event.event_id,
@@ -1169,10 +1273,10 @@ class FrameCountVideoReviewer:
                     }
                 )
 
-        reviewed = [event for event in self.events if event.review_result]
+        reviewed = [event for event in self.all_events if event.review_result]
         code_parts = [f"{event.event_id}:{event.review_result}" for event in reviewed]
         lines = [
-            f"VRV1-N{len(self.events)}-R{len(reviewed)}-" + "-".join(code_parts),
+            f"VRV1-N{len(self.all_events)}-R{len(reviewed)}-" + "-".join(code_parts),
         ]
         memo_number = 0
         for event in reviewed:
