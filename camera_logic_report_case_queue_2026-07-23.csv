@@ -1,0 +1,4 @@
+EventID,StartFrameCount,EndFrameCount,SuggestedScreenshotFrame,SecondaryReferenceFrame,PlotStartFrame,PlotEndFrame,ReviewMemo
+RPT-C01-W016,15120,15245,15140,15159,15100,15265,"対象ロスト／再捕捉。主画像はFC15140付近。FC15120～15159ではCAM1/CAM3が約50 mの別対象・背景を示し、その後CAM1が再捕捉。"
+RPT-C02-W041,30488,30679,30577,30576,30468,30699,"映像表示とCAN側Sourceの不一致候補。映像はFC30577、直近CAN比較はFC30576。映像上はCAM3表示、CANではCAM1に対象相当距離。"
+RPT-C03-W064,41598,41638,41620,41639,41578,41658,"有効Camera対象なし。主画像はFC41620付近。CAM1/CAM3とも327.66が支配的。FC41639の一時復帰値は別車両の参考例。"
