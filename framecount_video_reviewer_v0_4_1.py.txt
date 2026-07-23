@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FrameCount Video Reviewer v0.4
+FrameCount Video Reviewer v0.4.1
 
 Purpose
 -------
@@ -21,6 +21,7 @@ Main functions
 - Keep nearby CAM1 / CAM3 / Canonical values visible during video review.
 - Record one review code plus a short memo for each event.
 - Export a full local review CSV and a compact return code TXT.
+- Resize the video/control split by dragging the main-window divider.
 
 Dependency
 ----------
@@ -44,7 +45,7 @@ from pathlib import Path
 from typing import Any
 
 
-VERSION = "0.4"
+VERSION = "0.4.1"
 REVIEW_CODES = {
     "": "Not reviewed",
     "1": "Correct / expected",
@@ -212,12 +213,11 @@ class FrameCountVideoReviewer:
 
         main = ttk.Frame(self.root, padding=8)
         main.pack(fill="both", expand=True)
-        main.columnconfigure(0, weight=4)
-        main.columnconfigure(1, weight=1)
+        main.columnconfigure(0, weight=1)
         main.rowconfigure(1, weight=1)
 
         toolbar = ttk.Frame(main)
-        toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         ttk.Button(toolbar, text="Open Video", command=self.open_video).pack(side="left", padx=2)
         ttk.Button(toolbar, text="Load Event CSV", command=self.load_event_csv).pack(side="left", padx=2)
         ttk.Button(toolbar, text="Load Signal CSV", command=self.load_signal_csv).pack(side="left", padx=2)
@@ -229,8 +229,10 @@ class FrameCountVideoReviewer:
         ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=8)
         ttk.Label(toolbar, textvariable=self.video_info_var).pack(side="left", padx=4)
 
-        video_panel = ttk.Frame(main, relief="sunken")
-        video_panel.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
+        self.main_paned = ttk.Panedwindow(main, orient="horizontal")
+        self.main_paned.grid(row=1, column=0, sticky="nsew")
+
+        video_panel = ttk.Frame(self.main_paned, relief="sunken")
         video_panel.rowconfigure(0, weight=1)
         video_panel.columnconfigure(0, weight=1)
         self.video_canvas = tk.Canvas(video_panel, background="black", highlightthickness=0)
@@ -316,18 +318,19 @@ class FrameCountVideoReviewer:
             variable=self.loop_event_var,
         ).pack(side="left", padx=10)
 
-        side = ttk.Frame(main)
-        side.grid(row=1, column=1, sticky="nsew")
+        side = ttk.Frame(self.main_paned)
         side.columnconfigure(0, weight=1)
-        side.rowconfigure(4, weight=1)
+        side.rowconfigure(3, weight=1)
+        self.main_paned.add(video_panel, weight=5)
+        self.main_paned.add(side, weight=1)
 
         mapping = ttk.LabelFrame(side, text="FrameCount Mapping", padding=8)
         mapping.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         mapping.columnconfigure(1, weight=1)
-        self._entry_row(mapping, 0, "Anchor video frame (0-based)", self.anchor_video_var)
-        self._entry_row(mapping, 1, "Anchor CAN FrameCount", self.anchor_framecount_var)
-        self._entry_row(mapping, 2, "CAN FrameCount rate (Hz)", self.framecount_rate_var)
-        ttk.Label(mapping, text="Mapping mode").grid(row=3, column=0, sticky="w", pady=2)
+        self._entry_row(mapping, 0, "Video anchor index", self.anchor_video_var)
+        self._entry_row(mapping, 1, "CAN anchor FC", self.anchor_framecount_var)
+        self._entry_row(mapping, 2, "CAN rate (Hz)", self.framecount_rate_var)
+        ttk.Label(mapping, text="Mode").grid(row=3, column=0, sticky="w", pady=2)
         ttk.Combobox(
             mapping,
             textvariable=self.mapping_mode_var,
@@ -338,38 +341,43 @@ class FrameCountVideoReviewer:
         ttk.Button(mapping, text="Apply Mapping", command=self.apply_mapping).grid(
             row=4, column=0, columnspan=2, sticky="ew", pady=(6, 2)
         )
-        ttk.Label(mapping, textvariable=self.mapping_info_var, wraplength=330).grid(
+        ttk.Label(mapping, textvariable=self.mapping_info_var, wraplength=280).grid(
             row=5, column=0, columnspan=2, sticky="w", pady=2
         )
 
-        jump = ttk.LabelFrame(side, text="Jump to CAN FrameCount", padding=8)
-        jump.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        jump.columnconfigure(0, weight=1)
-        self.jump_entry = ttk.Entry(jump, textvariable=self.jump_framecount_var)
-        self.jump_entry.grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        self.jump_entry.bind("<Return>", lambda event: self.go_to_framecount())
-        ttk.Button(jump, text="Go", command=self.go_to_framecount).grid(row=0, column=1)
-
         event_header = ttk.LabelFrame(side, text="Event Navigation", padding=8)
-        event_header.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        event_header.grid(row=1, column=0, sticky="ew", pady=(0, 6))
         event_header.columnconfigure(1, weight=1)
-        ttk.Label(event_header, text="Filter event IDs").grid(row=0, column=0, sticky="w", padx=2)
+        ttk.Label(event_header, text="Jump FC").grid(row=0, column=0, sticky="w", padx=2)
+        self.jump_entry = ttk.Entry(event_header, textvariable=self.jump_framecount_var)
+        self.jump_entry.grid(row=0, column=1, sticky="ew", padx=2)
+        self.jump_entry.bind("<Return>", lambda event: self.go_to_framecount())
+        ttk.Button(event_header, text="Go", command=self.go_to_framecount).grid(
+            row=0, column=2, padx=2
+        )
+        ttk.Label(event_header, text="Filter IDs").grid(row=1, column=0, sticky="w", padx=2)
         filter_entry = ttk.Entry(event_header, textvariable=self.event_filter_var)
-        filter_entry.grid(row=0, column=1, sticky="ew", padx=2)
+        filter_entry.grid(row=1, column=1, sticky="ew", padx=2)
         filter_entry.bind("<Return>", lambda event: self.apply_event_filter())
-        ttk.Button(event_header, text="Apply", command=self.apply_event_filter).grid(row=0, column=2, padx=2)
-        ttk.Button(event_header, text="Previous", command=self.previous_event).grid(row=1, column=0, padx=2)
-        ttk.Button(event_header, text="Next", command=self.next_event).grid(row=1, column=2, padx=2)
-        ttk.Label(event_header, textvariable=self.event_info_var, wraplength=330).grid(
-            row=2, column=0, columnspan=3, sticky="w", pady=(4, 0)
+        ttk.Button(event_header, text="Apply", command=self.apply_event_filter).grid(
+            row=1, column=2, padx=2
+        )
+        ttk.Button(event_header, text="Previous", command=self.previous_event).grid(
+            row=2, column=0, padx=2
+        )
+        ttk.Button(event_header, text="Next", command=self.next_event).grid(
+            row=2, column=2, padx=2
+        )
+        ttk.Label(event_header, textvariable=self.event_info_var, wraplength=280).grid(
+            row=3, column=0, columnspan=3, sticky="w", pady=(4, 0)
         )
 
         quick_event = ttk.LabelFrame(side, text="Quick Event Capture", padding=8)
-        quick_event.grid(row=3, column=0, sticky="ew", pady=(0, 6))
+        quick_event.grid(row=2, column=0, sticky="ew", pady=(0, 6))
         quick_event.columnconfigure(0, weight=1)
         quick_event.columnconfigure(1, weight=1)
         quick_event.columnconfigure(2, weight=1)
-        ttk.Label(quick_event, textvariable=self.pending_event_info_var, wraplength=320).grid(
+        ttk.Label(quick_event, textvariable=self.pending_event_info_var, wraplength=280).grid(
             row=0, column=0, columnspan=3, sticky="ew", pady=(0, 4)
         )
         ttk.Button(quick_event, text="1. Mark Start", command=self.mark_new_event_start).grid(
@@ -383,7 +391,7 @@ class FrameCountVideoReviewer:
         )
 
         event_list_frame = ttk.Frame(side)
-        event_list_frame.grid(row=4, column=0, sticky="nsew", pady=(0, 6))
+        event_list_frame.grid(row=3, column=0, sticky="nsew", pady=(0, 6))
         event_list_frame.rowconfigure(0, weight=1)
         event_list_frame.columnconfigure(0, weight=1)
         self.event_listbox = tk.Listbox(event_list_frame, exportselection=False, height=12)
@@ -394,7 +402,7 @@ class FrameCountVideoReviewer:
         self.event_listbox.bind("<<ListboxSelect>>", self._on_event_selected)
 
         review = ttk.LabelFrame(side, text="Current Event Review", padding=8)
-        review.grid(row=5, column=0, sticky="ew")
+        review.grid(row=4, column=0, sticky="ew")
         review.columnconfigure(1, weight=1)
         ttk.Label(review, text="Result code").grid(row=0, column=0, sticky="w", pady=2)
         ttk.Combobox(
@@ -422,7 +430,20 @@ class FrameCountVideoReviewer:
         )
 
         status = ttk.Label(main, textvariable=self.status_var, relief="sunken", anchor="w")
-        status.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        status.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+
+    def _set_initial_main_sash(self) -> None:
+        """Give the video most of the width while keeping the divider draggable."""
+        try:
+            self.root.update_idletasks()
+            available_width = self.main_paned.winfo_width()
+            if available_width > 700:
+                control_width = min(330, max(280, int(available_width * 0.24)))
+                self.main_paned.sashpos(0, available_width - control_width)
+        except Exception:
+            # Window-manager timing differs across Windows systems. The panes
+            # remain usable even when the initial sash position is not applied.
+            pass
 
     def _build_signal_window(self) -> None:
         ttk = self.ttk
@@ -436,8 +457,8 @@ class FrameCountVideoReviewer:
         screen_height = max(self.root.winfo_screenheight(), 700)
         usable_height = max(650, min(920, screen_height - 80))
         if screen_width >= 1700:
-            main_width = max(1050, int(screen_width * 0.62))
-            signal_width = max(520, screen_width - main_width - 40)
+            main_width = max(1100, int(screen_width * 0.70))
+            signal_width = max(500, screen_width - main_width - 40)
             self.root.geometry(f"{main_width}x{usable_height}+10+30")
             self.signal_window.geometry(
                 f"{signal_width}x{usable_height}+{main_width + 20}+30"
@@ -447,6 +468,7 @@ class FrameCountVideoReviewer:
             signal_width = max(520, int(screen_width * 0.70))
             self.root.geometry(f"{main_width}x{usable_height}+10+20")
             self.signal_window.geometry(f"{signal_width}x{usable_height}+40+60")
+        self.root.after_idle(self._set_initial_main_sash)
 
         signal_panel = ttk.Frame(self.signal_window, padding=8)
         signal_panel.pack(fill="both", expand=True)
