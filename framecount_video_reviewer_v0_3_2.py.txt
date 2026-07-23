@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FrameCount Video Reviewer v0.3.1
+FrameCount Video Reviewer v0.3.2
 
 Purpose
 -------
@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any
 
 
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 REVIEW_CODES = {
     "": "Not reviewed",
     "1": "Correct / expected",
@@ -260,38 +260,42 @@ class FrameCountVideoReviewer:
         controls.grid(row=3, column=0, sticky="ew")
         controls.columnconfigure(0, weight=1)
         navigation_controls = ttk.Frame(controls)
-        navigation_controls.grid(row=0, column=0, sticky="w")
-        ttk.Button(navigation_controls, text="⏮ Event Start", command=self.go_event_start).pack(
-            side="left", padx=2
+        navigation_controls.grid(row=0, column=0, sticky="ew")
+        for column in range(6):
+            navigation_controls.columnconfigure(column, weight=1, uniform="navigation")
+
+        ttk.Button(navigation_controls, text="⏮ Event Start", command=self.go_event_start).grid(
+            row=0, column=0, sticky="ew", padx=2, pady=2
         )
-        ttk.Button(navigation_controls, text="-100", command=lambda: self.step_framecount(-100)).pack(
-            side="left", padx=2
+        ttk.Button(navigation_controls, text="-100", command=lambda: self.step_framecount(-100)).grid(
+            row=0, column=1, sticky="ew", padx=2, pady=2
         )
-        ttk.Button(navigation_controls, text="-20", command=lambda: self.step_framecount(-20)).pack(
-            side="left", padx=2
+        ttk.Button(navigation_controls, text="-20", command=lambda: self.step_framecount(-20)).grid(
+            row=0, column=2, sticky="ew", padx=2, pady=2
         )
-        ttk.Button(navigation_controls, text="-10", command=lambda: self.step_framecount(-10)).pack(
-            side="left", padx=2
+        ttk.Button(navigation_controls, text="-10", command=lambda: self.step_framecount(-10)).grid(
+            row=0, column=3, sticky="ew", padx=2, pady=2
         )
-        ttk.Button(navigation_controls, text="◀ -1", command=lambda: self.step_video_frames(-1)).pack(
-            side="left", padx=2
+        ttk.Button(navigation_controls, text="◀ -1", command=lambda: self.step_video_frames(-1)).grid(
+            row=0, column=4, sticky="ew", padx=2, pady=2
         )
         self.play_button = ttk.Button(navigation_controls, text="▶ Play", command=self.toggle_play)
-        self.play_button.pack(side="left", padx=6)
-        ttk.Button(navigation_controls, text="+1 ▶", command=lambda: self.step_video_frames(1)).pack(
-            side="left", padx=2
+        self.play_button.grid(row=0, column=5, sticky="ew", padx=2, pady=2)
+
+        ttk.Button(navigation_controls, text="+1 ▶", command=lambda: self.step_video_frames(1)).grid(
+            row=1, column=0, sticky="ew", padx=2, pady=2
         )
-        ttk.Button(navigation_controls, text="+10", command=lambda: self.step_framecount(10)).pack(
-            side="left", padx=2
+        ttk.Button(navigation_controls, text="+10", command=lambda: self.step_framecount(10)).grid(
+            row=1, column=1, sticky="ew", padx=2, pady=2
         )
-        ttk.Button(navigation_controls, text="+20", command=lambda: self.step_framecount(20)).pack(
-            side="left", padx=2
+        ttk.Button(navigation_controls, text="+20", command=lambda: self.step_framecount(20)).grid(
+            row=1, column=2, sticky="ew", padx=2, pady=2
         )
-        ttk.Button(navigation_controls, text="+100", command=lambda: self.step_framecount(100)).pack(
-            side="left", padx=2
+        ttk.Button(navigation_controls, text="+100", command=lambda: self.step_framecount(100)).grid(
+            row=1, column=3, sticky="ew", padx=2, pady=2
         )
-        ttk.Button(navigation_controls, text="Event End ⏭", command=self.go_event_end).pack(
-            side="left", padx=2
+        ttk.Button(navigation_controls, text="Event End ⏭", command=self.go_event_end).grid(
+            row=1, column=4, columnspan=2, sticky="ew", padx=2, pady=2
         )
 
         playback_controls = ttk.Frame(controls)
