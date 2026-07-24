@@ -1,0 +1,224 @@
+UDP001 — GATE 8 SOURCEID REPLAY IDENTITY CORRECTION G8R1
+Date: 2026-07-24
+Status: REQUIRED BEFORE GATE 8B VALIDATION
+
+======================================================================
+1. DISCOVERED CONTRACT CONFLICT
+======================================================================
+
+Gate 2 defines SourceId as a row-level source-provenance field in
+u001_decoded_updates.csv.
+
+Gate 8A used SourceId from its replay Identity configuration when invoking
+Gate 2.
+
+Gate 8B correctly requires the reference and candidate decoded Update Streams
+to be byte-identical for a replay of the same Raw CAN source.
+
+Therefore:
+
+If SourceId changes between the original Gate 7 reference run and the Gate 8A
+replay, D1 cannot be byte-identical even when every decoded measurement is
+otherwise equal.
+
+This is a contract conflict. Do not weaken Gate 8B to hide it.
+
+======================================================================
+2. FORMAL SOURCEID RULE
+======================================================================
+
+SourceId identifies the physical/logical source artifact represented by each
+Update Stream row.
+
+For the same-source Golden Replay:
+
+- SourceId must remain exactly equal to the accepted reference Update Stream
+  SourceId;
+- SourceId is not a run identifier;
+- SourceId must not change merely because DatasetId, RunId, output folder,
+  timestamp, or execution instance changes.
+
+Allowed replay identity changes:
+
+- DatasetId
+- RunId
+- IdentityStatus
+- run timestamp
+- execution duration
+- output folder uniqueness suffix
+
+Not allowed for the same-source replay:
+
+- SourceId
+- row-level SourceId values
+- source/input fingerprint
+
+For a genuinely different input source in a future production run, a new
+SourceId is correct and byte-equality to the old source is not expected.
+
+======================================================================
+3. DO NOT DO
+======================================================================
+
+Do not:
+
+- add SourceId to the Gate 8B ignore/normalization list;
+- drop SourceId before comparison;
+- rewrite SourceId directly inside either decoded CSV;
+- edit a completed Run Manifest by hand;
+- overwrite the accepted Gate 7 or Gate 8A folders;
+- treat SourceId as equivalent to RunId;
+- continue using the current mismatched candidate.
+
+If Gate 8B code was modified to ignore SourceId, discard that modification
+and restore the originally generated validator.
+
+======================================================================
+4. READ-ONLY SOURCEID AUDIT
+======================================================================
+
+Give this file to the company Copilot chat that has the actual company paths.
+
+Ask Copilot:
+
+请先停止Gate 8B验证，不要修改验证器。
+
+请使用只读Python/pandas，分别检查以下文件的SourceId唯一值：
+
+1. 原Gate 7 reference package中的u001_decoded_updates.csv
+2. 当前Gate 8A candidate package中的u001_decoded_updates.csv
+
+同时读取两个u001_run_manifest.json中的SourceId。
+
+只输出四个结果，不修改任何文件：
+
+REFERENCE_D1_SOURCEID
+REFERENCE_MANIFEST_SOURCEID
+CANDIDATE_D1_SOURCEID
+CANDIDATE_MANIFEST_SOURCEID
+
+每个D1文件必须只有一个非空SourceId。若存在0个或多个唯一值，停止。
+
+Use chunked reading or usecols=["SourceId"]. Do not load all columns.
+
+======================================================================
+5. CREATE CORRECTED GATE 7 REFERENCE
+======================================================================
+
+Let:
+
+REFERENCE_SOURCEID =
+the one unique nonblank SourceId read from the original Gate 7
+u001_decoded_updates.csv.
+
+Create a new copy of the original Gate 7 package config:
+
+u001_g7r2_package_config.json
+
+Change only the config identity SourceId to REFERENCE_SOURCEID.
+
+Do not change:
+
+- input paths;
+- DatasetId/RunId unless a unique correction suffix is required;
+- review columns;
+- contract/profile/schema;
+- serialization;
+- safety;
+- selected signals or policies.
+
+Run the unchanged Gate 7 package assembler with:
+
+--build
+--config u001_g7r2_package_config.json
+--out-root a new UDP001_G7R2_REFERENCE folder
+
+Do not overwrite the old reference.
+
+After build, independently confirm:
+
+- corrected reference D1 unique SourceId = REFERENCE_SOURCEID;
+- corrected reference Run Manifest SourceId = REFERENCE_SOURCEID;
+- corrected reference D1 hash equals original reference D1 hash;
+- corrected reference Frame View/Catalog/Quality/Review hashes equal the
+  corresponding original reference hashes;
+- only the Run Manifest is expected to change.
+
+If D1 changes, stop. The Gate 7 assembler must not rewrite it.
+
+======================================================================
+6. CREATE CORRECTED GATE 8A CANDIDATE
+======================================================================
+
+Create a new copy of the original Gate 8A replay config:
+
+u001_g8ar2_replay_config.json
+
+Set:
+
+- Identity.SourceId = REFERENCE_SOURCEID
+- Identity.RunId = UDP001_G8A_REPLAY_002
+
+The RunId change only distinguishes the new run. Do not change other data,
+policy, source, DBC, module, count, chunk, or FrameCount parameters.
+
+Run the unchanged Gate 8A orchestrator with:
+
+--run
+--config u001_g8ar2_replay_config.json
+--out-root a new UDP001_G8AR2_REPLAY folder
+
+Do not overwrite or resume the previous G8A run.
+
+Require the normal Gate 8A PASS capsule:
+
+UDP001G8AR1
+B1-2222
+B2-2222
+B3-2222
+B4-2222
+N-G7-P7-U599970-R20617-F6-X0
+S1-C0-H1 S2-C0-H1 S3-C0-H1 S4-C0-H1
+S5-C0-H1 S6-C0-H1 S7-C0-H1
+C-0
+
+Then independently confirm:
+
+- corrected candidate D1 unique SourceId = REFERENCE_SOURCEID;
+- corrected candidate Run Manifest SourceId = REFERENCE_SOURCEID.
+
+======================================================================
+7. RESUME UNCHANGED GATE 8B
+======================================================================
+
+Run the original, unmodified Gate 8B validator using:
+
+--reference = corrected UDP001_G7R2_REFERENCE six-file package
+--candidate = corrected UDP001_G8AR2_REPLAY six-file package
+--orchestration-manifest = corrected G8AR2 orchestration manifest
+--out = a new empty Gate 8B output folder
+
+Gate 8B must still require D1 exact byte/hash equality.
+
+Return to ChatGPT:
+
+1. the corrected Gate 8A capsule;
+2. the complete Gate 8B capsule.
+
+Do not return paths, CSV rows, JSON, or long logs unless C is not zero.
+
+======================================================================
+8. ACCEPTANCE
+======================================================================
+
+Correction PASS requires:
+
+- exactly one nonblank reference SourceId;
+- reference D1 SourceId = reference manifest SourceId;
+- candidate D1 SourceId = candidate manifest SourceId;
+- reference SourceId = candidate SourceId;
+- original and corrected reference D1 hashes equal;
+- corrected G8A C-0;
+- unmodified G8B C-0.
+
+This correction strengthens provenance. It does not relax validation.
