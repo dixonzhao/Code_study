@@ -414,8 +414,8 @@ python u001_signal_cadence_bounded_hold_v0_1.py --apply
 The real smoke SignalIndex order must be:
 
 - S1 Radar DistanceToObject
-- S2 Radar RelativeSpeed
-- S3 Radar PrecedingVehicleDetectionFlag
+- S2 Radar PrecedingVehicleDetectionFlag
+- S3 Radar RelativeSpeed
 - S4 Camera 0x221 Distance
 - S5 Camera 0x251 Distance
 
