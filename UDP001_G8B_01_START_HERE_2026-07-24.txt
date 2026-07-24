@@ -1,0 +1,105 @@
+UDP001 — EXECUTION GATE 8B
+INDEPENDENT CANDIDATE-VERSUS-REFERENCE VALIDATION
+Date: 2026-07-24
+
+======================================================================
+1. GATE PURPOSE
+======================================================================
+
+Gate 8A is accepted.
+
+Gate 8B creates a separate validator that independently compares:
+
+- the accepted Gate 7 reference six-file package;
+- the new Gate 8A candidate six-file package;
+- the Gate 8A orchestration manifest as control evidence.
+
+The validator must not import, call, copy, or reuse validation functions from
+Gate 1–Gate 8A production modules.
+
+======================================================================
+2. FILES TO GIVE COMPANY COPILOT IN A NEW CHAT
+======================================================================
+
+Give only these control documents:
+
+1. UDP001_00_UNIFIED_DATA_CONTRACT_v0_1_2026-07-24.txt
+2. UDP001_G8B_01_START_HERE_2026-07-24.txt
+3. UDP001_G8B_02_INDEPENDENT_REPLAY_VALIDATOR_SPEC_v0_1_2026-07-24.txt
+4. UDP001_G8B_03_ACCEPTANCE_PROTOCOL_v0_1_2026-07-24.txt
+
+Do not attach:
+
+- Gate 1–Gate 8A Python source;
+- Raw CAN or DBC;
+- either six-file data package;
+- company screenshots;
+- previous Copilot chat history.
+
+This separation is intentional.
+
+======================================================================
+3. EXACT MESSAGE TO COMPANY COPILOT
+======================================================================
+
+请完整读取附带的4个文件。
+
+严格执行
+UDP001_G8B_02_INDEPENDENT_REPLAY_VALIDATOR_SPEC_v0_1_2026-07-24.txt。
+
+本任务编写独立验证器。不得导入、调用、复制或参考Gate 1至Gate 8A生产
+程序代码，也不得让生产程序自己证明自己正确。
+
+请创建一个可下载的纯文本代码文件：
+
+u001_independent_replay_validator_v0_1.py.txt
+
+文件内容必须是完整Python源码。不要只粘贴在聊天中，不要拆成多个代码
+文件，不要生成GUI、BAT、PowerShell、XLSX或其他文件。
+
+生成后只回答：
+
+UDP001-G8B-CODE-GENERATED
+
+如无法完整生成，回答：
+
+UDP001-G8B-CODE-NOT-GENERATED
+
+并用一行说明原因。
+
+======================================================================
+4. AFTER CODE GENERATION
+======================================================================
+
+Download and save as:
+
+u001_independent_replay_validator_v0_1.py
+
+Then ask the same Copilot chat to guide execution using:
+
+- the actual Gate 7 reference package folder;
+- the actual Gate 8A candidate package folder;
+- the actual Gate 8A orchestration manifest path;
+- one new validation output folder.
+
+First run --self-test. Stop unless:
+
+UDP001-G8B-SELFTEST-PASS-16
+
+On successful validation, return to ChatGPT only the complete content of:
+
+udp001_g8b_return_capsule.txt
+
+======================================================================
+5. STOP CONDITIONS
+======================================================================
+
+Stop if Copilot:
+
+- requests or imports production Python code;
+- creates more than one code file;
+- cannot provide a complete downloadable file;
+- proposes modifying or normalizing either package in place;
+- compares only row counts without hashes and schemas;
+- treats the Gate 8A orchestration manifest as numerical truth;
+- adds analysis or GUI functions.
