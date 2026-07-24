@@ -1,0 +1,180 @@
+UDP001 — EXECUTION GATE 3
+FRAMECOUNT METADATA ASSIGNMENT
+Date: 2026-07-24
+
+======================================================================
+1. GATE PURPOSE
+======================================================================
+
+Gate 2 is accepted.
+
+Gate 3 creates one pure-logic module that consumes the Gate 2 long-form Update
+Stream and assigns an authoritative FrameCount label to every decoded update
+row when a valid label is available within an explicit source-row age limit.
+
+This is metadata synchronization.
+
+It is not measurement forward fill.
+
+No GUI.
+No measurement fill.
+No blank-to-zero fill.
+No validity/default-value classification.
+No per-frame aggregation.
+No wide table.
+No bounded measurement hold.
+No camera target fusion.
+No analysis.
+No P004.
+
+======================================================================
+2. FILES TO GIVE COMPANY COPILOT IN A NEW CHAT
+======================================================================
+
+Required code:
+
+1. u001_foundation_core_v0_1.py
+2. u001_selected_update_decoder_v0_1.py
+
+Control documents downloaded from GitHub:
+
+3. UDP001_G3_00_START_HERE_2026-07-24.txt
+4. UDP001_G3_01_UNIFIED_DATA_CONTRACT_v0_1_2026-07-24.txt
+5. UDP001_G3_02_FRAMECOUNT_ASSIGNMENT_SPEC_v0_1_2026-07-24.txt
+6. UDP001_G3_03_ACCEPTANCE_PROTOCOL_v0_1_2026-07-24.txt
+
+Do not attach:
+
+- company Raw CSV;
+- Gate 2 decoded Update Stream;
+- DBC files;
+- P001/P002/P003/P004;
+- previous large chat history.
+
+======================================================================
+3. EXACT MESSAGE TO COMPANY COPILOT
+======================================================================
+
+请完整读取附带的6个文件。
+
+Gate 2已经正式通过。严格执行
+UDP001_G3_02_FRAMECOUNT_ASSIGNMENT_SPEC_v0_1_2026-07-24.txt。
+
+本任务只实现FrameCount元数据分配。必须保持Gate 2 Update Stream的行数和
+SourceRowIndex顺序完全不变。FrameCount标签传播不是measurement forward fill。
+
+不得修改Gate 1或Gate 2程序。
+不得生成GUI、measurement fill、zero fill、validity classification、
+frame aggregation、wide table、hold、camera fusion或分析功能。
+
+请创建一个可下载的纯文本代码文件：
+
+u001_framecount_assignment_v0_1.py.txt
+
+文件内容必须是完整Python源码。不要只粘贴在聊天中，不要拆成多个代码文件。
+
+生成后只回答：
+
+UDP001-G3-CODE-GENERATED
+
+如无法完整生成，回答：
+
+UDP001-G3-CODE-NOT-GENERATED
+
+并用一行说明原因。
+
+======================================================================
+4. COMPANY-SIDE EXECUTION
+======================================================================
+
+4.1 Prepare the working file
+
+Keep the downloaded transfer copy and create:
+
+u001_framecount_assignment_v0_1.py
+
+Place it in the same folder as:
+
+u001_foundation_core_v0_1.py
+u001_selected_update_decoder_v0_1.py
+
+4.2 Self-test
+
+Run:
+
+python u001_framecount_assignment_v0_1.py --self-test
+
+Required:
+
+UDP001-G3-SELFTEST-PASS-14
+
+Stop if any test fails.
+
+4.3 Confirm the FrameCount CanonicalName
+
+Open the Gate 2 selection file:
+
+u001_g2_selected_signals.csv
+
+Find the row:
+
+CH2 / 0x620 / FrameCount
+
+Copy its exact CanonicalName.
+
+The generated default is expected to resemble:
+
+CH2_620_FrameCount
+
+Do not guess if the actual value differs.
+
+4.4 Assign FrameCount metadata to the Gate 2 smoke output
+
+Run on one line:
+
+python u001_framecount_assignment_v0_1.py --assign --updates "PATH_TO_u001_g2_raw_decoded_updates.csv" --frame-canonical-name "EXACT_CANONICAL_NAME" --max-assignment-age-rows 200 --out "OUTPUT_FOLDER" --chunksize 100000
+
+For this Gate 3 smoke test:
+
+--max-assignment-age-rows 200
+
+is a provisional technical test parameter only. It is not approved as the
+production/business default.
+
+Do not rerun the Raw CAN decoder for this gate.
+
+======================================================================
+5. EXPECTED OUTPUT
+======================================================================
+
+Expected output folder:
+
+- u001_g3_frame_assigned_updates.csv
+- u001_g3_frame_assignment_quality.json
+- udp001_g3_return_capsule.txt
+
+Return to ChatGPT only:
+
+the full content of `udp001_g3_return_capsule.txt`.
+
+Do not transcribe the assigned Update Stream, paths, or JSON.
+
+======================================================================
+6. STOP CONDITIONS
+======================================================================
+
+Stop and return the failure capsule if:
+
+- self-test does not pass 14/14;
+- Gate 2 schema cannot be resolved;
+- authoritative FrameCount CanonicalName is missing or non-unique;
+- FrameCount is non-numeric, fractional, or decreases in source order;
+- input Update Stream row count changes;
+- SourceRowIndex order changes;
+- any measurement value is filled or modified;
+- rows beyond the configured age limit are assigned a frame;
+- chunk-boundary assignment state is lost;
+- input or earlier programs are modified;
+- any output falsely reports PASS after an exception.
+
+Do not ask Copilot to improvise a fix before returning the capsule.
