@@ -51,7 +51,7 @@ N-Rr-Kk-Gg-Ll-Xx
 - R input Frame View rows
 - K profiled signals
 - G missing FrameCount gaps
-- L largest FrameCount gap
+- L maximum adjacent FrameCount step; a continuous sequence has L=1
 - X input-change/carried/zero-fill error count
 
 Per signal:
@@ -71,7 +71,7 @@ Phase P PASS:
 - R=20617;
 - K=5;
 - G=0;
-- L=0;
+- L=1;
 - X=0;
 - C-0.
 

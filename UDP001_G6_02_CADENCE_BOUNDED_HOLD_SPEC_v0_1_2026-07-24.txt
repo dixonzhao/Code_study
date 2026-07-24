@@ -202,7 +202,7 @@ Global:
 - R = input Frame View rows
 - K = profiled signals
 - G = missing FrameCount gap count
-- L = largest FrameCount gap
+- L = maximum adjacent FrameCount step; a continuous sequence has L=1
 - X = profile input-change/held/zero-fill error count
 
 ======================================================================
@@ -424,7 +424,7 @@ Profile expectations:
 - frame rows = 20,617;
 - signals = 5;
 - missing FrameCount gaps = 0;
-- largest FrameCount gap = 0;
+- maximum adjacent FrameCount step = 1;
 - profile X = 0.
 
 Do not hard-code these values into the implementation.
