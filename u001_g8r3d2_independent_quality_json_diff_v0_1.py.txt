@@ -1,0 +1,378 @@
+#!/usr/bin/env python3
+"""
+UDP001 G8R3D2 independent intermediate-quality JSON leaf comparator.
+
+This is complete executable Python source. Do not ask Copilot to regenerate or
+modify it.
+
+COMPANY-SIDE STEPS
+==================
+
+1. Keep the G8R3 reference/candidate roots unchanged.
+2. Download this file and rename .py.txt to .py.
+3. Self-test:
+
+   python u001_g8r3d2_independent_quality_json_diff_v0_1.py --self-test
+
+   Required:
+
+   UDP001-G8R3D2-SELFTEST-PASS-12
+
+4. Run on one line:
+
+   python u001_g8r3d2_independent_quality_json_diff_v0_1.py --reference-root "<ACCEPTED_REFERENCE_G1_TO_G6_ROOT>" --candidate-root "<G8R3_CANDIDATE_RUN_ROOT>" --out "<NEW_EMPTY_OUTPUT_FOLDER>"
+
+5. Return only:
+
+   udp001_g8r3d2_quality_leaf_capsule.txt
+
+This program reads exactly six named JSON files from each root. It does not
+read Raw CAN, DBC, CSV data, source code, or final package values. It never
+modifies inputs and writes one compact TXT output.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Sequence, Tuple
+
+
+PASS_LINE = "UDP001-G8R3D2-SELFTEST-PASS-12"
+MAX_UNAPPROVED_LINES = 20
+
+QUALITY_FILES: Tuple[Tuple[str, str], ...] = (
+    ("G2", "u001_g2_decode_quality.json"),
+    ("G3", "u001_g3_frame_assignment_quality.json"),
+    ("G4", "u001_g4_semantic_validity_quality.json"),
+    ("G5", "u001_g5_frame_quality.json"),
+    ("G6C", "u001_g6_cadence_quality.json"),
+    ("G6H", "u001_g6_hold_quality.json"),
+)
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def resolve_exact(root: Path, filename: str) -> Path:
+    matches = [
+        path
+        for path in root.rglob(filename)
+        if path.is_file() and not path.is_symlink() and path.name == filename
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"{filename}: expected 1 copy under {root.name}, found {len(matches)}")
+    resolved_root = root.resolve()
+    resolved_file = matches[0].resolve()
+    try:
+        resolved_file.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ValueError(f"{filename}: path escapes selected root") from exc
+    return matches[0]
+
+
+def load_json(path: Path) -> Any:
+    with path.open("r", encoding="utf-8-sig") as handle:
+        return json.load(handle)
+
+
+def flatten(value: Any, prefix: str = "") -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    if isinstance(value, dict):
+        if not value:
+            result[prefix or "."] = {}
+        for key in sorted(value.keys(), key=lambda item: str(item)):
+            child = f"{prefix}.{key}" if prefix else f".{key}"
+            result.update(flatten(value[key], child))
+    elif isinstance(value, list):
+        if not value:
+            result[prefix or "."] = []
+        for index, item in enumerate(value):
+            child = f"{prefix}[{index}]" if prefix else f".[{index}]"
+            result.update(flatten(item, child))
+    else:
+        result[prefix or "."] = value
+    return result
+
+
+def values_equal(left: Any, right: Any) -> bool:
+    if type(left) is type(right):
+        if isinstance(left, float) and math.isnan(left) and math.isnan(right):
+            return True
+        return left == right
+    if isinstance(left, bool) or isinstance(right, bool):
+        return False
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return float(left) == float(right)
+    return False
+
+
+def terminal_key(path: str) -> str:
+    token = re.split(r"[.\[\]]+", path)[-1]
+    if not token:
+        parts = [item for item in re.split(r"[.\[\]]+", path) if item]
+        return parts[-1] if parts else ""
+    return token
+
+
+def compact_path(path: str, limit: int = 130) -> str:
+    value = re.sub(r"\s+", "_", path.strip())
+    value = re.sub(r"[^A-Za-z0-9_.\[\]\-]+", "", value)
+    return (value or ".")[:limit]
+
+
+def classify(code: str, path: str, left_present: bool, right_present: bool) -> Tuple[str, bool]:
+    if not left_present or not right_present:
+        return "PATHSET", False
+
+    key = terminal_key(path).lower()
+
+    if key == "elapsed_seconds":
+        return "DURATION", True
+
+    if code == "G3" and path == ".input_modified_time":
+        return "G3_INPUT_MTIME", True
+
+    if "path_hash" in key or "pathhash" in key:
+        return "PATH_HASH", False
+
+    if (
+        "hash" in key
+        or "sha256" in key
+        or "fingerprint" in key
+        or key.endswith("_sha")
+    ):
+        return "HASH_OR_FINGERPRINT", False
+
+    if "modified_time" in key or "timestamp" in key or key.endswith("_time"):
+        return "OTHER_TIME", False
+
+    return "OTHER", False
+
+
+def compare_pair(code: str, reference: Any, candidate: Any) -> List[Dict[str, Any]]:
+    ref = flatten(reference)
+    cand = flatten(candidate)
+    rows: List[Dict[str, Any]] = []
+    for path in sorted(set(ref) | set(cand)):
+        left_present = path in ref
+        right_present = path in cand
+        if left_present and right_present and values_equal(ref[path], cand[path]):
+            continue
+        difference_class, approved_runtime = classify(
+            code, path, left_present, right_present
+        )
+        rows.append(
+            {
+                "Code": code,
+                "Path": path,
+                "DifferenceClass": difference_class,
+                "ApprovedRuntime": approved_runtime,
+                "ReferenceType": type(ref[path]).__name__ if left_present else "MISSING",
+                "CandidateType": type(cand[path]).__name__ if right_present else "MISSING",
+            }
+        )
+    return rows
+
+
+def compare_roots(reference_root: Path, candidate_root: Path) -> Tuple[List[Dict[str, Any]], int]:
+    all_rows: List[Dict[str, Any]] = []
+    raw_equal_count = 0
+    for code, filename in QUALITY_FILES:
+        reference_path = resolve_exact(reference_root, filename)
+        candidate_path = resolve_exact(candidate_root, filename)
+
+        before_reference = sha256(reference_path)
+        before_candidate = sha256(candidate_path)
+        if before_reference == before_candidate:
+            raw_equal_count += 1
+
+        rows = compare_pair(code, load_json(reference_path), load_json(candidate_path))
+        all_rows.extend(rows)
+
+        if before_reference != sha256(reference_path):
+            raise RuntimeError(f"{filename}: reference changed during comparison")
+        if before_candidate != sha256(candidate_path):
+            raise RuntimeError(f"{filename}: candidate changed during comparison")
+    return all_rows, raw_equal_count
+
+
+def dedupe(items: Iterable[str]) -> List[str]:
+    seen = set()
+    output: List[str] = []
+    for item in items:
+        if item not in seen:
+            output.append(item)
+            seen.add(item)
+    return output
+
+
+def write_capsule(
+    out_dir: Path, rows: Sequence[Dict[str, Any]], raw_equal_count: int
+) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=False)
+    output = out_dir / "udp001_g8r3d2_quality_leaf_capsule.txt"
+
+    approved = [row for row in rows if row["ApprovedRuntime"]]
+    unapproved = [row for row in rows if not row["ApprovedRuntime"]]
+    visible = unapproved[:MAX_UNAPPROVED_LINES]
+
+    pair_unapproved = len({row["Code"] for row in unapproved})
+    lines = [
+        "UDP001G8R3D2",
+        (
+            f"N-P6-RE{raw_equal_count}-D{len(rows)}-A{len(approved)}-"
+            f"U{len(unapproved)}-PU{pair_unapproved}-T{max(0, len(unapproved)-len(visible))}"
+        ),
+    ]
+    for index, row in enumerate(visible, 1):
+        lines.append(
+            f"U{index}-{row['Code']}#{compact_path(row['Path'])}#"
+            f"{row['DifferenceClass']}#{row['ReferenceType']}-{row['CandidateType']}"
+        )
+
+    approved_summary = dedupe(
+        f"{row['Code']}#{compact_path(row['Path'])}#{row['DifferenceClass']}"
+        for row in approved
+    )
+    lines.append(
+        "A-" + (";".join(approved_summary) if approved_summary else "NONE")
+    )
+    lines.append("C-0")
+
+    with output.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write("\n".join(lines) + "\n")
+    return output
+
+
+def execute(reference_root: Path, candidate_root: Path, out_dir: Path) -> Path:
+    rows, raw_equal_count = compare_roots(reference_root, candidate_root)
+    return write_capsule(out_dir, rows, raw_equal_count)
+
+
+def run_self_tests() -> None:
+    # T1 deterministic recursive flatten.
+    flat = flatten({"b": [2], "a": {"x": 1}})
+    assert list(flat) == [".a.x", ".b[0]"]
+
+    # T2 numeric equality without boolean coercion.
+    assert values_equal(1, 1.0)
+    assert not values_equal(False, 0)
+
+    # T3 duration approval.
+    assert classify("G2", ".elapsed_seconds", True, True) == ("DURATION", True)
+
+    # T4 exact G3 modified-time approval.
+    assert classify("G3", ".input_modified_time", True, True) == (
+        "G3_INPUT_MTIME",
+        True,
+    )
+
+    # T5 same key is not approved outside G3.
+    assert classify("G4", ".input_modified_time", True, True)[1] is False
+
+    # T6 path hash remains unapproved for diagnosis.
+    assert classify("G4", ".input_path_hash", True, True) == ("PATH_HASH", False)
+
+    # T7 generic content hash remains unapproved.
+    assert classify("G5", ".output_sha256", True, True)[1] is False
+
+    # T8 path-set difference remains unapproved.
+    assert classify("G6C", ".x", True, False) == ("PATHSET", False)
+
+    # T9 equal leaves omitted.
+    rows = compare_pair("G2", {"x": 1, "elapsed_seconds": 1}, {"x": 1, "elapsed_seconds": 2})
+    assert len(rows) == 1 and rows[0]["ApprovedRuntime"]
+
+    # T10 unknown leaf retained as OTHER.
+    rows = compare_pair("G4", {"metric": 1}, {"metric": 2})
+    assert rows[0]["DifferenceClass"] == "OTHER"
+
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        ref = root / "ref"
+        cand = root / "cand"
+        ref.mkdir()
+        cand.mkdir()
+        for index, (code, filename) in enumerate(QUALITY_FILES):
+            left = {"count": 10, "elapsed_seconds": float(index)}
+            right = {"count": 10, "elapsed_seconds": float(index + 1)}
+            if code == "G3":
+                left["input_modified_time"] = 1
+                right["input_modified_time"] = 2
+            (ref / filename).write_text(json.dumps(left), encoding="utf-8")
+            (cand / filename).write_text(json.dumps(right), encoding="utf-8")
+
+        # T11 exact six-pair resolution and read-only comparison.
+        before = {path.name: sha256(path) for path in list(ref.iterdir()) + list(cand.iterdir())}
+        compared, raw_equal = compare_roots(ref, cand)
+        assert raw_equal == 0
+        assert len(compared) == 7
+        after = {path.name: sha256(path) for path in list(ref.iterdir()) + list(cand.iterdir())}
+        assert before == after
+
+        # T12 one compact output with zero unapproved synthetic differences.
+        out = root / "out"
+        capsule = write_capsule(out, compared, raw_equal)
+        text = capsule.read_text(encoding="utf-8")
+        assert "N-P6-RE0-D7-A7-U0-PU0-T0" in text
+        assert "C-0" in text
+        assert [path.name for path in out.iterdir()] == [capsule.name]
+
+    print(PASS_LINE)
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Independently compare six intermediate quality JSON pairs."
+    )
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--reference-root", type=Path)
+    parser.add_argument("--candidate-root", type=Path)
+    parser.add_argument("--out", type=Path)
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv or sys.argv[1:])
+    if args.self_test:
+        run_self_tests()
+        return 0
+
+    if args.reference_root is None or args.candidate_root is None or args.out is None:
+        print(
+            "ERROR: --reference-root, --candidate-root, and --out are required.",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.reference_root.is_dir() or not args.candidate_root.is_dir():
+        print("ERROR: both selected roots must exist.", file=sys.stderr)
+        return 2
+    if args.out.exists():
+        print("ERROR: --out must be a new non-existing folder.", file=sys.stderr)
+        return 2
+
+    try:
+        output = execute(args.reference_root, args.candidate_root, args.out)
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    print(str(output))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
