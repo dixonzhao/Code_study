@@ -1,0 +1,425 @@
+UDP001 — GATE 5 EXPLICIT FRAMECOUNT VIEW SPECIFICATION v0.1
+Date: 2026-07-24
+Output: u001_framecount_view_builder_v0_1.py.txt
+Input schema: Gate 4 semantic-validity Update Stream
+
+======================================================================
+0. SCOPE
+======================================================================
+
+Implement:
+
+- explicit per-signal Frame View policy;
+- one row per observed assigned FrameCount;
+- deterministic within-frame aggregation;
+- source-row/update-count provenance;
+- explicit no-update state for every included signal.
+
+Do not implement cross-frame hold or any analysis.
+
+======================================================================
+1. ALLOWED DEPENDENCIES AND IMPORT SAFETY
+======================================================================
+
+Allowed:
+
+- Python standard library;
+- pandas;
+- numpy;
+- accepted Gate 1–Gate 4 modules when import-safe.
+
+Importing Gate 5 must not:
+
+- open GUI;
+- read/write files;
+- execute aggregation;
+- modify global pandas settings.
+
+======================================================================
+2. INPUT REQUIREMENTS
+======================================================================
+
+Input:
+
+u001_g4_semantic_validity_updates.csv
+
+Required columns:
+
+- SourceRowIndex
+- FrameCount
+- CanonicalName
+- PhysicalValue
+- ValueLabel
+- ValueKind
+- SignalRole
+- Valid
+- MissingReason
+
+Rules:
+
+- SourceRowIndex is numeric and nondecreasing;
+- FrameCount is numeric, integer-valued, and assigned for every real-smoke row;
+- FrameCount is nondecreasing in SourceRowIndex order;
+- all rows belonging to one SourceRowIndex have one FrameCount;
+- CanonicalName is never edited;
+- input remains read-only.
+
+If any rule fails, stop. Do not sort the defect away.
+
+======================================================================
+3. FRAME VIEW POLICY
+======================================================================
+
+Mode:
+
+--make-policy --semantic-policy PATH --out PATH
+
+Write:
+
+u001_g5_frame_policy.csv
+
+Required columns:
+
+- CanonicalName
+- ValueKind
+- SignalRole
+- IncludeInFrameView
+- WithinFramePolicy
+- Required
+- Notes
+
+Allowed WithinFramePolicy:
+
+- LAST_UPDATE
+- FIRST_UPDATE
+- ANY_TRUE
+- BITWISE_OR
+- COUNT_UPDATES
+- KEEP_STREAM_ONLY
+
+Rules:
+
+- exactly one policy row per Gate 4 policy CanonicalName;
+- ValueKind and SignalRole are copied without inference;
+- IncludeInFrameView is exactly 0 or 1;
+- Required is exactly 0 or 1;
+- IncludeInFrameView=0 requires KEEP_STREAM_ONLY;
+- IncludeInFrameView=1 must not use KEEP_STREAM_ONLY;
+- ANY_TRUE requires BOOLEAN;
+- BITWISE_OR requires INTEGER or BITFIELD;
+- COUNT_UPDATES returns an INTEGER count;
+- no HoldPolicy or MaxAgeFrames exists in Gate 5.
+
+Default proposals:
+
+- FRAME_KEY: Include=0 / KEEP_STREAM_ONLY;
+- MEASUREMENT: Include=1 / LAST_UPDATE;
+- STATE: Include=1 / LAST_UPDATE;
+- EVENT_FLAG: Include=1 / ANY_TRUE;
+- VALIDITY_FLAG: require explicit confirmation; propose LAST_UPDATE;
+- COUNTER/IDENTIFIER: Include=1 / LAST_UPDATE;
+- high-rate IMU intended for later SysID: propose Include=0 /
+  KEEP_STREAM_ONLY until the sample-domain decision is approved.
+
+Proposals remain editable before build.
+
+======================================================================
+4. FRAME ROW CONSTRUCTION
+======================================================================
+
+Use assigned FrameCount metadata, not the emitted FRAME_KEY signal-update
+count, to define frame rows.
+
+Create exactly one row for every distinct observed assigned FrameCount in
+source order.
+
+Required leading columns:
+
+- FrameCount
+- SourceRowFirst
+- SourceRowLast
+- SourceUpdateCount
+
+Definitions:
+
+- SourceRowFirst = minimum SourceRowIndex represented by updates in the frame;
+- SourceRowLast = maximum SourceRowIndex represented by updates in the frame;
+- SourceUpdateCount = all Gate 4 update rows assigned to the frame.
+
+Rules:
+
+- FrameCount must be strictly increasing in output;
+- no duplicate output FrameCount;
+- do not synthesize missing FrameCount values;
+- report gaps, but do not fill them;
+- do not collapse or rewrite the input Update Stream.
+
+======================================================================
+5. PER-SIGNAL OUTPUT COLUMNS
+======================================================================
+
+For each IncludeInFrameView=1 signal S, append:
+
+- S__value
+- S__label
+- S__updated
+- S__update_count
+- S__age
+- S__valid
+- S__missing_reason
+
+Column naming uses exact CanonicalName plus the suffix.
+
+Current Gate 5 has no cross-frame hold:
+
+When one or more real updates occur in the frame:
+
+- S__updated = 1;
+- S__update_count = number of all S updates in the frame;
+- selected/aggregated value follows WithinFramePolicy;
+- S__age = 0 when an analyzable current-frame value exists;
+- S__valid and S__missing_reason reflect the selected/aggregated result.
+
+When no real update occurs in the frame:
+
+- S__value = blank;
+- S__label = blank;
+- S__updated = 0;
+- S__update_count = 0;
+- S__age = blank;
+- S__valid = 0;
+- S__missing_reason = NO_UPDATE.
+
+Never substitute zero for a missing value.
+
+======================================================================
+6. WITHIN-FRAME POLICY SEMANTICS
+======================================================================
+
+LAST_UPDATE:
+
+- select the last real update in SourceRowIndex/input order;
+- preserve its value, label, Valid, and MissingReason;
+- do not skip an invalid last update to reveal an older valid value.
+
+FIRST_UPDATE:
+
+- select the first real update in SourceRowIndex/input order;
+- preserve its value, label, Valid, and MissingReason.
+
+ANY_TRUE:
+
+- consider valid BOOLEAN updates only;
+- if any valid value is true, output true;
+- otherwise, if one or more valid false updates exist, output false;
+- if updates exist but none is valid, output blank/invalid and preserve a
+  controlled invalid reason;
+- boolean false remains a valid result.
+
+BITWISE_OR:
+
+- apply bitwise OR to valid nonnegative integer updates;
+- if no valid update exists, output blank/invalid.
+
+COUNT_UPDATES:
+
+- output the number of real updates in the frame as an INTEGER;
+- value equals S__update_count;
+- S__valid=1 when at least one update exists.
+
+KEEP_STREAM_ONLY:
+
+- do not create per-frame S columns;
+- updates remain available only in the Gate 4 long Update Stream.
+
+No policy may compute mean, median, interpolation, smoothing, or fusion.
+
+======================================================================
+7. CHUNK-BOUNDARY BEHAVIOR
+======================================================================
+
+Processing may be chunked.
+
+If the last FrameCount in one chunk continues in the next chunk:
+
+- retain the open frame state;
+- combine all updates before emitting that frame;
+- never emit two rows for one FrameCount;
+- retain correct SourceRowFirst/Last and update counts.
+
+Outputs must be byte-equivalent for at least two different chunksizes after
+normalizing only explicitly permitted run metadata.
+
+Do not parallelize stateful frame construction.
+
+======================================================================
+8. OUTPUTS
+======================================================================
+
+Write exactly:
+
+1. u001_g5_frame_values.csv
+2. u001_g5_frame_quality.json
+3. udp001_g5_return_capsule.txt
+
+CSV:
+
+- UTF-8;
+- one header;
+- typed values remain distinguishable from blanks;
+- no index column;
+- deterministic column and row order.
+
+Quality JSON required fields:
+
+- program_version;
+- contract_version;
+- input path hash, not full path;
+- policy hash;
+- chunksize;
+- input_update_row_count;
+- output_frame_row_count;
+- distinct_observed_frame_count;
+- frame_min;
+- frame_max;
+- frame_non_numeric_count;
+- frame_fractional_count;
+- frame_out_of_order_count;
+- duplicate_output_frame_count;
+- missing_frame_gap_count;
+- largest_frame_gap;
+- collapsed_update_row_count;
+- included_signal_count;
+- per_signal_update_count;
+- per_signal_no_update_frame_count;
+- per_signal_multi_update_frame_count;
+- per_signal_invalid_frame_count;
+- input_value_change_count;
+- synthetic_frame_count;
+- held_value_count;
+- zero_fill_count;
+- elapsed_seconds;
+- warnings;
+- errors.
+
+Do not include company absolute paths or raw data examples.
+
+======================================================================
+9. SELF-TESTS
+======================================================================
+
+Implement exactly 16 deterministic synthetic tests:
+
+T01 policy vocabulary and role/type compatibility validate;
+T02 duplicate/missing Required policy rows fail;
+T03 nonnumeric, fractional, or decreasing FrameCount fails;
+T04 one output row per distinct observed FrameCount;
+T05 SourceRowFirst/Last and SourceUpdateCount are exact;
+T06 LAST_UPDATE uses true input order and preserves invalid last state;
+T07 FIRST_UPDATE uses true input order;
+T08 ANY_TRUE preserves valid false and detects valid true;
+T09 BITWISE_OR combines valid nonnegative integers;
+T10 COUNT_UPDATES equals the real update count;
+T11 KEEP_STREAM_ONLY creates no per-frame signal columns;
+T12 NO_UPDATE produces blank value, updated=0, count=0, valid=0;
+T13 multiple within-frame updates remain visible in update_count;
+T14 missing FrameCount gaps are reported but not synthesized;
+T15 a frame spanning at least two chunks is emitted once with exact counts;
+T16 at least three chunks and two chunksizes produce deterministic output,
+    with no input mutation, hold, or zero fill.
+
+When all pass, print exactly:
+
+UDP001-G5-SELFTEST-PASS-16
+
+On failure, print test ID and one-line reason, exit nonzero, and do not print
+PASS.
+
+======================================================================
+10. CLI
+======================================================================
+
+Self-test:
+
+python u001_framecount_view_builder_v0_1.py --self-test
+
+Policy template:
+
+python u001_framecount_view_builder_v0_1.py --make-policy
+  --semantic-policy PATH
+  --out PATH
+
+Build:
+
+python u001_framecount_view_builder_v0_1.py --build
+  --updates PATH
+  --policy PATH
+  --out FOLDER
+  [--chunksize 100000]
+
+======================================================================
+11. REAL SMOKE POLICY AND EXPECTATIONS
+======================================================================
+
+Real policy:
+
+- FrameCount: Include=0 / KEEP_STREAM_ONLY;
+- Radar DistanceToObject: Include=1 / LAST_UPDATE;
+- Radar RelativeSpeed: Include=1 / LAST_UPDATE;
+- Radar PrecedingVehicleDetectionFlag: Include=1 / LAST_UPDATE;
+- Camera 0x221 Distance: Include=1 / LAST_UPDATE;
+- Camera 0x251 Distance: Include=1 / LAST_UPDATE.
+
+Expected from accepted Gate 3/Gate 4 evidence:
+
+- input update rows = 599,970;
+- distinct observed assigned FrameCount = 20,617;
+- output frame rows = 20,617;
+- included signals = 5;
+- synthetic frames = 0;
+- held values = 0;
+- zero-filled values = 0;
+- input value changes = 0.
+
+Do not hard-code these values into the implementation.
+
+======================================================================
+12. PROHIBITIONS
+======================================================================
+
+Do not:
+
+- modify Gate 1–Gate 4 modules;
+- modify the Gate 4 input;
+- use emitted FRAME_KEY signal-row count as the output frame count;
+- forward-fill or hold values across frames;
+- fill blanks with zero;
+- synthesize missing frames;
+- sort away a FrameCount decrease;
+- mean/median/interpolate/smooth;
+- fuse/select camera targets;
+- compute discrepancy, baseline, residual, risk, or events;
+- create GUI;
+- create more than the requested Python file.
+
+======================================================================
+13. ACCEPTANCE
+======================================================================
+
+Gate 5 passes when:
+
+- 16 self-tests pass;
+- input schema and policy resolve;
+- output frame count equals distinct observed assigned FrameCount;
+- output FrameCount is strictly increasing and unique;
+- source-row ranges and update counts are exact;
+- within-frame policies behave exactly as specified;
+- NO_UPDATE state is explicit;
+- no missing frame, value, zero, or held value is synthesized;
+- chunked output is deterministic;
+- exactly three outputs are created;
+- input and earlier modules remain unchanged;
+- acceptance capsule is C-0.
+
+Passing Gate 5 does not approve bounded hold, camera-target fusion, business
+validity rules, or analysis.

@@ -1,0 +1,115 @@
+UDP001 — GATE 5 ACCEPTANCE PROTOCOL v0.1
+Date: 2026-07-24
+
+======================================================================
+1. RETURN FORMAT
+======================================================================
+
+UDP001G5R1
+B1-abcd
+B2-abcd
+B3-abcd
+B4-abcd
+N-Uu-Rr-Dd-Kk-Cc-Mm-Gg-Ll-Xx
+C-n
+
+Optional:
+
+M1-short memo
+M2-short memo
+M3-short memo
+
+======================================================================
+2. SHARED CODE
+======================================================================
+
+0 = FAIL_OR_ABSENT
+1 = NOT_APPLICABLE
+2 = PASS_OR_PRESENT
+3 = WARNING
+4 = UNKNOWN
+
+======================================================================
+3. B GROUPS
+======================================================================
+
+B1 — Code and self-test
+
+Position 1 = all 16 self-tests passed
+Position 2 = Gate 1–Gate 4 modules remained import-safe and unchanged
+Position 3 = Gate 5 import caused no execution/GUI side effect
+Position 4 = generated source is one complete Python file
+
+B2 — Policy and input
+
+Position 1 = all CanonicalName values resolve to one frame-policy row
+Position 2 = five real-smoke signals are included; FRAME_KEY is stream-only
+Position 3 = role/type/policy compatibility passed
+Position 4 = FrameCount/source order and required input schema passed
+
+B3 — Frame View correctness
+
+Position 1 = output rows equal distinct observed assigned FrameCount
+Position 2 = output FrameCount is strictly increasing and unique
+Position 3 = SourceRowFirst/Last and SourceUpdateCount are exact
+Position 4 = per-signal value/updated/update_count/valid/missing state is exact
+
+B4 — Safety and determinism
+
+Position 1 = chunk-boundary and alternate-chunksize output is deterministic
+Position 2 = no synthetic frame, cross-frame hold, zero fill, or input mutation
+Position 3 = no mean/median/interpolation/fusion/analysis ran
+Position 4 = exactly three Gate 5 outputs were created; input remained read-only
+
+======================================================================
+4. COUNT LINE
+======================================================================
+
+N-Uu-Rr-Dd-Kk-Cc-Mm-Gg-Ll-Xx
+
+u = input update rows
+r = output frame rows
+d = distinct observed assigned FrameCount
+k = included frame-view signal count
+c = collapsed update rows, input rows minus output frame rows
+m = frames containing more than one total input update
+g = missing FrameCount gap count, not synthesized
+l = largest FrameCount gap
+x = synthetic frame + held value + zero-fill + input-change error count
+
+Expected real-smoke invariants:
+
+- U = 599970
+- R = D = 20617
+- K = 5
+- C = U - R = 579353
+- X = 0
+
+M, G, and L are observed metrics. Do not guess them.
+
+======================================================================
+5. RESULT CODE
+======================================================================
+
+C-0 = PASS
+C-1 = generated source incomplete or syntax failure
+C-2 = self-test failure
+C-3 = Gate 1–Gate 4 import or input-schema failure
+C-4 = policy creation/resolution/compatibility failure
+C-5 = FrameCount/source-order failure
+C-6 = empty input or output
+C-7 = frame-row/provenance/per-signal semantic failure
+C-8 = chunk/input-safety/output-file failure
+C-9 = other blocking failure; add one Memo
+
+PASS requires:
+
+- B1-2222
+- B2-2222
+- B3-2222
+- B4-2222
+- C-0
+
+Return only the complete content of:
+
+udp001_g5_return_capsule.txt
