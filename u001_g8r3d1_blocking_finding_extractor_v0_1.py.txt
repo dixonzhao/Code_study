@@ -1,0 +1,432 @@
+#!/usr/bin/env python3
+"""
+UDP001 G8R3D1 read-only blocking-finding extractor.
+
+This is complete executable Python source. Do not ask Copilot to regenerate,
+redesign, or modify the validator before this diagnostic is complete.
+
+COMPANY-SIDE STEPS
+==================
+
+0. Freeze the validator and output folder that produced UDP001G8R3R1.
+   Do not rerun or overwrite them. If Copilot already created a modified
+   validator, rename that modified copy with an _UNAPPROVED_EDIT suffix and do
+   not use it.
+
+1. Download this file and rename:
+
+   u001_g8r3d1_blocking_finding_extractor_v0_1.py.txt
+
+   to:
+
+   u001_g8r3d1_blocking_finding_extractor_v0_1.py
+
+2. Self-test:
+
+   python u001_g8r3d1_blocking_finding_extractor_v0_1.py --self-test
+
+   Required:
+
+   UDP001-G8R3D1-SELFTEST-PASS-10
+
+3. Run on one line against the unchanged G8R3 validator outputs:
+
+   python u001_g8r3d1_blocking_finding_extractor_v0_1.py --validation-report "<G8R3_OUTPUT>\\u001_g8r3_validation_report.csv" --quality-report "<G8R3_OUTPUT>\\u001_g8r3_quality_json_comparison.csv" --out "<NEW_EMPTY_OUTPUT_FOLDER>"
+
+4. Return only the complete contents of:
+
+   udp001_g8r3d1_blocking_capsule.txt
+
+The program reads only two small report CSVs. It does not read Raw CAN, DBC,
+final package data, intermediate data, or company source code. It writes one
+compact TXT file and has no third-party dependency.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
+from typing import Dict, Iterable, List, Sequence, Tuple
+
+
+PASS_LINE = "UDP001-G8R3D1-SELFTEST-PASS-10"
+MAX_VALIDATION_FINDINGS = 10
+MAX_QUALITY_FINDINGS = 12
+
+
+def norm(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def row_map(row: Dict[str, str]) -> Dict[str, str]:
+    return {norm(key): (value or "").strip() for key, value in row.items()}
+
+
+def get_value(mapped: Dict[str, str], *names: str) -> str:
+    for name in names:
+        value = mapped.get(norm(name), "")
+        if value:
+            return value
+    return ""
+
+
+def is_truthy(value: str) -> bool:
+    return norm(value) in {"1", "true", "yes", "y", "blocking", "required"}
+
+
+def is_falsey(value: str) -> bool:
+    return norm(value) in {"0", "false", "no", "n", "unapproved", "rejected"}
+
+
+def is_blocking(row: Dict[str, str]) -> bool:
+    mapped = row_map(row)
+
+    blocking = get_value(mapped, "Blocking", "IsBlocking", "Block")
+    if blocking:
+        if is_truthy(blocking):
+            return True
+        if is_falsey(blocking):
+            return False
+
+    severity = norm(get_value(mapped, "Severity", "Level"))
+    if severity in {"error", "fatal", "blocking", "critical"}:
+        return True
+
+    approved = get_value(mapped, "Approved", "IsApproved", "NormalizedApproved")
+    if approved and is_falsey(approved):
+        difference = get_value(mapped, "DifferenceClass", "Difference", "JsonPathOrColumn")
+        if difference:
+            return True
+
+    for field in ("Result", "Status", "Outcome", "Decision"):
+        value = norm(get_value(mapped, field))
+        if any(
+            token in value
+            for token in (
+                "fail",
+                "error",
+                "block",
+                "unapproved",
+                "reject",
+                "mismatch",
+                "invalid",
+            )
+        ):
+            return True
+
+    error_count = get_value(mapped, "ErrorCount", "BlockingErrorCount")
+    if error_count:
+        try:
+            return int(float(error_count)) > 0
+        except ValueError:
+            pass
+
+    return False
+
+
+def safe_token(value: str, limit: int = 100) -> str:
+    value = value.strip()
+    if "/" in value or "\\" in value:
+        value = os.path.basename(value.replace("\\", "/"))
+    value = re.sub(r"\s+", "_", value)
+    value = re.sub(r"[^A-Za-z0-9_.#:@\-\[\]]+", "", value)
+    return (value or "NA")[:limit]
+
+
+def file_token(value: str) -> str:
+    return safe_token(os.path.basename(value.replace("\\", "/")), 70)
+
+
+def read_csv(path: Path) -> Tuple[List[str], List[Dict[str, str]]]:
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames:
+            raise ValueError(f"{path.name} has no CSV header")
+        return list(reader.fieldnames), list(reader)
+
+
+def dedupe(values: Iterable[str]) -> List[str]:
+    seen = set()
+    result: List[str] = []
+    for value in values:
+        if value not in seen:
+            result.append(value)
+            seen.add(value)
+    return result
+
+
+def validation_findings(rows: Sequence[Dict[str, str]]) -> List[str]:
+    findings: List[str] = []
+    for row in rows:
+        if not is_blocking(row):
+            continue
+        mapped = row_map(row)
+        check = get_value(mapped, "CheckId", "AuditId", "RuleId", "ValidationId")
+        scope = get_value(mapped, "Scope", "Section", "File", "Artifact")
+        item = get_value(
+            mapped,
+            "JsonPathOrColumn",
+            "JsonPath",
+            "LeafPath",
+            "Column",
+            "Field",
+        )
+        difference = get_value(mapped, "DifferenceClass", "FailureClass", "Reason")
+        findings.append(
+            "@".join(
+                (
+                    safe_token(check, 50),
+                    safe_token(scope, 60),
+                    safe_token(item, 90),
+                    safe_token(difference, 50),
+                )
+            )
+        )
+    return dedupe(findings)
+
+
+def quality_findings(rows: Sequence[Dict[str, str]]) -> List[str]:
+    findings: List[str] = []
+    for row in rows:
+        if not is_blocking(row):
+            continue
+        mapped = row_map(row)
+        check = get_value(mapped, "CheckId", "AuditId", "RuleId")
+        file_name = get_value(
+            mapped,
+            "File",
+            "Filename",
+            "Artifact",
+            "QualityFile",
+            "Basename",
+        )
+        path = get_value(
+            mapped,
+            "JsonPathOrColumn",
+            "JsonPath",
+            "LeafPath",
+            "Path",
+            "Field",
+        )
+        difference = get_value(
+            mapped,
+            "DifferenceClass",
+            "Classification",
+            "FailureClass",
+            "Reason",
+        )
+        findings.append(
+            "#".join(
+                (
+                    file_token(file_name),
+                    safe_token(path, 110),
+                    safe_token(difference, 60),
+                    safe_token(check, 40),
+                )
+            )
+        )
+    return dedupe(findings)
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def write_capsule(
+    out_dir: Path,
+    validation: Sequence[str],
+    quality: Sequence[str],
+    validation_headers: Sequence[str],
+    quality_headers: Sequence[str],
+) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=False)
+    output = out_dir / "udp001_g8r3d1_blocking_capsule.txt"
+
+    visible_v = list(validation[:MAX_VALIDATION_FINDINGS])
+    visible_q = list(quality[:MAX_QUALITY_FINDINGS])
+    errors = 0
+    if not validation:
+        errors += 1
+    if not quality:
+        errors += 1
+
+    lines = [
+        "UDP001G8R3D1",
+        f"N-V{len(validation)}-Q{len(quality)}-VT{max(0, len(validation)-len(visible_v))}-QT{max(0, len(quality)-len(visible_q))}",
+    ]
+    lines.extend(f"V{index}-{value}" for index, value in enumerate(visible_v, 1))
+    lines.extend(f"Q{index}-{value}" for index, value in enumerate(visible_q, 1))
+
+    if not validation:
+        lines.append(
+            "VH-" + ".".join(safe_token(header, 30) for header in validation_headers[:12])
+        )
+    if not quality:
+        lines.append(
+            "QH-" + ".".join(safe_token(header, 30) for header in quality_headers[:12])
+        )
+
+    lines.append(f"C-{errors}")
+    with output.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write("\n".join(lines) + "\n")
+    return output
+
+
+def execute(validation_report: Path, quality_report: Path, out_dir: Path) -> Path:
+    before_v = sha256(validation_report)
+    before_q = sha256(quality_report)
+
+    v_headers, v_rows = read_csv(validation_report)
+    q_headers, q_rows = read_csv(quality_report)
+    v_findings = validation_findings(v_rows)
+    q_findings = quality_findings(q_rows)
+
+    output = write_capsule(out_dir, v_findings, q_findings, v_headers, q_headers)
+
+    if before_v != sha256(validation_report) or before_q != sha256(quality_report):
+        raise RuntimeError("input report changed during read-only extraction")
+    return output
+
+
+def sample_row(
+    check: str,
+    scope: str,
+    file_name: str,
+    path: str,
+    difference: str,
+    approved: str,
+    result: str,
+) -> Dict[str, str]:
+    return {
+        "CheckId": check,
+        "Scope": scope,
+        "File": file_name,
+        "JsonPathOrColumn": path,
+        "DifferenceClass": difference,
+        "Approved": approved,
+        "Result": result,
+    }
+
+
+def run_self_tests() -> None:
+    # T1 normalization.
+    assert norm("Difference-Class") == "differenceclass"
+
+    failed = sample_row(
+        "QJSON-01",
+        "INTERMEDIATE_QUALITY",
+        r"C:\run\u001_g3_frame_assignment_quality.json",
+        ".input_modified_time",
+        "OTHER",
+        "0",
+        "FAIL",
+    )
+    passed = sample_row(
+        "D1-EXACT",
+        "FINAL_PACKAGE",
+        "u001_decoded_updates.csv",
+        "SHA256",
+        "EXACT",
+        "1",
+        "PASS",
+    )
+
+    # T2/T3 blocking and passing classification.
+    assert is_blocking(failed)
+    assert not is_blocking(passed)
+
+    # T4 validation token generation.
+    vf = validation_findings([failed, passed])
+    assert len(vf) == 1 and vf[0].startswith("QJSON-01@")
+
+    # T5 quality token strips absolute path.
+    qf = quality_findings([failed, passed])
+    assert len(qf) == 1
+    assert "C:" not in qf[0] and "u001_g3_frame_assignment_quality.json" in qf[0]
+
+    # T6 deduplication.
+    assert quality_findings([failed, failed]) == qf
+
+    # T7 explicit Approved=false is blocking even with DIFFERENT result.
+    approved_false = dict(failed)
+    approved_false["Result"] = "DIFFERENT"
+    assert is_blocking(approved_false)
+
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        v_path = root / "u001_g8r3_validation_report.csv"
+        q_path = root / "u001_g8r3_quality_json_comparison.csv"
+        fields = list(failed.keys())
+        for path, rows in ((v_path, [failed, passed]), (q_path, [failed, passed])):
+            with path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(rows)
+
+        # T8 read CSV and one-output generation.
+        out = root / "out"
+        capsule = execute(v_path, q_path, out)
+        assert [item.name for item in out.iterdir()] == [capsule.name]
+
+        # T9 compact capsule contains both exact findings.
+        text = capsule.read_text(encoding="utf-8")
+        assert "N-V1-Q1" in text and "V1-" in text and "Q1-" in text
+
+        # T10 input immutability.
+        v_hash = sha256(v_path)
+        q_hash = sha256(q_path)
+        assert v_hash == sha256(v_path) and q_hash == sha256(q_path)
+
+    print(PASS_LINE)
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Extract exact blocking G8R3 findings.")
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--validation-report", type=Path)
+    parser.add_argument("--quality-report", type=Path)
+    parser.add_argument("--out", type=Path)
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv or sys.argv[1:])
+    if args.self_test:
+        run_self_tests()
+        return 0
+
+    if args.validation_report is None or args.quality_report is None or args.out is None:
+        print(
+            "ERROR: --validation-report, --quality-report, and --out are required.",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.validation_report.is_file() or not args.quality_report.is_file():
+        print("ERROR: both input reports must exist.", file=sys.stderr)
+        return 2
+    if args.out.exists():
+        print("ERROR: --out must be a new non-existing folder.", file=sys.stderr)
+        return 2
+
+    try:
+        output = execute(args.validation_report, args.quality_report, args.out)
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    print(str(output))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
