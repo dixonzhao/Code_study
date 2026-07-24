@@ -1,0 +1,498 @@
+UDP001 — GATE 1 FOUNDATION CORE IMPLEMENTATION SPECIFICATION v0.1
+Date: 2026-07-24
+Target: Company Copilot
+Output: u001_foundation_core_v0_1.py.txt
+Authority: UDP001 Unified Data Contract v0.1
+
+======================================================================
+0. IMPLEMENTATION PRINCIPLE
+======================================================================
+
+Create one complete Python source file containing pure reusable logic.
+
+Legacy source is evidence and reference, not the new architecture.
+
+Reuse:
+
+- verified header/delimiter ideas from P001/P002;
+- verified DBC parsing and bit-decode mathematics from P001/P002;
+- verified CAN ID/channel/signal selection ideas;
+- verified output-helper ideas only where they do not carry unsafe policy.
+
+Do not reuse:
+
+- legacy GUI/controller architecture;
+- P002 sorting/forward-fill/output pipeline;
+- P003 sorting/zero-fill/missingness pipeline;
+- global state that makes import unsafe;
+- logic that cannot preserve explicit error/status information.
+
+The module must be safe to import:
+
+- no GUI;
+- no file chooser;
+- no automatic file read;
+- no automatic output write;
+- no global execution except constant/type definitions;
+- CLI runs only under `if __name__ == "__main__":`.
+
+======================================================================
+1. ALLOWED DEPENDENCIES
+======================================================================
+
+Use Python standard library only:
+
+- argparse
+- csv
+- dataclasses
+- enum
+- hashlib
+- json
+- pathlib
+- re
+- sys
+- time
+- typing
+- collections if needed
+
+Do not use:
+
+- pandas;
+- numpy;
+- tkinter;
+- multiprocessing;
+- external DBC libraries;
+- network access.
+
+This limitation applies only to Gate 1. Later gates may use approved
+dependencies.
+
+======================================================================
+2. REQUIRED PUBLIC TYPES
+======================================================================
+
+Use explicit dataclasses and enums. Equivalent identifiers are not permitted;
+use the exact names below.
+
+Enums:
+
+- ValueKind:
+  FLOAT, INTEGER, BOOLEAN, ENUM, BITFIELD
+
+- SignalRole:
+  MEASUREMENT, STATE, EVENT_FLAG, VALIDITY_FLAG, COUNTER, IDENTIFIER,
+  FRAME_KEY
+
+- UpdateMode:
+  PERIODIC, ON_CHANGE, EVENT, UNKNOWN
+
+- WithinFramePolicy:
+  LAST_UPDATE, FIRST_UPDATE, ANY_TRUE, BITWISE_OR, COUNT_UPDATES,
+  KEEP_STREAM_ONLY
+
+- HoldPolicy:
+  NONE, HOLD_LAST_BOUNDED
+
+- ReuseStatus:
+  MATCHED, SOURCE_ONLY, DBC_ONLY, INCOMPLETE_SOURCE_BYTES
+
+Dataclasses:
+
+1. TextFormatInfo
+
+- encoding: str
+- delimiter: str
+- header_row_index: int
+- columns: list[str]
+- sample_bytes_read: int
+- warnings: list[str]
+
+2. MatlabCanColumn
+
+- original_name: str
+- can_id: int
+- can_id_hex: str
+- channel: int
+- dlc: int
+- byte_index: int
+
+3. SourceMessageGroup
+
+- can_id: int
+- can_id_hex: str
+- channel: int
+- dlc: int
+- byte_columns_by_index: dict[int, str]
+- complete: bool
+- warnings: list[str]
+
+4. DbcSignal
+
+- signal_name: str
+- start_bit: int
+- bit_length: int
+- byte_order: str
+- is_signed: bool
+- factor: float
+- offset: float
+- minimum: float | None
+- maximum: float | None
+- unit: str
+- receivers: list[str]
+- value_map: dict[int, str]
+
+5. DbcMessage
+
+- raw_message_id: int
+- can_id: int
+- can_id_hex: str
+- is_extended: bool
+- message_name: str
+- dlc: int
+- transmitter: str
+- signals: list[DbcSignal]
+
+6. SignalPolicy
+
+- canonical_name: str
+- value_kind: ValueKind
+- signal_role: SignalRole
+- update_mode: UpdateMode
+- within_frame_policy: WithinFramePolicy
+- hold_policy: HoldPolicy
+- max_age_frames: int
+- validity_rule: str
+- validity_source_signal: str
+- validity_expression: str
+- invalid_exact_values: list[float]
+- user_minimum: float | None
+- user_maximum: float | None
+- nominal_rate_hz: float | None
+- required_for_analysis: bool
+- include_in_frame_view: bool
+- include_in_review_view: bool
+
+7. SignalCatalogRow
+
+- channel: int
+- can_id: int
+- can_id_hex: str
+- message_name: str
+- message_dlc: int
+- signal_name: str
+- unit: str
+- source_group_complete: bool
+- source_byte_column_count: int
+- source_byte_columns: list[str]
+- reuse_status: ReuseStatus
+- proposed_value_kind: ValueKind
+- proposed_signal_role: SignalRole
+- proposed_update_mode: UpdateMode
+- inference_warning: str
+
+8. U001FoundationConfig
+
+- contract_version: str
+- implementation_profile: str
+- dataset_id: str
+- run_id: str
+- segment_id: str
+- source_id: str
+- framecount_signal_name: str
+- signal_policies: dict[str, SignalPolicy]
+
+Defaults:
+
+- contract_version = "UDP001_UNIFIED_DATA_CONTRACT_V0_1"
+- implementation_profile = "CAN_CSV_FRAMECOUNT_BATCH_V0_1"
+
+======================================================================
+3. REQUIRED FUNCTIONS
+======================================================================
+
+3.1 Source format and headers
+
+`detect_text_format(path, max_sample_bytes=4194304) -> TextFormatInfo`
+
+Requirements:
+
+- open source in read-only binary/text modes;
+- never rewrite the source;
+- read no more than max_sample_bytes;
+- try encodings in deterministic order:
+  utf-8-sig, utf-8, cp932, shift_jis;
+- detect comma, tab, or semicolon;
+- retain a warning when csv.Sniffer and fallback disagree;
+- identify the first plausible row containing CAN byte headers;
+- return explicit warnings rather than silently guessing;
+- support large source files without scanning data rows.
+
+`parse_matlab_can_column(name) -> MatlabCanColumn | None`
+
+Required example:
+
+ID221_2_8_0
+
+Meaning:
+
+- CAN ID 0x221;
+- Channel 2;
+- DLC 8;
+- Byte index 0.
+
+CAN ID text is hexadecimal even when it contains digits only.
+
+`discover_source_message_groups(columns) -> list[SourceMessageGroup]`
+
+Requirements:
+
+- group by CAN ID, Channel, and DLC;
+- preserve exact original column names;
+- detect duplicate byte indices;
+- mark incomplete byte groups;
+- do not reject incomplete groups silently.
+
+3.2 DBC loading/parsing
+
+`load_dbc_text(path) -> tuple[str, str]`
+
+Return decoded text and selected encoding.
+
+`parse_dbc(path, channel) -> list[DbcMessage]`
+
+Support at minimum:
+
+- `BO_` message definitions;
+- `SG_` signal definitions;
+- `VAL_` enum/value labels when present;
+- standard and extended CAN IDs;
+- Intel/little-endian and Motorola/big-endian;
+- signed and unsigned;
+- factor, offset, min, max, unit, receiver list.
+
+Do not infer company meaning from signal names.
+Preserve unrecognized lines by warning count in probe summary.
+
+3.3 Decode primitives
+
+`extract_raw_unsigned(payload, start_bit, bit_length, byte_order) -> int`
+
+`apply_signedness(raw_unsigned, bit_length, is_signed) -> int`
+
+`decode_physical_value(payload, signal) -> tuple[int, float]`
+
+Requirements:
+
+- payload accepts bytes or a list/tuple of byte integers;
+- reject invalid byte values;
+- reject impossible start/length combinations;
+- use the verified P002 convention for Motorola bit traversal;
+- return raw numeric value and physical value separately;
+- physical value = raw_signed_or_unsigned * factor + offset;
+- do not apply missingness, hold, or validity policy here.
+
+3.4 Catalog
+
+`build_signal_catalog(source_groups, dbc_by_channel) -> list[SignalCatalogRow]`
+
+Requirements:
+
+- match source group by Channel and normalized CAN ID;
+- produce rows for matched DBC signals;
+- preserve SOURCE_ONLY groups;
+- preserve DBC_ONLY messages/signals in the catalog;
+- mark incomplete source byte groups;
+- propose ValueKind only from defensible DBC structure;
+- proposed SignalRole and UpdateMode may use conservative suggestions, but
+  uncertain inference must carry `inference_warning`;
+- never automatically approve invalid defaults, hold, or FrameCount ownership.
+
+3.5 Configuration serialization
+
+`save_config_json(config, path) -> None`
+
+`load_config_json(path) -> U001FoundationConfig`
+
+Requirements:
+
+- enum values serialize by stable string name;
+- round trip preserves all fields;
+- unknown enum names fail with an explicit error;
+- no silent default replacement for an invalid file.
+
+======================================================================
+4. PROBE MODE
+======================================================================
+
+CLI:
+
+python u001_foundation_core_v0_1.py --probe
+  --source PATH
+  --dbc-ch1 PATH
+  --dbc-ch2 PATH
+  --out FOLDER
+
+Probe scope:
+
+- source format/header sample only;
+- source message-group discovery;
+- CH1/CH2 DBC parsing;
+- catalog construction;
+- summary and capsule output.
+
+The probe must not:
+
+- read source data rows after the detected header/sample;
+- decode measurement rows;
+- modify the source or DBC;
+- emit raw company values;
+- sort, fill, aggregate, hold, or analyze.
+
+Write exactly three outputs:
+
+1. udp001_g1_signal_catalog.csv
+2. udp001_g1_probe_summary.json
+3. udp001_g1_return_capsule.txt
+
+Catalog columns:
+
+- Channel
+- CAN_ID_Hex
+- CAN_ID_Decimal
+- MessageName
+- MessageDLC
+- SignalName
+- Unit
+- SourceGroupComplete
+- SourceByteColumnCount
+- SourceByteColumns
+- ReuseStatus
+- ProposedValueKind
+- ProposedSignalRole
+- ProposedUpdateMode
+- InferenceWarning
+
+Summary JSON:
+
+- program_version;
+- contract_version;
+- implementation_profile;
+- source path hash, not full path;
+- source file size;
+- source modified timestamp;
+- source sample bytes read;
+- encoding/delimiter/header row;
+- source message-group count;
+- incomplete source-group count;
+- CH1/CH2 DBC hashes;
+- CH1/CH2 message and signal counts;
+- matched/source-only/DBC-only catalog counts;
+- warning list;
+- elapsed seconds;
+- source-full-scan flag, which must be false.
+
+Do not place source filenames, full paths, or raw data values in the capsule.
+
+======================================================================
+5. SELF-TEST MODE
+======================================================================
+
+CLI:
+
+python u001_foundation_core_v0_1.py --self-test
+
+Implement exactly 16 deterministic synthetic tests:
+
+T01 parse `ID221_2_8_0`;
+T02 group a complete eight-byte source message;
+T03 report an incomplete source message;
+T04 little-endian unsigned extraction;
+T05 little-endian signed extraction;
+T06 Motorola/big-endian unsigned extraction;
+T07 Motorola/big-endian signed extraction;
+T08 scale and offset conversion;
+T09 parse a standard `BO_` message;
+T10 parse little-endian and big-endian `SG_` signals;
+T11 parse signedness, factor, offset, range, and unit;
+T12 parse `VAL_` labels and retain an unknown numeric code;
+T13 build a matched Channel/CAN-ID catalog;
+T14 preserve SOURCE_ONLY and DBC_ONLY catalog entries;
+T15 save/load `U001FoundationConfig` JSON round trip;
+T16 import-safety/static check: no tkinter import and no work before main.
+
+Use temporary synthetic files only.
+Do not require company data.
+
+When all pass, print exactly:
+
+UDP001-G1-SELFTEST-PASS-16
+
+If any fail:
+
+- print test ID and one-line reason;
+- exit nonzero;
+- do not print PASS.
+
+======================================================================
+6. RETURN CAPSULE
+======================================================================
+
+Probe mode must create the exact capsule defined by:
+
+UDP001_G1_03_FOUNDATION_CORE_ACCEPTANCE_PROTOCOL_v0_1_2026-07-24.txt
+
+The capsule values must be generated from runtime facts, not hard-coded PASS.
+
+======================================================================
+7. ERROR HANDLING
+======================================================================
+
+Use explicit exceptions and short CLI errors.
+
+Failure must not:
+
+- overwrite input;
+- leave a false PASS capsule;
+- hide parser warnings;
+- turn an unknown structure into an empty successful catalog.
+
+On probe failure, still attempt to write a failure capsule in the output folder.
+
+======================================================================
+8. CODE QUALITY
+======================================================================
+
+- type hints on public functions;
+- concise docstrings;
+- no giant all-purpose function;
+- deterministic output order;
+- stable UTF-8 output;
+- no unused GUI code;
+- no company-specific hard-coded paths;
+- no hard-coded company signal names as authoritative rules;
+- one file only for this gate;
+- version constant `U001_FOUNDATION_CORE_V0_1`.
+
+======================================================================
+9. ACCEPTANCE
+======================================================================
+
+Gate 1 is accepted only when:
+
+- one complete `.py.txt` source is generated;
+- syntax and import are safe;
+- all 16 synthetic tests pass;
+- a real header/DBC probe completes without scanning the log;
+- the catalog is non-empty;
+- the three probe outputs exist;
+- the runtime capsule reports no blocking error;
+- legacy files remain unchanged.
+
+Passing Gate 1 does not approve:
+
+- full-log decoding;
+- FrameCount assignment;
+- mixed-signal update stream;
+- Frame View;
+- GUI;
+- U001 release.

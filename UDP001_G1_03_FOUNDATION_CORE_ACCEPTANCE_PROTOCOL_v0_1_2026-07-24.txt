@@ -1,0 +1,139 @@
+UDP001 — GATE 1 FOUNDATION CORE ACCEPTANCE PROTOCOL v0.1
+Date: 2026-07-24
+
+======================================================================
+1. RETURN FILE
+======================================================================
+
+Probe mode creates:
+
+udp001_g1_return_capsule.txt
+
+Return its full content to ChatGPT.
+
+Exact format:
+
+UDP001G1R1
+B1-abcd
+B2-abcd
+B3-abcd
+B4-abcd
+N-Mm-Ss-Gg-Xx-Uu-Ii
+C-n
+
+Optional:
+
+M1-short memo
+M2-short memo
+M3-short memo
+
+All B digits and counts must be generated from actual runtime state.
+
+======================================================================
+2. B GROUPS
+======================================================================
+
+Shared binary result:
+
+0 = FAIL_OR_ABSENT
+1 = NOT_APPLICABLE
+2 = PASS_OR_PRESENT
+3 = WARNING
+4 = UNKNOWN
+
+B1 — Foundation self-test and import safety
+
+Position 1 = all 16 self-tests passed
+Position 2 = module import caused no file/GUI side effect
+Position 3 = tkinter/external dependency absent
+Position 4 = configuration JSON round trip passed
+
+B2 — Real read-only probe
+
+Position 1 = source header parsed within sample-byte limit
+Position 2 = CH1 DBC parsed
+Position 3 = CH2 DBC parsed
+Position 4 = non-empty signal catalog produced
+
+B3 — Catalog evidence
+
+Position 1 = source CAN byte groups found
+Position 2 = one or more DBC signals matched source groups
+Position 3 = incomplete/unmatched groups explicitly reported
+Position 4 = catalog contains no raw measurement-row values
+
+For B3 position 3:
+
+2 = reporting mechanism worked, including when count is zero.
+
+B4 — Safety and output
+
+Position 1 = source/DBC opened read-only and remained unchanged
+Position 2 = source-full-scan flag is false
+Position 3 = exactly three probe outputs created
+Position 4 = no sorting/fill/FrameCount assignment/aggregation was executed
+
+======================================================================
+3. COUNT LINE
+======================================================================
+
+N-Mm-Ss-Gg-Xx-Uu-Ii
+
+Replace:
+
+m = total DBC message count across CH1 and CH2
+s = total DBC signal count across CH1 and CH2
+g = source message-group count
+x = matched catalog row count
+u = source-only plus DBC-only catalog row count
+i = incomplete source message-group count
+
+Example format only:
+
+N-M120-S850-G90-X300-U550-I2
+
+Do not reuse the example numbers.
+
+======================================================================
+4. C RESULT
+======================================================================
+
+C-0 = PASS
+C-1 = generated source incomplete or syntax failure
+C-2 = one or more self-tests failed
+C-3 = source header/sample parsing failed
+C-4 = CH1 or CH2 DBC parsing failed
+C-5 = source message groups absent
+C-6 = matched catalog empty
+C-7 = source-full-scan or input-modification safety failure
+C-8 = required output missing
+C-9 = other blocking failure; add one short Memo
+
+PASS requires:
+
+- B1-2222
+- B2-2222
+- B3-2222
+- B4-2222
+- C-0
+
+Warnings must use digit 3 and must be described in no more than three Memo
+lines.
+
+======================================================================
+5. MANUAL RETURN RULE
+======================================================================
+
+The user returns only:
+
+- UDP001G1R1 through C-n;
+- optional M1–M3.
+
+Do not transcribe:
+
+- the signal catalog;
+- full paths;
+- DBC names;
+- signal names;
+- company source information;
+- the JSON summary.
