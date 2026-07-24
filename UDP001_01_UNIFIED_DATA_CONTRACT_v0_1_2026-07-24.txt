@@ -1,0 +1,895 @@
+UDP001 — UNIFIED DATA CONTRACT v0.1
+Camera–Radar Discrepancy Analysis and Anomaly Localization
+Date: 2026-07-24
+Status: APPROVED AND FROZEN ARCHITECTURE CONTRACT — implementation not yet approved
+
+======================================================================
+1. PURPOSE
+======================================================================
+
+This contract defines the stable boundary between:
+
+U001  Data Preparation Workbench
+U002  Analysis Workbench
+U003  Evidence Review Workbench (FVR)
+
+The first engineering objective is one traceable end-to-end Golden Run:
+
+Raw CAN + DBC
+→ decoded update stream
+→ FrameCount-aligned analysis view
+→ anomaly candidate
+→ synchronized video/CAN review
+→ evidence export
+
+Legacy programs remain frozen as reference implementations:
+
+P001  can_header_catalog_gui.py
+P002  matlab_can_time_order_decoder_gui.py
+P003  can_analysis_csv_cleaner_gui.py
+P004  sre_cam_stage_residual_error_analyzer_v4_5_3_jp_compact_excel_notes.py
+
+U001 replaces the operational P001→P002→P003 chain only after validation.
+U002 will later absorb/refactor approved P004 analysis responsibilities.
+U003 already exists as FVR and remains functionally frozen unless the new
+interface requires adaptation.
+
+1.1 Logical core and implementation profiles
+
+This contract separates:
+
+- a stable logical core:
+  UpdateRecord, AnalysisView, SignalCatalog, QualityReport, RunManifest, and
+  ReviewView;
+
+- the current implementation profile:
+  CAN_CSV_FRAMECOUNT_BATCH_V0_1;
+
+- future source/transport profiles:
+  for example MDF/MF4, ROS/rosbag, remote/cloud batch processing, online
+  streams, LiDAR payload indexes, MATLAB/Simulink export, and Autobox-facing
+  deployment adapters.
+
+The current U001 implementation is limited to the CAN CSV batch profile.
+Future profiles must map into the logical core rather than forcing current
+P001–P003 code paths to absorb every future technology.
+
+CSV filenames in Section 8 are the current physical serialization. They are
+not the permanent logical identity of the records. A future columnar or stream
+serialization may be introduced under a new profile without redefining the
+meaning of the logical fields.
+
+======================================================================
+2. TWO ORDER DOMAINS — DO NOT CONFUSE THEM
+======================================================================
+
+2.1 Source update order — current CAN profile
+
+- SourceRowIndex preserves the original exported CAN row order.
+- It is the only available within-frame ordering evidence when original
+  DateTime and Time[us] are empty or unreliable.
+- Source update order is not automatically equivalent to a trustworthy
+  physical time axis.
+
+2.2 FrameCount domain — current CAN profile
+
+- FrameCount decoded from 0x620 Channel 2 is the only authoritative
+  video-synchronization key in the current project.
+- FrameCount is approximately a 20 Hz video-domain key.
+- FrameCount must not be described as a high-resolution timestamp.
+- A single FrameCount may contain multiple CAN message/signal updates.
+- Future sensors may use a different ClockDomain and SyncKey. FrameCount is
+  authoritative only inside CAN_CSV_FRAMECOUNT_BATCH_V0_1.
+
+2.3 Frame assignment
+
+- U001 may propagate the latest valid FrameCount label across following source
+  rows to assign CAN updates to a video frame.
+- This is metadata assignment, not measurement forward fill.
+- The assigned frame, assignment status, and assignment age in source rows
+  must be recorded.
+- Frame assignment must be rejected when FrameCount is non-monotonic in source
+  order or when an explicitly configured assignment limit is exceeded.
+
+2.4 Ownership
+
+- U001 is the single owner of source-order preservation, FrameCount assignment,
+  frame aggregation, canonical sorting, missing-state policy, and provenance.
+- U002 and U003 must not silently reorder or redefine either order domain.
+
+======================================================================
+3. SIGNAL SEMANTICS AND DATA TYPES
+======================================================================
+
+CAN data is heterogeneous. U001 must not treat all decoded signals as
+continuous floating-point measurements.
+
+3.1 ValueKind
+
+Every selected signal must have one ValueKind:
+
+- FLOAT
+- INTEGER
+- BOOLEAN
+- ENUM
+- BITFIELD
+
+Recommended storage:
+
+- FLOAT   → pandas nullable Float64
+- INTEGER → pandas nullable Int64
+- BOOLEAN → pandas nullable boolean
+- ENUM    → numeric code plus optional text label
+- BITFIELD→ nullable Int64 plus optional decoded label/flag description
+
+3.2 SignalRole
+
+Every selected signal must have one SignalRole:
+
+- MEASUREMENT
+  Examples: distance, relative speed, yaw rate, acceleration, vehicle speed.
+
+- STATE
+  Examples: ACC state, HMI state, tracking state, lane state.
+
+- EVENT_FLAG
+  A short pulse or occurrence indicator. It must not be forward-filled.
+
+- VALIDITY_FLAG
+  Indicates validity of another signal or message.
+
+- COUNTER
+  Examples: MessageCounter, FrameCount.
+
+- IDENTIFIER
+  Examples: Object ID, Recognition ID, Target Channel.
+
+- FRAME_KEY
+  The selected authoritative FrameCount signal.
+
+3.3 UpdateMode
+
+Every selected signal must have one UpdateMode:
+
+- PERIODIC
+- ON_CHANGE
+- EVENT
+- UNKNOWN
+
+3.4 Inference and override
+
+- DBC metadata may suggest ValueKind, for example one-bit data or value tables.
+- SignalRole and UpdateMode must not be inferred with certainty from bit length
+  or signal name alone.
+- The inventory may propose defaults, but the engineer must be able to
+  override them before the build.
+
+3.5 Boolean and enum rules
+
+- Boolean false/zero is normally a valid state, not missing.
+- EVENT_FLAG false/zero between pulses may be a real observation.
+- ENUM must preserve the numeric code even when a text label exists.
+- Unknown enum codes remain numeric and receive an UNKNOWN_CODE label/warning;
+  they must not become missing automatically.
+
+======================================================================
+4. REFERENCE, RAW, AND DERIVED DATA
+======================================================================
+
+4.1 Reference status
+
+- Radar is a provisional engineering reference, not ground truth.
+- Reference/target roles are selected by the analysis configuration.
+- Camera–radar difference must be called discrepancy unless independent
+  ground truth exists.
+
+4.2 Raw decoded values
+
+- Every real selected-signal update is preserved in the decoded update stream.
+- Raw decoded physical values must never be overwritten by held, aggregated,
+  fused, smoothed, selected, or modeled values.
+- Raw numeric codes for ENUM/BITFIELD must remain traceable.
+
+4.3 Derived values
+
+- Frame aggregation, bounded holding, camera target selection, baseline,
+  residual, and prediction outputs are derived values.
+- Every derived signal uses a separate name and records its rule/configuration.
+- Camera channel fusion is provisional selection logic, not measurement
+  correction.
+
+======================================================================
+5. MISSINGNESS, VALIDITY, AND HOLD POLICY
+======================================================================
+
+5.1 Distinct states
+
+Blank, zero, false, invalid default, no update, stale value, unavailable value,
+and association ambiguity are different states.
+
+5.2 Prohibited global operations
+
+- Global blank-to-zero filling is prohibited.
+- Unlimited measurement forward fill is prohibited.
+- Interpolation is not performed by U001 v0.1.
+
+5.3 Signal-specific validity
+
+Validity is configured per signal and may use:
+
+- NONE
+- EXACT_VALUES
+- OUTSIDE_DBC_RANGE
+- USER_RANGE
+- VALIDITY_SIGNAL
+
+VALIDITY_SIGNAL links a signal to an associated status/validity flag and an
+explicit approved expression.
+
+Known/possible invalid defaults are observations, not universal rules:
+
+- Camera distance no-target value observed: 327.66
+- Radar distance invalid default possibly observed: 273.15
+
+The radar value remains unapproved until confirmed against DBC or business
+knowledge.
+
+5.4 Signal-specific holding
+
+Allowed HoldPolicy:
+
+- NONE
+- HOLD_LAST_BOUNDED
+
+Default:
+
+- NONE
+- MaxAgeFrames = 0
+
+General guidance, not automatic policy:
+
+- continuous measurements: NONE or very short bounded hold;
+- boolean/enum STATE updated on change: bounded hold may be appropriate;
+- EVENT_FLAG: NONE;
+- COUNTER/IDENTIFIER: normally NONE;
+- high-rate IMU: preserve update stream; frame aggregation must be explicit.
+
+Every held value records age and VALID_CARRIED status.
+
+======================================================================
+6. SCALE AND DATA-SHAPE POLICY
+======================================================================
+
+The source may contain approximately 707 signal categories and about 240,000
+points per category. U001 must not blindly create one table containing every
+signal plus many provenance columns.
+
+Required pattern:
+
+1. Inventory all available messages/signals.
+2. Select only signals required for the current analysis run.
+3. Preserve selected real updates in a long decoded update stream.
+4. Generate an explicit FrameCount-level view for selected signals.
+5. Store definitions, semantics, units, validity, aggregation, and hold rules
+   in a sidecar signal catalog.
+6. Generate a separate narrow review view for human comparison.
+
+======================================================================
+7. U001 INPUT CONTRACT
+======================================================================
+
+Required inputs:
+
+- MATLAB-format Raw CAN CSV
+- Channel 1 DBC
+- Channel 2 DBC
+- Output folder
+- DatasetId
+- RunId
+- SegmentId
+- SourceId
+- selected CAN ID / Channel / Signal list
+- authoritative FrameCount signal
+- per-signal semantic/policy table
+
+Optional inputs:
+
+- run start/end FrameCount
+- FrameCount assignment row limit
+- review-view keep list
+- derived camera target selection configuration
+- provisional invalid-default rules
+
+U001 must stop before success output if:
+
+- FrameCount cannot be resolved;
+- FrameCount is non-monotonic in source update order;
+- selected DBC/channel assignment is inconsistent;
+- required byte columns are missing;
+- required analysis signals cannot be resolved;
+- output contains no valid rows in the selected region.
+
+======================================================================
+8. U001 OUTPUT PACKAGE
+======================================================================
+
+Under CAN_CSV_FRAMECOUNT_BATCH_V0_1, every successful run creates one
+timestamped folder containing six files.
+
+8.1 u001_decoded_updates.csv
+
+Long-form trace of selected real decoded updates.
+
+Required columns:
+
+- SourceRowIndex
+- SourceId
+- SourceType
+- ClockDomain
+- NativeTimestamp
+- NativeSequence
+- FrameCount
+- SyncKey
+- SyncQuality
+- FrameAssignmentStatus
+- FrameAssignmentAgeRows
+- CAN_ID
+- Channel
+- MessageName
+- CanonicalName
+- RawCode
+- PhysicalValue
+- ValueLabel
+- ValueKind
+- SignalRole
+- Valid
+- MissingReason
+- MessageCounter
+- SourceDateTime
+- SourceTimeUs
+
+Rules:
+
+- One source message may produce multiple signal-update rows.
+- SourceRowIndex order is preserved.
+- SourceDateTime/SourceTimeUs may be blank or retained as untrusted provenance.
+- Missing optional fields remain blank; their columns are not removed.
+- Current-profile values:
+  SourceType = CAN
+  ClockDomain = FRAMECOUNT_VIDEO
+  SyncKey = assigned FrameCount
+- NativeTimestamp may remain blank when the source timestamp is unreliable.
+
+8.2 u001_frame_values.csv
+
+One row per canonical FrameCount in the selected range.
+
+Required leading columns:
+
+- FrameCount
+- SourceRowFirst
+- SourceRowLast
+- SourceUpdateCount
+
+For each selected frame-view signal S:
+
+- S__value
+  Typed frame-level value after approved within-frame aggregation and optional
+  bounded hold.
+
+- S__label
+  ENUM/BITFIELD label when available; blank for other types.
+
+- S__updated
+  Boolean: one or more real updates occurred inside this frame.
+
+- S__update_count
+  Number of real updates inside this frame.
+
+- S__age
+  Frame steps since the last real valid update.
+  Zero for a valid current-frame update; blank if none has existed.
+
+- S__valid
+  Boolean approval for analysis in this FrameCount view.
+
+- S__missing_reason
+  Controlled value from Section 11.
+
+The update stream remains the raw decoded truth. u001_frame_values.csv is an
+explicitly aggregated/held analysis view.
+
+8.3 u001_signal_catalog.csv
+
+Required columns:
+
+- CanonicalName
+- CAN_ID
+- Channel
+- MessageName
+- SignalName
+- Unit
+- ValueKind
+- SignalRole
+- UpdateMode
+- StorageDtype
+- StartBit
+- BitLength
+- ByteOrder
+- Signed
+- Scale
+- Offset
+- DBCMinimum
+- DBCMaximum
+- EnumerationMap
+- ValidityRule
+- ValiditySourceSignal
+- ValidityExpression
+- WithinFramePolicy
+- HoldPolicy
+- MaxAgeFrames
+- NominalRateHz
+- RequiredForAnalysis
+- IncludeInFrameView
+- IncludeInReviewView
+- Notes
+
+Reserved future-profile metadata columns may remain blank in the current
+profile but their meanings are fixed:
+
+- SourceType
+- SourceAdapter
+- SourceFormat
+- ClockDomain
+- CoordinateFrame
+- ReferencePoint
+- AxisConvention
+- OriginalUnit
+- CanonicalUnit
+- UnitConversionRule
+- TopicName
+- MessageType
+- CalibrationVersion
+
+These fields prevent future Camera/Radar/LiDAR/ROS data from being compared
+without an explicit coordinate frame, measurement reference point, unit
+conversion, and calibration identity.
+
+8.4 u001_quality_report.csv
+
+Required global metrics:
+
+- source_row_count
+- selected_signal_count
+- decoded_update_count
+- frame_row_count
+- frame_min
+- frame_max
+- frame_non_numeric_count
+- frame_out_of_order_count_in_source_order
+- unassigned_source_row_count
+- frame_assignment_limit_exceeded_count
+- duplicate_frame_count_before_canonicalization
+- missing_frame_gap_count
+- largest_frame_gap
+- collapsed_source_row_count
+
+Required per-signal metrics:
+
+- update_count
+- valid_update_count
+- invalid_default_count
+- no_update_frame_count
+- stale_frame_count
+- age_q95
+- age_max
+- within_frame_multi_update_count
+- unknown_enum_code_count
+- dtype_conversion_failure_count
+
+8.5 u001_run_manifest.json
+
+Required content:
+
+- contract version
+- implementation profile
+- processing mode
+- schema version
+- DatasetId
+- RunId
+- SegmentId
+- program name/version
+- run timestamp
+- input basenames only
+- input file sizes
+- optional input fingerprint/checksum
+- DBC basenames
+- DBC version/fingerprint when available
+- SourceId and SourceAdapter definitions
+- selected signal configuration
+- FrameCount source/assignment definition
+- start/end FrameCount
+- all semantic, validity, aggregation, and hold policies
+- coordinate frame/reference point/unit conversion metadata when applicable
+- configuration fingerprint
+- serialization format
+- output filenames
+- warnings
+- execution duration
+- success/failure status
+
+Do not store company absolute paths in the manifest.
+
+8.6 u001_review_view.csv
+
+Human-facing narrow table.
+
+Required first column:
+
+- FrameCount
+
+Remaining columns:
+
+- only user-selected comparison columns;
+- derived selection/status columns when used.
+
+The number of columns is configuration-driven, not fixed at four.
+
+======================================================================
+9. WITHIN-FRAME AGGREGATION
+======================================================================
+
+Allowed WithinFramePolicy:
+
+- LAST_UPDATE
+- FIRST_UPDATE
+- ANY_TRUE
+- BITWISE_OR
+- COUNT_UPDATES
+- KEEP_STREAM_ONLY
+
+Default proposals:
+
+- continuous MEASUREMENT: LAST_UPDATE
+- STATE: LAST_UPDATE
+- EVENT_FLAG: ANY_TRUE
+- VALIDITY_FLAG: LAST_UPDATE or ANY_TRUE, selected explicitly
+- COUNTER/IDENTIFIER: LAST_UPDATE
+- high-rate IMU intended for dynamic analysis: KEEP_STREAM_ONLY until a
+  resampling experiment is approved
+
+Rules:
+
+- Multiple updates are never hidden; update count remains available.
+- KEEP_STREAM_ONLY preserves updates but does not create a frame-level value.
+- Frame aggregation is a view transformation, not raw-data correction.
+- Mean/median/interpolation are intentionally excluded from U001 v0.1 because
+  they would require signal-specific modeling decisions.
+
+======================================================================
+10. OPTIONAL DERIVED CAMERA TARGET VIEW
+======================================================================
+
+If camera target selection is enabled, source camera signals remain unchanged.
+Derived columns may include:
+
+- CanonicalCameraDistance
+- CanonicalCameraRelativeSpeed
+- CanonicalCameraLateralPosition
+- CanonicalCameraLateralSpeed
+- SelectedSource
+- SelectionStatus
+- SelectionConfidence
+- SelectionReason
+
+Controlled SelectionStatus:
+
+- CONFIDENT
+- AMBIGUOUS
+- INVALID
+- NO_CANDIDATE
+- UNSUPPORTED_REFERENCE_ID
+
+Rules:
+
+- Radar must not choose the camera source for baseline training.
+- Only CONFIDENT rows enter the first formal baseline fit by default.
+- AMBIGUOUS rows remain reviewable but are excluded from baseline training
+  unless an experiment explicitly changes this rule.
+- Source switches and large jumps are logged, not smoothed away.
+
+======================================================================
+11. CONTROLLED DATA-STATE VALUES
+======================================================================
+
+MissingReason uses:
+
+- VALID_UPDATE
+- VALID_AGGREGATED
+- VALID_CARRIED
+- NO_UPDATE
+- SOURCE_MISSING
+- INCOMPLETE_BYTES
+- DBC_INVALID_DEFAULT
+- OUT_OF_DBC_RANGE
+- USER_INVALID_RULE
+- VALIDITY_FLAG_REJECTED
+- STALE
+- ASSOCIATION_AMBIGUOUS
+- FRAME_UNASSIGNED
+- UNKNOWN_ENUM_CODE
+- NOT_APPLICABLE
+
+Unknown cases become SOURCE_MISSING or NOT_APPLICABLE with a warning. They are
+never silently converted to zero.
+
+======================================================================
+12. DUPLICATE, GAP, AND FRAME-ASSIGNMENT POLICY
+======================================================================
+
+12.1 Multiple updates at one FrameCount
+
+- They remain separate in u001_decoded_updates.csv.
+- u001_frame_values.csv applies the configured WithinFramePolicy.
+- Update counts and multi-update counts are reported.
+
+12.2 Missing FrameCount values
+
+- U001 v0.1 does not synthesize absent FrameCount rows.
+- Gap count and largest gap are reported.
+
+12.3 FrameCount wrap/reset
+
+- A decrease/reset is not silently sorted away.
+- The run stops or is split into explicit segments after engineer confirmation.
+
+12.4 Frame label propagation
+
+- Frame assignment is performed only after source-order monotonicity checks.
+- Assignment age in source rows is recorded.
+- Exceeding the configured row limit produces FRAME_UNASSIGNED, not an
+  indefinitely propagated frame label.
+
+======================================================================
+13. U002 INPUT GATES AND SAMPLE DOMAINS
+======================================================================
+
+13.1 FRAME_DOMAIN
+
+Static discrepancy, baseline, event localization, and video-linked analysis
+may use u001_frame_values.csv only when:
+
+- FrameCount is numeric and strictly increasing;
+- no duplicate canonical FrameCount remains;
+- required signals have explicit validity fields;
+- no valid carried value exceeds MaxAgeFrames;
+- no prohibited global zero fill exists;
+- units, types, roles, aggregation, and hold policies are resolvable;
+- quality report and manifest exist.
+
+U002 filters using S__valid, not only non-null values.
+
+13.2 UPDATE_DOMAIN
+
+Future high-rate dynamics/SysID may use u001_decoded_updates.csv only when:
+
+- the selected model has a justified sample/time domain;
+- required update order is preserved;
+- a trustworthy physical sampling interval exists, or a separate approved
+  resampling experiment defines one.
+
+FrameCount alone cannot justify sub-frame delay/gain estimates. Without a
+trustworthy sub-frame time axis, U002 must either:
+
+- use the explicit 20 Hz FRAME_DOMAIN; or
+- report results only in source-update/frame units with that limitation.
+
+13.3 MODEL/EXPORT DOMAIN
+
+MATLAB, Simulink, ROS, and Autobox-facing components consume approved logical
+records through separate export/adaptation modules.
+
+They must not:
+
+- reinterpret missing states;
+- discard validity/provenance;
+- change units or coordinate frames without an explicit conversion;
+- infer a sampling interval that the source cannot support.
+
+======================================================================
+14. U003 REVIEW INTERFACE
+======================================================================
+
+U002 produces:
+
+- candidate_event_queue.csv
+- review_data.csv
+
+Required candidate queue fields:
+
+- EventID
+- StartFrameCount
+- CenterFrameCount
+- EndFrameCount
+- CandidateType
+- CandidateScore
+- ReviewPriority
+- ShortReason
+
+review_data.csv begins with FrameCount and contains only fields required for
+the current review. U003 reads remaining columns dynamically.
+
+U003 produces:
+
+- review decision/code
+- short memo
+- one Plot CSV for the configured before/after range
+- engineer-selected screenshot/evidence
+
+======================================================================
+15. FUTURE PLATFORM COMPATIBILITY BOUNDARY
+======================================================================
+
+15.1 Source adapters
+
+Future input sources are added through explicit SourceAdapter profiles.
+Examples:
+
+- CAN_CSV
+- MDF_MF4
+- ROSBAG
+- ROS_TOPIC_STREAM
+- LIDAR_PAYLOAD_INDEX
+- CLOUD_OBJECT_BATCH
+
+An adapter must produce the logical UpdateRecord/SignalCatalog/RunManifest
+semantics. It must not modify the core meaning to match a convenient library.
+
+15.2 Batch and streaming modes
+
+Allowed ProcessingMode:
+
+- BATCH
+- STREAM_REPLAY
+- ONLINE
+
+U001 v0.1 implements BATCH only.
+
+Future STREAM_REPLAY/ONLINE profiles must separately define:
+
+- out-of-order tolerance;
+- buffering/window policy;
+- state checkpoint/restart behavior;
+- bounded-hold state across chunks;
+- processing latency;
+- data-loss/backpressure reporting.
+
+No real-time capability is claimed by the current contract.
+
+15.3 Large payloads and point clouds
+
+LiDAR images/point clouds must not be expanded cell-by-cell into the current
+CSV Frame View.
+
+Future large-payload records use:
+
+- PayloadRef
+- PayloadType
+- PayloadSize
+- PayloadChecksum
+- CoordinateFrame
+- CalibrationVersion
+- SyncKey/SyncQuality
+
+The logical table stores the searchable index/provenance; the payload remains
+in an appropriate binary/object store.
+
+15.4 Data-center partitioning
+
+Future platform storage may partition by:
+
+- DatasetId
+- RunId
+- SegmentId
+- SourceId
+- frame/time range
+- schema/contract version
+
+Absolute workstation paths are never stable identifiers. Manifests use
+basenames, logical object references, or profile-defined relative locations.
+
+15.5 Serialization
+
+CSV remains the MVP interchange format.
+
+A later profile may use Parquet/Arrow, database tables, ROS messages, MATLAB
+tables, or another approved serialization when scale/performance requires it.
+Serialization changes do not alter logical field definitions.
+
+15.6 Non-expansion rule
+
+Roadmap compatibility is provided by stable adapters and metadata, not by
+implementing Cloud, ROS, LiDAR, Simulink, or Autobox inside U001 v0.1.
+
+======================================================================
+16. GOLDEN RUN MVP ACCEPTANCE
+======================================================================
+
+The first Golden Run is accepted only when:
+
+1. Raw CAN + DBC are selected in U001.
+2. U001 produces all six output files.
+3. Selected real updates remain traceable in u001_decoded_updates.csv.
+4. FrameCount is monotonic and duplicate-free in u001_frame_values.csv.
+5. Numeric, boolean, enum/state, and event/counter semantics are preserved for
+   any such signals selected in the run.
+6. No unlimited measurement hold or global zero fill is used.
+7. Radar Distance, Camera Distance, validity/provenance, and FrameCount are
+   available to U002.
+8. U002 produces at least one candidate and review_data.csv.
+9. U003 opens the event, synchronizes video/CAN, records a review, and exports
+   one Plot CSV.
+10. A node report records configuration, observed result, limitations, and
+    next defects.
+
+The Golden Run proves path viability. It does not prove final algorithm
+accuracy, root cause, or high-rate dynamic validity.
+
+======================================================================
+17. FORMAL DECISIONS
+======================================================================
+
+D-UDP001-01
+FrameCount is the video-domain synchronization key, not a high-resolution
+timestamp.
+
+D-UDP001-02
+U001 owns source order, frame assignment, frame aggregation, sorting,
+missingness, validity, and provenance.
+
+D-UDP001-03
+Global zero fill and unlimited measurement forward fill are rejected.
+
+D-UDP001-04
+Raw selected updates are preserved in a long update stream; frame-aligned
+values are a separate derived view.
+
+D-UDP001-05
+Signal semantics explicitly distinguish measurement, state, event flag,
+validity flag, counter, identifier, and frame key.
+
+D-UDP001-06
+Boolean false/zero and enum codes are preserved as data unless a
+signal-specific validity rule rejects them.
+
+D-UDP001-07
+High-rate IMU updates are not silently reduced to one frame value for SysID.
+
+D-UDP001-08
+Inventory is separated from selected-signal materialization to control scale.
+
+D-UDP001-09
+The first milestone is a Golden Run, not a complete rewrite or complete
+theoretical model.
+
+D-UDP001-10
+The stable contract is a logical record model; CAN CSV/FrameCount is the
+current implementation profile, not the permanent platform limit.
+
+D-UDP001-11
+Future Cloud/ROS/LiDAR/MATLAB/Simulink/Autobox support is introduced through
+versioned source/export profiles and adapters.
+
+D-UDP001-12
+Coordinate frame, measurement reference point, unit conversion, calibration,
+clock domain, and synchronization quality are explicit metadata whenever
+applicable.
+
+D-UDP001-13
+Large binary sensor payloads remain external and are referenced by indexed,
+checksummed payload metadata.
+
+D-UDP001-14
+The current profile makes no real-time/online-processing claim.
+
+END OF CONTRACT

@@ -1,0 +1,124 @@
+UDP001 — EXECUTION GATE 0
+START HERE
+Date: 2026-07-24
+Language: Chinese instructions; preserve source identifiers in English
+
+======================================================================
+1. THIS GATE HAS ONLY ONE PURPOSE
+======================================================================
+
+Inspect the three legacy data-preparation programs and determine exactly which
+source logic can be reused in U001 Data Preparation Workbench.
+
+This gate is READ-ONLY.
+
+Do not modify legacy code.
+Do not create U001 code.
+Do not merge GUIs.
+Do not change the approved Data Contract.
+Do not inspect P004.
+
+The output of this gate is an evidence-based reuse assessment, not a program.
+
+======================================================================
+2. FILES TO GIVE COMPANY COPILOT IN ONE CHAT
+======================================================================
+
+Legacy source:
+
+1. can_header_catalog_gui.py
+2. matlab_can_time_order_decoder_gui.py
+3. can_analysis_csv_cleaner_gui.py
+
+Control documents:
+
+4. UDP001_00_START_HERE_2026-07-24.txt
+5. UDP001_01_UNIFIED_DATA_CONTRACT_v0_1_2026-07-24.txt
+6. UDP001_02_P001_P003_REUSE_INSPECTION_TASK_v0_1_2026-07-24.txt
+7. UDP001_03_REUSE_INSPECTION_RETURN_PROTOCOL_v0_1_2026-07-24.txt
+
+Do not attach:
+
+- P004;
+- company data;
+- CSV;
+- DBC;
+- screenshots;
+- previous probe reports.
+
+This gate is static source inspection only.
+
+======================================================================
+3. EXACT MESSAGE TO COMPANY COPILOT
+======================================================================
+
+请完整读取本对话附带的7个文件。
+
+严格执行
+UDP001_02_P001_P003_REUSE_INSPECTION_TASK_v0_1_2026-07-24.txt。
+
+本任务只进行静态源码复用审查，不运行GUI，不修改原程序，不生成新程序，
+不讨论P004，也不得改变已冻结的Data Contract。
+
+请创建并提供可下载的纯文本文件：
+
+UDP001_legacy_reuse_assessment_v0_1.txt
+
+不要只在聊天中粘贴长报告。
+
+报告完成后，聊天中只返回两项：
+
+1. UDP001-REUSE-ASSESSMENT-GENERATED
+2. 严格按UDP001_03_REUSE_INSPECTION_RETURN_PROTOCOL_v0_1_2026-07-24.txt
+   生成的机器码Capsule
+
+没有源码证据时必须写UNKNOWN，不得猜测。
+
+======================================================================
+4. EXPECTED COMPANY-SIDE OUTPUT
+======================================================================
+
+One downloadable file:
+
+UDP001_legacy_reuse_assessment_v0_1.txt
+
+One short chat response:
+
+UDP001-REUSE-ASSESSMENT-GENERATED
+
+UDP001I1
+B1-....
+B2-....
+...
+B12-....
+C-.
+
+======================================================================
+5. WHAT THE USER RETURNS TO CHATGPT
+======================================================================
+
+Return only:
+
+- the capsule from UDP001I1 through C;
+- at most 1–3 short Memo lines for an exceptional condition that the capsule
+  cannot represent.
+
+Do not manually transcribe the long assessment report.
+
+======================================================================
+6. SUCCESS CRITERIA
+======================================================================
+
+Gate 0 is complete only when:
+
+- all three exact legacy filenames were inspected;
+- every reuse judgment has source evidence;
+- duplicated responsibilities are listed;
+- Data Contract conflicts are listed;
+- each important legacy component is classified K/E/R/X;
+- an extraction order is proposed;
+- no implementation code was created;
+- a valid 12-group return capsule was generated.
+
+After the capsule is returned, ChatGPT decides whether U001 may enter detailed
+module design and implementation. Company Copilot does not make that approval.
