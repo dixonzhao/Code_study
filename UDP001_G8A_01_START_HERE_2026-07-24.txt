@@ -1,0 +1,114 @@
+UDP001 — EXECUTION GATE 8A
+GOLDEN REPLAY ORCHESTRATOR
+Date: 2026-07-24
+
+======================================================================
+1. GATE PURPOSE
+======================================================================
+
+Gate 7 is accepted.
+
+Gate 8A creates one orchestration program that calls the accepted Gate 1–Gate
+7 programs in a fixed sequence and rebuilds the same 100,000-source-row smoke
+package under a new, isolated run folder.
+
+This task changes control flow only.
+
+It must not:
+
+- merge Gate algorithms into one large implementation;
+- copy algorithm logic out of accepted modules;
+- modify Gate 1–Gate 7 source files;
+- change selected signals or approved policies;
+- add GUI, analysis, camera fusion, discrepancy, baseline, residual, anomaly,
+  event, plotting, or XLSX output;
+- retire legacy P001–P003;
+- claim independent validation.
+
+Independent candidate-versus-reference validation is reserved for Gate 8B.
+
+======================================================================
+2. FILES TO GIVE COMPANY COPILOT IN A NEW CHAT
+======================================================================
+
+Accepted code:
+
+1. u001_foundation_core_v0_1.py
+2. u001_selected_update_decoder_v0_1.py
+3. u001_framecount_assignment_v0_1.py
+4. u001_semantic_validity_classifier_v0_1.py
+5. u001_framecount_view_builder_v0_1.py
+6. u001_signal_cadence_bounded_hold_v0_1.py
+7. u001_output_package_assembler_v0_1.py
+
+Control documents downloaded from GitHub:
+
+8. UDP001_00_UNIFIED_DATA_CONTRACT_v0_1_2026-07-24.txt
+9. UDP001_G8A_01_START_HERE_2026-07-24.txt
+10. UDP001_G8A_02_GOLDEN_REPLAY_ORCHESTRATOR_SPEC_v0_1_2026-07-24.txt
+11. UDP001_G8A_03_ACCEPTANCE_PROTOCOL_v0_1_2026-07-24.txt
+
+Do not attach company Raw CAN, DBC, generated data, or previous large chat
+history to Copilot.
+
+======================================================================
+3. EXACT MESSAGE TO COMPANY COPILOT
+======================================================================
+
+请完整读取附带的11个文件。
+
+UDP001 Gate 1至Gate 7已经正式通过。严格执行
+UDP001_G8A_02_GOLDEN_REPLAY_ORCHESTRATOR_SPEC_v0_1_2026-07-24.txt。
+
+本任务只编写一个Golden Replay Orchestrator。它必须使用subprocess和当前
+Python解释器，按固定顺序调用现有Gate 1至Gate 7程序。不得复制、重写、
+合并或修改这些程序内部算法。
+
+请创建一个可下载的纯文本代码文件：
+
+u001_golden_replay_orchestrator_v0_1.py.txt
+
+文件内容必须是完整Python源码。不要只粘贴在聊天中，不要拆成多个代码
+文件，不要生成GUI、BAT、PowerShell、配置、报告或其他文件。
+
+生成后只回答：
+
+UDP001-G8A-CODE-GENERATED
+
+如无法完整生成，回答：
+
+UDP001-G8A-CODE-NOT-GENERATED
+
+并用一行说明原因。
+
+======================================================================
+4. AFTER CODE GENERATION
+======================================================================
+
+Download:
+
+u001_golden_replay_orchestrator_v0_1.py.txt
+
+Save/rename as:
+
+u001_golden_replay_orchestrator_v0_1.py
+
+Do not run it until the execution handoff is provided.
+
+Return to ChatGPT only:
+
+UDP001-G8A-CODE-GENERATED
+
+======================================================================
+5. STOP CONDITIONS
+======================================================================
+
+Stop if Copilot:
+
+- creates more than one code file;
+- cannot provide a downloadable complete source file;
+- proposes editing Gate 1–Gate 7 code;
+- copies decode/assignment/validity/aggregation/hold/package logic into the
+  orchestrator;
+- omits subprocess isolation or stop-on-failure behavior;
+- adds U002/U003 functions.

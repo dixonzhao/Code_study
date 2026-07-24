@@ -1,0 +1,600 @@
+UDP001 — GATE 8A GOLDEN REPLAY ORCHESTRATOR SPECIFICATION v0.1
+Date: 2026-07-24
+Output: u001_golden_replay_orchestrator_v0_1.py.txt
+
+======================================================================
+0. SCOPE
+======================================================================
+
+Implement one import-safe control-plane Python file that:
+
+1. discovers the seven accepted U001 module files;
+2. discovers the four accepted control-policy files;
+3. records one local replay configuration;
+4. runs module self-tests;
+5. invokes Gate 1–Gate 7 through subprocess in a fixed sequence;
+6. stops on the first failed stage;
+7. preserves every command, return code, input hash, output basename, and
+   capsule in an orchestration manifest;
+8. emits one compact Gate 8A capsule.
+
+The orchestrator owns execution order only. All data transformations remain
+owned by their accepted modules.
+
+======================================================================
+1. DEPENDENCIES AND IMPORT SAFETY
+======================================================================
+
+Allowed:
+
+- Python standard library;
+- pandas only for small policy/config/capsule checks;
+- no direct import of accepted module implementation functions.
+
+Use:
+
+- subprocess.run;
+- sys.executable;
+- argument lists, never shell=True;
+- UTF-8 captured stdout/stderr;
+- SHA-256 streaming hashes;
+- atomic JSON/TXT writes.
+
+Importing the orchestrator must not:
+
+- discover files;
+- run a subprocess;
+- read Raw CAN or DBC;
+- create a folder;
+- print a capsule.
+
+======================================================================
+2. REQUIRED ACCEPTED MODULES
+======================================================================
+
+Resolve exactly one of each under --module-root:
+
+1. u001_foundation_core_v0_1.py
+2. u001_selected_update_decoder_v0_1.py
+3. u001_framecount_assignment_v0_1.py
+4. u001_semantic_validity_classifier_v0_1.py
+5. u001_framecount_view_builder_v0_1.py
+6. u001_signal_cadence_bounded_hold_v0_1.py
+7. u001_output_package_assembler_v0_1.py
+
+Rules:
+
+- zero match is blocking;
+- multiple matches are blocking;
+- do not choose newest/first/largest automatically;
+- capture basename, byte size, and SHA-256;
+- never modify, rename, copy over, or delete a module.
+
+======================================================================
+3. REQUIRED ACCEPTED CONTROL FILES
+======================================================================
+
+Resolve exactly one of each under --accepted-control-root:
+
+1. u001_g2_selected_signals.csv
+2. u001_g4_signal_policy.csv
+3. u001_g5_frame_policy.csv
+4. u001_g6_hold_policy.csv
+
+Rules:
+
+- capture basename, size, and SHA-256 before the run;
+- copy each read-only into RUN_ROOT/CONTROL using the same basename;
+- copied hashes must equal original hashes;
+- Gate 4/5/6 SignalIndex and CanonicalName mappings must agree;
+- Gate 6 current smoke requires five included signals and all HoldPolicy=NONE;
+- do not regenerate or edit approved policy content.
+
+======================================================================
+4. REQUIRED EXTERNAL INPUTS
+======================================================================
+
+--source
+
+- same MATLAB-format Raw CAN CSV used for the accepted 100,000-row smoke.
+
+--dbc-ch1
+
+- same accepted Channel 1 DBC.
+
+--dbc-ch2
+
+- same accepted Channel 2 DBC.
+
+Rules:
+
+- record basenames, sizes, and optional streaming SHA-256 in local config;
+- absolute paths remain only in company-local config/orchestration manifest;
+- absolute paths must not enter the final six-file U001 package manifest;
+- no raw row or DBC content is copied into an orchestration log/capsule;
+- inputs remain read-only.
+
+======================================================================
+5. CLI MODES
+======================================================================
+
+Required:
+
+1. --self-test
+2. --make-config
+3. --run
+
+5.1 Self-test
+
+python u001_golden_replay_orchestrator_v0_1.py --self-test
+
+Required:
+
+UDP001-G8A-SELFTEST-PASS-16
+
+5.2 Make config
+
+python u001_golden_replay_orchestrator_v0_1.py --make-config
+  --module-root PATH
+  --accepted-control-root PATH
+  --source PATH
+  --dbc-ch1 PATH
+  --dbc-ch2 PATH
+  --out PATH
+
+Write:
+
+u001_g8a_replay_config.json
+
+Do not execute a Gate during --make-config.
+
+5.3 Run
+
+python u001_golden_replay_orchestrator_v0_1.py --run
+  --config PATH
+  --out-root PATH
+
+Create one new unique run folder. Never overwrite or resume a partial run.
+
+======================================================================
+6. REPLAY CONFIG
+======================================================================
+
+Required top-level sections:
+
+- Orchestrator
+- Identity
+- Modules
+- ControlFiles
+- Inputs
+- Parameters
+- ExpectedSmoke
+- Safety
+
+Orchestrator:
+
+- ProgramName = u001_golden_replay_orchestrator_v0_1.py
+- Version = 0.1
+- ContractVersion = 0.1
+- ImplementationProfile = CAN_CSV_FRAMECOUNT_BATCH_V0_1
+
+Identity:
+
+- DatasetId = UDP001_GOLDEN_REPLAY
+- RunId = UDP001_G8A_REPLAY_001
+- SegmentId = SEGMENT_001
+- SourceId = CAN_SOURCE_001
+- IdentityStatus = CONTROLLED_REPLAY
+
+Parameters:
+
+- MaxSourceRows = 100000
+- DecodeChunkSize = 50000
+- AssignmentChunkSize = 100000
+- ClassificationChunkSize = 100000
+- FrameBuildChunkSize = 100000
+- HoldApplyChunkSize = 100000
+- MaxAssignmentAgeRows = 200
+- FrameCanonicalName is derived from the one approved FRAME_KEY row; do not
+  guess or hard-code a signal name.
+
+ExpectedSmoke:
+
+- SourceRows = 100000
+- SelectedMessages = 399982
+- DecodedUpdates = 599970
+- AssignedUpdates = 599970
+- RepresentedSourceRows = 99999
+- FrameKeyUpdateRows = 99998
+- FrameRows = 20617
+- CatalogSignals = 6
+- FrameViewSignals = 5
+- ReviewColumns = 6
+- PackageFiles = 6
+- HoldPolicy = NONE for all current Frame View signals
+
+Safety:
+
+- StopOnFirstFailure = true
+- RejectOverwrite = true
+- ShellEqualsFalse = true
+- PreserveInputs = true
+- PreserveModules = true
+- PreservePolicies = true
+- NoAnalysis = true
+- NoGUI = true
+
+Config paths are company-local and may be absolute. The orchestrator manifest
+is also a company-local control artifact, not part of the six-file package.
+
+======================================================================
+7. RUN DIRECTORY
+======================================================================
+
+Create:
+
+RUN_ROOT/
+  CONTROL/
+  G1_PROBE/
+  G2_DECODE/
+  G3_ASSIGN/
+  G4_CLASSIFY/
+  G5_FRAME/
+  G6_PROFILE/
+  G6_APPLY/
+  G7_CONFIG/
+  G7_BUILD/
+  CONTROL_OUTPUT/
+
+Only accepted modules create data artifacts inside their stage folders.
+
+CONTROL_OUTPUT contains:
+
+- u001_g8a_orchestration_manifest.json
+- udp001_g8a_return_capsule.txt
+
+Do not put either file inside the final Gate 7 six-file package.
+
+======================================================================
+8. PREFLIGHT
+======================================================================
+
+Before Gate 1:
+
+1. validate config schema;
+2. resolve all seven modules exactly once;
+3. resolve all four control files exactly once;
+4. validate source and DBC readability;
+5. hash modules, controls, and external inputs;
+6. verify control-file SignalIndex/CanonicalName mappings;
+7. verify all current Gate 6 policies are NONE;
+8. verify output root is new;
+9. copy control files and compare hashes;
+10. run module self-tests using sys.executable.
+
+Expected module self-test pass strings:
+
+- Gate 1: UDP001-G1-SELFTEST-PASS-16
+- Gate 2: UDP001-G2-SELFTEST-PASS-12
+- Gate 3: UDP001-G3-SELFTEST-PASS-14
+- Gate 4: UDP001-G4-SELFTEST-PASS-16
+- Gate 5: UDP001-G5-SELFTEST-PASS-16
+- Gate 6: UDP001-G6-SELFTEST-PASS-16
+- Gate 7: UDP001-G7-SELFTEST-PASS-16
+
+Every subprocess must:
+
+- return exit code 0;
+- contain its exact pass string;
+- complete without modifying module/control/input hashes.
+
+Stop before Gate 1 when preflight fails.
+
+======================================================================
+9. FIXED EXECUTION SEQUENCE
+======================================================================
+
+Use sys.executable and subprocess argument lists.
+
+9.1 Gate 1 probe
+
+Module:
+
+u001_foundation_core_v0_1.py
+
+Arguments:
+
+--probe
+--source <source>
+--dbc-ch1 <dbc1>
+--dbc-ch2 <dbc2>
+--out <G1_PROBE>
+
+Require:
+
+- process exit code 0;
+- Gate 1 capsule C-0;
+- exactly three expected outputs.
+
+9.2 Gate 2 decode
+
+Module:
+
+u001_selected_update_decoder_v0_1.py
+
+Arguments:
+
+--decode
+--source <source>
+--dbc-ch1 <dbc1>
+--dbc-ch2 <dbc2>
+--selection <CONTROL/u001_g2_selected_signals.csv>
+--out <G2_DECODE>
+--chunksize 50000
+--max-source-rows 100000
+--source-id <SourceId>
+
+Before execution, verify every selected CanonicalName is resolvable in the
+Gate 1 catalog. Do not fuzzy-match.
+
+Require Gate 2 capsule C-0 and expected output filenames.
+
+9.3 Gate 3 FrameCount assignment
+
+Module:
+
+u001_framecount_assignment_v0_1.py
+
+Arguments:
+
+--assign
+--updates <G2_DECODE/u001_g2_raw_decoded_updates.csv>
+--frame-canonical-name <derived approved FRAME_KEY CanonicalName>
+--max-assignment-age-rows 200
+--out <G3_ASSIGN>
+--chunksize 100000
+
+Require Gate 3 capsule C-0 and expected output filenames.
+
+9.4 Gate 4 semantic classification
+
+Module:
+
+u001_semantic_validity_classifier_v0_1.py
+
+Arguments:
+
+--classify
+--updates <G3_ASSIGN/u001_g3_frame_assigned_updates.csv>
+--policy <CONTROL/u001_g4_signal_policy.csv>
+--out <G4_CLASSIFY>
+--chunksize 100000
+
+Require Gate 4 capsule C-0 and expected output filenames.
+
+9.5 Gate 5 Frame View
+
+Module:
+
+u001_framecount_view_builder_v0_1.py
+
+Arguments:
+
+--build
+--updates <G4_CLASSIFY/u001_g4_semantic_validity_updates.csv>
+--policy <CONTROL/u001_g5_frame_policy.csv>
+--out <G5_FRAME>
+--chunksize 100000
+
+Require Gate 5 capsule C-0 and expected output filenames.
+
+9.6 Gate 6 cadence profile
+
+Module:
+
+u001_signal_cadence_bounded_hold_v0_1.py
+
+Arguments:
+
+--profile
+--frames <G5_FRAME/u001_g5_frame_values.csv>
+--policy <CONTROL/u001_g6_hold_policy.csv>
+--out <G6_PROFILE>
+
+Require Gate 6 profile capsule C-0.
+
+Current replay invariants for every included signal:
+
+- updated frames = 20617;
+- no-update frames = 0;
+- valid current updates = 20617;
+- invalid current updates = 0;
+- q95/q99/max inter-update step = 1/1/1;
+- longest no-update run = 0.
+
+Stop before apply if these controlled replay invariants change.
+
+9.7 Gate 6 hold apply
+
+Arguments:
+
+--apply
+--frames <G5_FRAME/u001_g5_frame_values.csv>
+--policy <CONTROL/u001_g6_hold_policy.csv>
+--out <G6_APPLY>
+--chunksize 100000
+
+Require Gate 6 apply capsule C-0:
+
+- five policies NONE;
+- carried/stale/no-prior/barrier/error counts = 0.
+
+9.8 Gate 7 package config
+
+Module:
+
+u001_output_package_assembler_v0_1.py
+
+Arguments:
+
+--make-config
+--root <RUN_ROOT>
+--out <G7_CONFIG/u001_g7_package_config.json>
+
+Require exact unique discovery.
+
+After Gate 7 writes its config, the orchestrator may update only these
+documented identity values using JSON parsing:
+
+- DatasetId
+- RunId
+- SegmentId
+- SourceId
+- IdentityStatus = CONTROLLED_REPLAY
+
+Do not change input paths, review columns, contract, serialization, or safety.
+Record before/after config hashes and the exact identity-only change.
+
+9.9 Gate 7 package build
+
+Arguments:
+
+--build
+--config <G7_CONFIG/u001_g7_package_config.json>
+--out-root <G7_BUILD>
+
+Require Gate 7 capsule C-0 and exactly six final package files.
+
+======================================================================
+10. SUBPROCESS CONTROL
+======================================================================
+
+For every command record:
+
+- StageId
+- module basename and SHA-256
+- arguments with company absolute path values redacted to basenames in the
+  summary view;
+- start/end timestamp;
+- duration;
+- return code;
+- stdout/stderr text;
+- expected pass/capsule path;
+- capsule C code;
+- output basenames/sizes/hashes;
+- PASS/FAIL.
+
+The full company-local manifest may retain local paths for recovery, but:
+
+- the return capsule never contains paths;
+- the final U001 run manifest never receives absolute paths;
+- no raw/DBC content or record-level value enters logs.
+
+Terminate after the first nonzero return, missing output, failing capsule, or
+hash mutation.
+
+Do not continue to create a partial “successful” package.
+
+======================================================================
+11. ORCHESTRATION MANIFEST
+======================================================================
+
+Write:
+
+u001_g8a_orchestration_manifest.json
+
+Required:
+
+- orchestrator/config versions and fingerprint;
+- replay identity;
+- module/control/input pre-run hashes;
+- module self-test results;
+- fixed stage sequence;
+- per-stage command metadata and result;
+- copied-control hash equality;
+- post-run module/control/input hashes;
+- final Gate 7 package location and six output hashes;
+- warnings/errors;
+- final SUCCESS/FAILURE;
+- failure StageId when applicable.
+
+This manifest is company-local control evidence and is not one of the six
+Data Contract files.
+
+======================================================================
+12. SELF-TESTS — EXACTLY 16
+======================================================================
+
+1. import side-effect free;
+2. missing/duplicate module discovery rejected;
+3. missing/duplicate control discovery rejected;
+4. config schema and canonical fingerprint;
+5. sys.executable argument-list command construction;
+6. shell=True impossible;
+7. module self-test pass/fail parsing;
+8. capsule C-code parsing without hard-coded PASS;
+9. stop-on-first-failure;
+10. read-only module/control/input hash protection;
+11. exact stage order;
+12. FRAME_KEY derivation from policy;
+13. Gate 7 identity-only config update;
+14. unique run folder/no overwrite;
+15. orchestration manifest completeness/path separation;
+16. deterministic synthetic Golden Replay using stub modules.
+
+Required output:
+
+UDP001-G8A-SELFTEST-PASS-16
+
+======================================================================
+13. PERFORMANCE
+======================================================================
+
+- The orchestrator does not load large CSV files.
+- Large-data processing remains in accepted Gate modules.
+- Capture stdout/stderr without polling large files.
+- Hash large files by streaming blocks.
+- Run stages sequentially; do not parallelize dependent Gates.
+- Never rerun a successful stage inside the same run folder.
+
+======================================================================
+14. RETURN CAPSULE
+======================================================================
+
+Write:
+
+CONTROL_OUTPUT/udp001_g8a_return_capsule.txt
+
+Format:
+
+UDP001G8AR1
+B1-abcd
+B2-abcd
+B3-abcd
+B4-abcd
+N-Gg-Pp-Uu-Rr-Ff-Xx
+S1-Cc-Hh S2-Cc-Hh S3-Cc-Hh S4-Cc-Hh
+S5-Cc-Hh S6-Cc-Hh S7-Cc-Hh
+C-n
+
+Definitions:
+
+- G = completed data Gates, expected 7
+- P = passed module self-tests, expected 7
+- U = final decoded Update Stream rows
+- R = final Frame View rows
+- F = final package files
+- X = blocking orchestration errors
+- per stage C = stage capsule/result code
+- per stage H = 1 when pre/post protected-input hashes are equal, otherwise 0
+
+Current replay PASS:
+
+- G=7
+- P=7
+- U=599970
+- R=20617
+- F=6
+- X=0
+- S1–S7 C0-H1
+- C-0
