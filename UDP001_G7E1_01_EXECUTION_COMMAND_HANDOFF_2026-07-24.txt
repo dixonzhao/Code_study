@@ -1,0 +1,108 @@
+UDP001 — GATE 7 EXECUTION COMMAND HANDOFF G7E1
+Date: 2026-07-24
+Purpose: let company Copilot resolve real company-computer paths and produce
+three directly executable commands.
+
+======================================================================
+1. WHEN TO USE
+======================================================================
+
+Use this file only after:
+
+- u001_output_package_assembler_v0_1.py.txt has been generated;
+- it has been downloaded and saved as:
+  u001_output_package_assembler_v0_1.py;
+- the accepted Gate 2–Gate 6 output folders still exist.
+
+This handoff does not authorize code modification or architecture redesign.
+
+======================================================================
+2. FILE TO GIVE COMPANY COPILOT
+======================================================================
+
+Give this file to the same Gate 7 Copilot chat after code generation.
+
+Copilot already has the Gate 7 specification and should use the actual paths
+visible in the company-side chat/workspace.
+
+======================================================================
+3. EXACT MESSAGE TO COMPANY COPILOT
+======================================================================
+
+请读取UDP001_G7E1_01_EXECUTION_COMMAND_HANDOFF_2026-07-24.txt。
+
+不要修改任何Python代码，不要重新生成程序，不要解释算法。
+
+请根据当前公司电脑中已经出现的真实文件路径，生成三条可直接复制到
+VS Code Terminal运行的单行命令：
+
+1. SELFTEST
+运行u001_output_package_assembler_v0_1.py --self-test
+
+2. MAKECONFIG
+运行u001_output_package_assembler_v0_1.py --make-config，
+--root必须指向能够唯一找到全部Gate 2至Gate 6必要输出的最小目录，
+--out写入u001_g7_package_config.json。
+
+3. BUILD
+运行u001_output_package_assembler_v0_1.py --build，
+--config使用上一步生成的JSON，
+--out-root使用新的UDP001_G7_BUILD目录。
+
+必须使用公司电脑当前实际的Python启动方式和绝对路径。路径全部加双引号。
+不得使用PATH_TO、WORK_ROOT、...等占位符。
+
+输出前确认以下12个必要输入文件在--root下各自只存在一个：
+
+u001_g2_selected_signals.csv
+u001_g2_decode_quality.json
+u001_g3_frame_assignment_quality.json
+u001_g4_semantic_validity_updates.csv
+u001_g4_signal_policy.csv
+u001_g4_semantic_validity_quality.json
+u001_g5_frame_policy.csv
+u001_g5_frame_quality.json
+u001_g6_hold_policy.csv
+u001_g6_cadence_quality.json
+u001_g6_frame_values.csv
+u001_g6_hold_quality.json
+
+如果全部路径明确，只输出：
+
+UDP001-G7E1-COMMANDS
+SELFTEST-<完整单行命令>
+MAKECONFIG-<完整单行命令>
+BUILD-<完整单行命令>
+
+不要增加解释。
+
+如果任何文件缺失、重复或实际路径未知，只输出：
+
+UDP001-G7E1-PATH-BLOCKED
+MISSING-<缺失文件名；没有则NONE>
+DUPLICATE-<重复文件名；没有则NONE>
+UNKNOWN-<路径未知文件名；没有则NONE>
+
+不要猜路径，不要自动选择最新文件。
+
+======================================================================
+4. USER EXECUTION
+======================================================================
+
+Run in this order:
+
+1. SELFTEST
+2. MAKECONFIG
+3. BUILD
+
+Stop immediately if:
+
+- SELFTEST is not UDP001-G7-SELFTEST-PASS-16;
+- MAKECONFIG reports a missing or duplicate file;
+- BUILD returns C other than C-0.
+
+For a successful build, return to ChatGPT only the complete content of:
+
+udp001_g7_return_capsule.txt
+
+Do not hand-type paths, logs, or JSON content back to ChatGPT.
