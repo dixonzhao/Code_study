@@ -1,0 +1,357 @@
+#!/usr/bin/env python3
+"""
+UDP001 G8R2B exact-finding extractor.
+
+This file is already executable Python source. Do not ask Copilot to regenerate
+or redesign it.
+
+COMPANY-SIDE STEPS
+==================
+
+1. Download this file.
+2. Rename:
+
+   u001_g8r2b_exact_finding_extractor_v0_1.py.txt
+
+   to:
+
+   u001_g8r2b_exact_finding_extractor_v0_1.py
+
+3. Run the self-test:
+
+   python u001_g8r2b_exact_finding_extractor_v0_1.py --self-test
+
+   Required result:
+
+   UDP001-G8R2B-SELFTEST-PASS-8
+
+4. Run it against the existing G8R2 diagnostic CSV. Use one line so the same
+   command works in the VS Code terminal without shell-specific continuation:
+
+   python u001_g8r2b_exact_finding_extractor_v0_1.py --report "<PATH>\\u001_g8r2_diagnostic_report.csv" --out "<NEW_EMPTY_OUTPUT_FOLDER>"
+
+   Replace the two placeholders with actual company-computer paths. Do not use
+   a Raw CAN, DBC, or package folder as input. This extractor reads only the
+   G8R2 diagnostic report.
+
+5. Return only the complete contents of:
+
+   udp001_g8r2b_exact_capsule.txt
+
+The program is read-only toward its input. It creates exactly one small TXT
+output and contains no pandas or third-party dependency.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
+from typing import Dict, Iterable, List, Sequence, Tuple
+
+
+PROGRAM_VERSION = "0.1"
+PASS_LINE = "UDP001-G8R2B-SELFTEST-PASS-8"
+
+REQUIRED_UPDATE_COLUMNS: Tuple[str, ...] = (
+    "SourceRowIndex",
+    "SourceId",
+    "SourceType",
+    "ClockDomain",
+    "NativeTimestamp",
+    "NativeSequence",
+    "FrameCount",
+    "SyncKey",
+    "SyncQuality",
+    "FrameAssignmentStatus",
+    "FrameAssignmentAgeRows",
+    "CAN_ID",
+    "Channel",
+    "MessageName",
+    "CanonicalName",
+    "RawCode",
+    "PhysicalValue",
+    "ValueLabel",
+    "ValueKind",
+    "SignalRole",
+    "Valid",
+    "MissingReason",
+    "MessageCounter",
+    "SourceDateTime",
+    "SourceTimeUs",
+)
+
+
+def _norm(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _get(row: Dict[str, str], *names: str) -> str:
+    normalized = {_norm(key): (value or "").strip() for key, value in row.items()}
+    for name in names:
+        if _norm(name) in normalized:
+            return normalized[_norm(name)]
+    return ""
+
+
+def _is_failure(row: Dict[str, str]) -> bool:
+    result = _norm(_get(row, "Result"))
+    notes = _norm(_get(row, "Notes"))
+    difference = _norm(_get(row, "DifferenceClass"))
+    return (
+        result in {
+            "fail",
+            "failed",
+            "failure",
+            "missing",
+            "missingrequired",
+            "error",
+            "invalid",
+            "different",
+            "mismatch",
+            "0",
+        }
+        or "missing" in result
+        or "missingrequired" in notes
+        or difference == "other"
+    )
+
+
+def _safe_token(value: str, limit: int = 140) -> str:
+    value = os.path.basename(value.strip()) if ("/" in value or "\\" in value) else value.strip()
+    value = re.sub(r"\s+", "_", value)
+    value = re.sub(r"[^A-Za-z0-9_.#:\-\[\]]+", "", value)
+    return value[:limit] or "UNSPECIFIED"
+
+
+def _file_basename(value: str) -> str:
+    return os.path.basename(value.replace("\\", "/").strip()) or "UNKNOWN_FILE"
+
+
+def _dedupe_sorted(values: Iterable[str]) -> List[str]:
+    return sorted(set(value for value in values if value), key=lambda item: item.lower())
+
+
+def inspect_rows(rows: Sequence[Dict[str, str]]) -> Tuple[List[str], List[str]]:
+    missing_update: List[str] = []
+    other_json: List[str] = []
+    required_lookup = {_norm(name): name for name in REQUIRED_UPDATE_COLUMNS}
+
+    for row in rows:
+        scope = _norm(_get(row, "Scope"))
+        file_name = _get(row, "File")
+        item = _get(row, "JsonPathOrColumn")
+        difference = _norm(_get(row, "DifferenceClass"))
+        required = _norm(_get(row, "ContractRequired"))
+
+        item_norm = _norm(item)
+        looks_like_update = (
+            "update" in scope
+            or _file_basename(file_name).lower() == "u001_decoded_updates.csv"
+        )
+        explicitly_required = required in {"1", "true", "yes", "required", "y"}
+
+        if (
+            looks_like_update
+            and item_norm in required_lookup
+            and _is_failure(row)
+            and (explicitly_required or "header" in scope or "structure" in scope)
+        ):
+            missing_update.append(required_lookup[item_norm])
+
+        if difference == "other" and _is_failure(row):
+            other_json.append(
+                f"{_safe_token(_file_basename(file_name), 80)}#{_safe_token(item, 140)}"
+            )
+
+    return _dedupe_sorted(missing_update), _dedupe_sorted(other_json)
+
+
+def read_report(path: Path) -> List[Dict[str, str]]:
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames:
+            raise ValueError("diagnostic report has no CSV header")
+        required = {"scope", "file", "jsonpathorcolumn", "differenceclass", "result"}
+        actual = {_norm(name) for name in reader.fieldnames}
+        if not required.issubset(actual):
+            missing = sorted(required - actual)
+            raise ValueError("diagnostic report missing columns: " + ",".join(missing))
+        return list(reader)
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def write_capsule(out_dir: Path, missing: Sequence[str], other: Sequence[str]) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=False)
+    capsule_path = out_dir / "udp001_g8r2b_exact_capsule.txt"
+
+    missing_token = ",".join(missing) if missing else "NONE"
+    other_token = ";".join(other) if other else "NONE"
+    error_count = int(len(missing) != 3) + int(len(other) != 1)
+
+    text = (
+        "UDP001G8R2B1\n"
+        f"UH-{missing_token}\n"
+        f"QO-{other_token}\n"
+        f"N-UH{len(missing)}-QO{len(other)}\n"
+        f"C-{error_count}\n"
+    )
+    with capsule_path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
+    return capsule_path
+
+
+def execute(report_path: Path, out_dir: Path) -> Path:
+    before = sha256(report_path)
+    rows = read_report(report_path)
+    missing, other = inspect_rows(rows)
+    capsule = write_capsule(out_dir, missing, other)
+    after = sha256(report_path)
+    if before != after:
+        raise RuntimeError("input diagnostic report changed during execution")
+    return capsule
+
+
+def _sample_row(
+    scope: str,
+    file_name: str,
+    item: str,
+    difference: str,
+    required: str,
+    result: str,
+) -> Dict[str, str]:
+    return {
+        "AuditId": "A",
+        "Scope": scope,
+        "File": file_name,
+        "JsonPathOrColumn": item,
+        "ReferenceValueClass": "",
+        "CandidateValueClass": "",
+        "DifferenceClass": difference,
+        "ContractRequired": required,
+        "Result": result,
+        "Notes": "",
+    }
+
+
+def run_self_tests() -> None:
+    # T1: normalization tolerates punctuation.
+    assert _norm("JsonPath-Or_Column") == "jsonpathorcolumn"
+
+    rows = [
+        _sample_row(
+            "Reference Update Header",
+            "u001_decoded_updates.csv",
+            "ClockDomain",
+            "STRUCTURE",
+            "true",
+            "MISSING_REQUIRED",
+        ),
+        _sample_row(
+            "Candidate Update Header",
+            "u001_decoded_updates.csv",
+            "NativeTimestamp",
+            "STRUCTURE",
+            "true",
+            "FAIL",
+        ),
+        _sample_row(
+            "Candidate Update Header",
+            "u001_decoded_updates.csv",
+            "MessageCounter",
+            "STRUCTURE",
+            "true",
+            "FAIL",
+        ),
+        _sample_row(
+            "Intermediate Quality JSON",
+            r"C:\candidate\u001_g4_semantic_validity_quality.json",
+            "metrics.output_hash",
+            "OTHER",
+            "false",
+            "DIFFERENT",
+        ),
+    ]
+
+    # T2/T3/T4: reference/candidate missing detection and OTHER extraction.
+    missing, other = inspect_rows(rows)
+    assert missing == ["ClockDomain", "MessageCounter", "NativeTimestamp"]
+    assert other == ["u001_g4_semantic_validity_quality.json#metrics.output_hash"]
+
+    # T5: company directory is removed from returned file token.
+    assert "candidate" not in other[0].lower()
+
+    # T6: duplicate findings are deterministic and deduplicated.
+    missing2, other2 = inspect_rows(rows + rows)
+    assert missing2 == missing and other2 == other
+
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        report = root / "u001_g8r2_diagnostic_report.csv"
+        with report.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+
+        # T7: report parser and exact one-file output.
+        output = root / "out"
+        capsule = execute(report, output)
+        assert capsule.name == "udp001_g8r2b_exact_capsule.txt"
+        assert [p.name for p in output.iterdir()] == [capsule.name]
+
+        # T8: input hash remains unchanged and capsule is compact.
+        before = sha256(report)
+        text = capsule.read_text(encoding="utf-8")
+        after = sha256(report)
+        assert before == after
+        assert "UH-ClockDomain,MessageCounter,NativeTimestamp" in text
+        assert "C-0" in text
+
+    print(PASS_LINE)
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Extract exact G8R2 correction findings.")
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--report", type=Path)
+    parser.add_argument("--out", type=Path)
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv or sys.argv[1:])
+    if args.self_test:
+        run_self_tests()
+        return 0
+    if args.report is None or args.out is None:
+        print("ERROR: --report and --out are required unless --self-test is used.", file=sys.stderr)
+        return 2
+    if not args.report.is_file():
+        print("ERROR: --report must name an existing diagnostic CSV.", file=sys.stderr)
+        return 2
+    if args.out.exists():
+        print("ERROR: --out must be a new non-existing folder.", file=sys.stderr)
+        return 2
+    try:
+        capsule = execute(args.report, args.out)
+    except Exception as exc:  # one concise company-side failure message
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    print(str(capsule))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
