@@ -1,0 +1,174 @@
+UDP001 — EXECUTION GATE 6
+SIGNAL CADENCE PROFILE AND BOUNDED HOLD
+Date: 2026-07-24
+
+======================================================================
+1. GATE PURPOSE
+======================================================================
+
+Gate 5 is accepted.
+
+Gate 6 replaces the legacy unlimited forward-fill concept with a measured,
+signal-specific bounded-hold policy.
+
+Gate 6 has two controlled phases:
+
+Phase P — profile actual update cadence without changing data;
+Phase R — after ChatGPT approves each signal policy, apply bounded hold.
+
+Do not guess MaxAgeFrames before returning the Phase P capsule.
+
+No GUI.
+No universal forward fill.
+No zero fill.
+No interpolation.
+No EVENT_FLAG hold.
+No camera-target fusion.
+No discrepancy/baseline/residual/event analysis.
+
+======================================================================
+2. FILES TO GIVE COMPANY COPILOT IN A NEW CHAT
+======================================================================
+
+Required code:
+
+1. u001_foundation_core_v0_1.py
+2. u001_selected_update_decoder_v0_1.py
+3. u001_framecount_assignment_v0_1.py
+4. u001_semantic_validity_classifier_v0_1.py
+5. u001_framecount_view_builder_v0_1.py
+
+Control documents downloaded from GitHub:
+
+6. UDP001_00_UNIFIED_DATA_CONTRACT_v0_1_2026-07-24.txt
+7. UDP001_G6_01_START_HERE_2026-07-24.txt
+8. UDP001_G6_02_CADENCE_BOUNDED_HOLD_SPEC_v0_1_2026-07-24.txt
+9. UDP001_G6_03_ACCEPTANCE_PROTOCOL_v0_1_2026-07-24.txt
+
+Do not attach company data or previous large chat history.
+
+======================================================================
+3. EXACT MESSAGE TO COMPANY COPILOT
+======================================================================
+
+请完整读取附带的9个文件。
+
+Gate 5已经正式通过。严格执行
+UDP001_G6_02_CADENCE_BOUNDED_HOLD_SPEC_v0_1_2026-07-24.txt。
+
+本任务实现一个Python文件，包含两个严格分离的阶段：
+
+1. 只读统计每个Signal的真实FrameCount更新间隔；
+2. 只有在外部明确批准HoldPolicy和MaxAgeFrames后，才能应用
+   signal-specific bounded hold。
+
+不得设置通用默认MaxAgeFrames，不得unlimited forward fill、补0、
+interpolation、EVENT_FLAG hold、Camera融合或任何Analyzer功能。
+
+请创建一个可下载的纯文本代码文件：
+
+u001_signal_cadence_bounded_hold_v0_1.py.txt
+
+文件内容必须是完整Python源码。不要只粘贴在聊天中，不要拆成多个代码文件。
+
+生成后只回答：
+
+UDP001-G6-CODE-GENERATED
+
+如无法完整生成，回答：
+
+UDP001-G6-CODE-NOT-GENERATED
+
+并用一行说明原因。
+
+======================================================================
+4. PHASE P — COMPANY EXECUTION
+======================================================================
+
+4.1 Prepare the working file
+
+Create:
+
+u001_signal_cadence_bounded_hold_v0_1.py
+
+Place it with the Gate 1–Gate 5 modules.
+
+4.2 Self-test
+
+Run:
+
+python u001_signal_cadence_bounded_hold_v0_1.py --self-test
+
+Required:
+
+UDP001-G6-SELFTEST-PASS-16
+
+Stop if any test fails.
+
+4.3 Create the provisional hold-policy CSV
+
+Run on one line:
+
+python u001_signal_cadence_bounded_hold_v0_1.py --make-policy --frame-policy "PATH_TO_u001_g5_frame_policy.csv" --out "PATH_TO_u001_g6_hold_policy.csv"
+
+4.4 Confirm SignalIndex order
+
+Set/confirm:
+
+- S1 = Radar DistanceToObject
+- S2 = Radar RelativeSpeed
+- S3 = Radar PrecedingVehicleDetectionFlag
+- S4 = Camera 0x221 Distance
+- S5 = Camera 0x251 Distance
+
+For Phase P:
+
+- HoldPolicy = UNDECIDED
+- MaxAgeFrames = blank
+
+Do not approve any hold yet.
+
+4.5 Run cadence profile
+
+Run on one line:
+
+python u001_signal_cadence_bounded_hold_v0_1.py --profile --frames "PATH_TO_u001_g5_frame_values.csv" --policy "PATH_TO_u001_g6_hold_policy.csv" --out "UDP001_G6_PROFILE"
+
+Return only the complete content of:
+
+udp001_g6_profile_capsule.txt
+
+Stop after Phase P. Do not run --apply until ChatGPT returns the approved
+five-signal policy.
+
+======================================================================
+5. PHASE R — RESERVED
+======================================================================
+
+After Phase P review, ChatGPT will provide:
+
+- HoldPolicy for S1–S5;
+- MaxAgeFrames for each HOLD_LAST_BOUNDED signal;
+- exact apply command;
+- expected final capsule invariants.
+
+Do not infer these values from Copilot suggestions.
+
+======================================================================
+6. STOP CONDITIONS
+======================================================================
+
+Stop and return the failure capsule if:
+
+- self-test does not pass 16/16;
+- SignalIndex mapping is missing, duplicated, or reordered;
+- required Gate 5 columns are missing;
+- FrameCount is not strictly increasing and unique;
+- updated/update_count/valid/missing metadata is inconsistent;
+- profile changes the input;
+- --apply accepts UNDECIDED policy;
+- EVENT_FLAG can be held;
+- unlimited or negative MaxAgeFrames is accepted;
+- input/previous modules are modified.
+
+Do not ask Copilot to improvise a fix before returning the capsule.

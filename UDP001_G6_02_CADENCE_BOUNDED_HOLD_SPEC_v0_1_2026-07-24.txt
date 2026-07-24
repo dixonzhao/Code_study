@@ -1,0 +1,470 @@
+UDP001 — GATE 6 SIGNAL CADENCE AND BOUNDED HOLD SPECIFICATION v0.1
+Date: 2026-07-24
+Output: u001_signal_cadence_bounded_hold_v0_1.py.txt
+Input schema: Gate 5 explicit FrameCount View
+
+======================================================================
+0. SCOPE
+======================================================================
+
+Implement in one import-safe Python file:
+
+- read-only per-signal cadence profiling;
+- explicit per-signal HoldPolicy;
+- bounded hold application after external approval;
+- carried/stale provenance and safety metrics.
+
+Profiling and application are separate CLI modes. Profile mode must not
+change values or produce an analysis view.
+
+======================================================================
+1. DEPENDENCIES AND IMPORT SAFETY
+======================================================================
+
+Allowed:
+
+- Python standard library;
+- pandas;
+- numpy;
+- accepted Gate 1–Gate 5 modules when import-safe.
+
+Importing Gate 6 must not read/write data, open GUI, run a profile, or apply
+hold.
+
+======================================================================
+2. INPUTS
+======================================================================
+
+Frame data:
+
+u001_g5_frame_values.csv
+
+Policy source:
+
+u001_g5_frame_policy.csv
+
+Required leading frame columns:
+
+- FrameCount
+- SourceRowFirst
+- SourceRowLast
+- SourceUpdateCount
+
+For every included signal S:
+
+- S__value
+- S__label
+- S__updated
+- S__update_count
+- S__age
+- S__valid
+- S__missing_reason
+
+Input rules:
+
+- FrameCount is numeric, integer-valued, strictly increasing, and unique;
+- no synthetic FrameCount row exists;
+- S__updated is 0/1;
+- S__update_count is a nonnegative integer;
+- updated=0 requires update_count=0;
+- updated=1 requires update_count>=1;
+- input remains read-only.
+
+======================================================================
+3. HOLD POLICY
+======================================================================
+
+Mode:
+
+--make-policy --frame-policy PATH --out PATH
+
+Write:
+
+u001_g6_hold_policy.csv
+
+Required columns:
+
+- SignalIndex
+- CanonicalName
+- ValueKind
+- SignalRole
+- UpdateMode
+- HoldPolicy
+- MaxAgeFrames
+- Required
+- PolicyBasis
+- Notes
+
+Allowed HoldPolicy:
+
+- UNDECIDED
+- NONE
+- HOLD_LAST_BOUNDED
+
+Rules:
+
+- included Gate 5 signals only;
+- SignalIndex is unique and uses S1, S2, ... in policy-row order;
+- profile mode permits UNDECIDED;
+- apply mode rejects every UNDECIDED row;
+- NONE requires blank MaxAgeFrames;
+- HOLD_LAST_BOUNDED requires integer MaxAgeFrames >= 0;
+- no unbounded, infinite, blank, or negative hold limit;
+- EVENT_FLAG must use NONE;
+- FRAME_KEY is not present as a held signal;
+- MEASUREMENT, STATE, VALIDITY_FLAG, COUNTER, and IDENTIFIER require explicit
+  project approval before HOLD_LAST_BOUNDED;
+- PolicyBasis is required for HOLD_LAST_BOUNDED.
+
+The program must not auto-approve a policy from statistics.
+
+======================================================================
+4. PHASE P — CADENCE PROFILE
+======================================================================
+
+Mode:
+
+--profile --frames PATH --policy PATH --out FOLDER
+
+Write exactly:
+
+1. u001_g6_cadence_profile.csv
+2. u001_g6_cadence_quality.json
+3. udp001_g6_profile_capsule.txt
+
+For each SignalIndex, compute over real Gate 5 rows:
+
+- total_frame_count;
+- updated_frame_count;
+- no_update_frame_count;
+- valid_current_update_frame_count;
+- invalid_current_update_frame_count;
+- update_coverage_ratio;
+- inter_update_gap_q50;
+- inter_update_gap_q95;
+- inter_update_gap_q99;
+- inter_update_gap_max;
+- longest_consecutive_no_update_frames;
+- first_update_FrameCount;
+- last_update_FrameCount;
+- multi_update_frame_count.
+
+Inter-update gap:
+
+- difference between consecutive FrameCount values where S__updated=1;
+- consecutive video frames have gap=1;
+- do not subtract one in the stored gap metric.
+
+Longest consecutive no-update:
+
+- count of observed Frame View rows between update frames where updated=0;
+- include leading/trailing no-update runs;
+- do not synthesize missing FrameCount rows.
+
+Quantiles:
+
+- deterministic nearest-rank definition;
+- q50/q95/q99 use the ordered positive integer gap list;
+- blank when fewer than two update frames exist.
+
+Profile mode:
+
+- does not inspect or infer business invalid defaults;
+- does not modify any value;
+- does not carry any value;
+- may run with HoldPolicy=UNDECIDED.
+
+Profile capsule:
+
+UDP001G6P1
+B1-abcd
+B2-abcd
+B3-abcd
+B4-abcd
+N-Rr-Kk-Gg-Ll-Xx
+S1-Uu-Nn-Vv-Ii-Qq-Pp-Mm-Cc
+...
+C-n
+
+Per-signal fields:
+
+- U = updated frames
+- N = no-update frames
+- V = valid current-update frames
+- I = invalid current-update frames
+- Q = inter-update gap q95
+- P = inter-update gap q99
+- M = inter-update gap max
+- C = longest consecutive no-update frames
+
+Global:
+
+- R = input Frame View rows
+- K = profiled signals
+- G = missing FrameCount gap count
+- L = largest FrameCount gap
+- X = profile input-change/held/zero-fill error count
+
+======================================================================
+5. HOLD APPROVAL RULES
+======================================================================
+
+ChatGPT/project review selects each policy after Phase P.
+
+The decision must consider:
+
+- SignalRole and UpdateMode;
+- measured q95/q99/max gaps;
+- known nominal update behavior;
+- whether stale values could create false continuity;
+- whether a current invalid update should block carry;
+- downstream FRAME_DOMAIN analysis needs.
+
+Statistical frequency alone does not prove that holding is physically valid.
+
+======================================================================
+6. PHASE R — BOUNDED HOLD APPLICATION
+======================================================================
+
+Mode:
+
+--apply --frames PATH --policy PATH --out FOLDER [--chunksize N]
+
+Write exactly:
+
+1. u001_g6_frame_values.csv
+2. u001_g6_hold_quality.json
+3. udp001_g6_return_capsule.txt
+
+Preserve:
+
+- all leading frame columns;
+- all per-signal column names and order;
+- S__updated and S__update_count as current-frame provenance;
+- input file unchanged.
+
+NONE:
+
+- copy all S columns exactly from Gate 5.
+
+HOLD_LAST_BOUNDED:
+
+Current frame has a valid real update:
+
+- preserve current value/label;
+- updated/update_count remain current-frame values;
+- age=0;
+- valid=1;
+- preserve VALID_UPDATE/VALID_AGGREGATED reason;
+- record this frame as the last valid real update.
+
+Current frame has an invalid real update:
+
+- preserve the invalid current result;
+- do not carry an older value over it;
+- set a hold barrier;
+- future no-update frames remain invalid until a new valid real update.
+
+Current frame has no update and an unblocked prior valid real update:
+
+- age = current FrameCount - last valid real-update FrameCount;
+- if age <= MaxAgeFrames:
+  carry value/label;
+  updated=0;
+  update_count=0;
+  valid=1;
+  missing_reason=VALID_CARRIED;
+- if age > MaxAgeFrames:
+  value/label blank;
+  updated=0;
+  update_count=0;
+  valid=0;
+  missing_reason=STALE;
+  retain numeric age for audit.
+
+Current frame has no usable prior update:
+
+- value/label blank;
+- updated=0;
+- update_count=0;
+- age blank;
+- valid=0;
+- missing_reason=NO_UPDATE or the controlled barrier state.
+
+Never carry EVENT_FLAG.
+Never convert blank/stale/invalid to zero.
+Never use a carried value as a new real-update origin.
+
+======================================================================
+7. CHUNK STATE
+======================================================================
+
+For --apply, retain per signal across chunks:
+
+- last valid real value and label;
+- last valid real FrameCount;
+- invalid-update hold-barrier state.
+
+Different chunksizes must produce identical frame CSV content.
+Do not parallelize the stateful hold engine.
+
+======================================================================
+8. QUALITY OUTPUT
+======================================================================
+
+Quality JSON required global fields:
+
+- program_version;
+- contract_version;
+- policy hash;
+- input path hash, not full path;
+- input_frame_count;
+- output_frame_count;
+- signal_count;
+- chunksize;
+- input_value_change_count;
+- current_update_provenance_change_count;
+- zero_fill_count;
+- unbounded_hold_count;
+- elapsed_seconds;
+- warnings;
+- errors.
+
+Per signal:
+
+- HoldPolicy;
+- MaxAgeFrames;
+- real_valid_update_frame_count;
+- real_invalid_update_frame_count;
+- carried_frame_count;
+- stale_frame_count;
+- no_prior_update_frame_count;
+- hold_barrier_frame_count;
+- age_q95;
+- age_max;
+- value_changed_on_real_update_count.
+
+Do not store company absolute paths or raw examples.
+
+======================================================================
+9. SELF-TESTS
+======================================================================
+
+Implement exactly 16 deterministic synthetic tests:
+
+T01 policy vocabulary, SignalIndex uniqueness, and role compatibility;
+T02 profile permits UNDECIDED but apply rejects it;
+T03 NONE requires blank MaxAgeFrames and preserves input exactly;
+T04 HOLD_LAST_BOUNDED rejects blank, negative, or unbounded limits;
+T05 EVENT_FLAG hold is rejected;
+T06 cadence updated/no-update/valid/invalid counts are exact;
+T07 nearest-rank q50/q95/q99 and max gaps are exact;
+T08 leading/interior/trailing no-update runs are exact;
+T09 valid current update has age zero and becomes real hold origin;
+T10 no-update inside bound becomes VALID_CARRIED without changing provenance;
+T11 no-update beyond bound becomes STALE and blank, never zero;
+T12 no prior valid update remains NO_UPDATE;
+T13 invalid current update blocks old-value carry until a new valid update;
+T14 carried value never becomes a new real-update origin;
+T15 missing FrameCount gaps use FrameCount difference for age and are not
+    synthesized;
+T16 at least three chunks and two chunksizes produce deterministic output
+    with no input/current-update mutation or zero fill.
+
+When all pass, print exactly:
+
+UDP001-G6-SELFTEST-PASS-16
+
+On failure, print test ID and one-line reason, exit nonzero, and do not print
+PASS.
+
+======================================================================
+10. CLI
+======================================================================
+
+Self-test:
+
+python u001_signal_cadence_bounded_hold_v0_1.py --self-test
+
+Policy:
+
+python u001_signal_cadence_bounded_hold_v0_1.py --make-policy
+  --frame-policy PATH
+  --out PATH
+
+Profile:
+
+python u001_signal_cadence_bounded_hold_v0_1.py --profile
+  --frames PATH
+  --policy PATH
+  --out FOLDER
+
+Apply:
+
+python u001_signal_cadence_bounded_hold_v0_1.py --apply
+  --frames PATH
+  --policy PATH
+  --out FOLDER
+  [--chunksize 100000]
+
+======================================================================
+11. REAL PROFILE MAPPING
+======================================================================
+
+The real smoke SignalIndex order must be:
+
+- S1 Radar DistanceToObject
+- S2 Radar RelativeSpeed
+- S3 Radar PrecedingVehicleDetectionFlag
+- S4 Camera 0x221 Distance
+- S5 Camera 0x251 Distance
+
+Profile expectations:
+
+- frame rows = 20,617;
+- signals = 5;
+- missing FrameCount gaps = 0;
+- largest FrameCount gap = 0;
+- profile X = 0.
+
+Do not hard-code these values into the implementation.
+
+======================================================================
+12. PROHIBITIONS
+======================================================================
+
+Do not:
+
+- modify Gate 1–Gate 5 modules or outputs;
+- auto-approve MaxAgeFrames;
+- use one global hold length;
+- unlimited forward fill;
+- carry EVENT_FLAG;
+- carry across an explicit invalid current update;
+- make a carried value a real update origin;
+- fill blank/stale/invalid with zero;
+- synthesize FrameCount rows;
+- interpolate, smooth, mean, or median;
+- fuse camera targets;
+- compute discrepancy/baseline/residual/events;
+- create GUI;
+- create more than the requested Python file.
+
+======================================================================
+13. ACCEPTANCE
+======================================================================
+
+Gate 6 final acceptance requires:
+
+- 16 self-tests pass;
+- Phase P profile passes and is reviewed;
+- all five HoldPolicy rows are explicitly approved;
+- --apply rejects UNDECIDED;
+- NONE and HOLD_LAST_BOUNDED semantics pass;
+- hold age is bounded in FrameCount units;
+- current-update provenance is unchanged;
+- invalid updates block old-value carry;
+- no zero fill, unbounded hold, input mutation, or synthetic frame occurs;
+- chunked apply is deterministic;
+- exactly three final outputs are created;
+- final capsule is C-0.
