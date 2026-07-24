@@ -1,0 +1,216 @@
+UDP001 — EXECUTION GATE 4
+SIGNAL SEMANTICS AND INTRINSIC VALIDITY
+Date: 2026-07-24
+
+======================================================================
+1. GATE PURPOSE
+======================================================================
+
+Gate 3 is accepted.
+
+Gate 4 creates:
+
+1. one explicit signal semantic/policy CSV;
+2. one pure-logic classifier that appends type and intrinsic-validity metadata
+   to the Gate 3 Update Stream.
+
+The first real smoke run intentionally uses:
+
+ValidityRule = NONE
+
+for all six selected signals.
+
+This verifies the framework without inventing business invalid-value rules.
+
+No GUI.
+No measurement mutation.
+No global zero rejection.
+No 327.66 or 273.15 rule.
+No cross-signal validity logic.
+No frame aggregation.
+No wide table.
+No hold.
+No camera target fusion.
+No analysis.
+
+======================================================================
+2. FILES TO GIVE COMPANY COPILOT IN A NEW CHAT
+======================================================================
+
+Required code:
+
+1. u001_foundation_core_v0_1.py
+2. u001_selected_update_decoder_v0_1.py
+3. u001_framecount_assignment_v0_1.py
+
+Control documents downloaded from GitHub:
+
+4. UDP001_G4_00_START_HERE_2026-07-24.txt
+5. UDP001_G4_01_UNIFIED_DATA_CONTRACT_v0_1_2026-07-24.txt
+6. UDP001_G4_02_SIGNAL_SEMANTICS_VALIDITY_SPEC_v0_1_2026-07-24.txt
+7. UDP001_G4_03_ACCEPTANCE_PROTOCOL_v0_1_2026-07-24.txt
+
+Do not attach company data or previous large chat history.
+
+======================================================================
+3. EXACT MESSAGE TO COMPANY COPILOT
+======================================================================
+
+请完整读取附带的7个文件。
+
+Gate 3已经正式通过。严格执行
+UDP001_G4_02_SIGNAL_SEMANTICS_VALIDITY_SPEC_v0_1_2026-07-24.txt。
+
+本任务只实现Signal semantic policy和intrinsic validity classifier。
+不得修改Gate 1至Gate 3程序，不得覆盖RawCode或PhysicalValue。
+
+真实Smoke Test中全部六个Signal使用ValidityRule=NONE。
+不得自行加入327.66、273.15、0、DetectionFlag或其他业务无效规则。
+
+不得生成GUI、cross-signal validity、frame aggregation、wide table、hold、
+camera fusion或分析功能。
+
+请创建一个可下载的纯文本代码文件：
+
+u001_semantic_validity_classifier_v0_1.py.txt
+
+文件内容必须是完整Python源码。不要只粘贴在聊天中，不要拆成多个代码文件。
+
+生成后只回答：
+
+UDP001-G4-CODE-GENERATED
+
+如无法完整生成，回答：
+
+UDP001-G4-CODE-NOT-GENERATED
+
+并用一行说明原因。
+
+======================================================================
+4. COMPANY-SIDE EXECUTION
+======================================================================
+
+4.1 Prepare the working file
+
+Keep the downloaded transfer copy and create:
+
+u001_semantic_validity_classifier_v0_1.py
+
+Place it in the same folder as the Gate 1–Gate 3 Python modules.
+
+4.2 Self-test
+
+Run:
+
+python u001_semantic_validity_classifier_v0_1.py --self-test
+
+Required:
+
+UDP001-G4-SELFTEST-PASS-16
+
+Stop if any test fails.
+
+4.3 Create the semantic policy template
+
+Run on one line:
+
+python u001_semantic_validity_classifier_v0_1.py --make-policy --selection "PATH_TO_u001_g2_selected_signals.csv" --out "PATH_TO_u001_g4_signal_policy.csv"
+
+4.4 Edit the six policy rows
+
+Use the exact CanonicalName already present in the CSV.
+
+Configure the intended rows:
+
+CH2 / 0x620 / FrameCount
+- ValueKind = INTEGER
+- SignalRole = FRAME_KEY
+- UpdateMode = PERIODIC
+- StorageDtype = Int64
+- ValidityRule = NONE
+- Required = 1
+
+CH1 / 0x380 / DistanceToObject
+- ValueKind = FLOAT
+- SignalRole = MEASUREMENT
+- UpdateMode = UNKNOWN
+- StorageDtype = Float64
+- ValidityRule = NONE
+- Required = 1
+
+CH1 / 0x380 / RelativeSpeed
+- ValueKind = FLOAT
+- SignalRole = MEASUREMENT
+- UpdateMode = UNKNOWN
+- StorageDtype = Float64
+- ValidityRule = NONE
+- Required = 1
+
+CH1 / 0x380 / PrecedingVehicleDetectionFlag
+- ValueKind = BOOLEAN
+- SignalRole = VALIDITY_FLAG
+- UpdateMode = UNKNOWN
+- StorageDtype = boolean
+- ValidityRule = NONE
+- Required = 1
+
+CH2 / 0x221 / Distance
+- ValueKind = FLOAT
+- SignalRole = MEASUREMENT
+- UpdateMode = UNKNOWN
+- StorageDtype = Float64
+- ValidityRule = NONE
+- Required = 1
+
+CH2 / 0x251 / Distance
+- ValueKind = FLOAT
+- SignalRole = MEASUREMENT
+- UpdateMode = UNKNOWN
+- StorageDtype = Float64
+- ValidityRule = NONE
+- Required = 1
+
+Do not set:
+
+- InvalidExactValues;
+- UserMinimum;
+- UserMaximum;
+- ValiditySourceSignal;
+- ValidityExpression.
+
+Save as UTF-8 CSV, not XLSX.
+
+4.5 Apply semantics and intrinsic validity
+
+Run on one line:
+
+python u001_semantic_validity_classifier_v0_1.py --classify --updates "PATH_TO_u001_g3_frame_assigned_updates.csv" --policy "PATH_TO_u001_g4_signal_policy.csv" --out "OUTPUT_FOLDER" --chunksize 100000
+
+======================================================================
+5. EXPECTED OUTPUT
+======================================================================
+
+- u001_g4_semantic_validity_updates.csv
+- u001_g4_semantic_validity_quality.json
+- udp001_g4_return_capsule.txt
+
+Return only the complete content of:
+
+udp001_g4_return_capsule.txt
+
+======================================================================
+6. STOP CONDITIONS
+======================================================================
+
+Stop and return the failure capsule if:
+
+- self-test does not pass 16/16;
+- any input CanonicalName lacks exactly one policy row;
+- an unapproved validity rule is present;
+- zero or boolean false is globally rejected;
+- RawCode, PhysicalValue, existing metadata, row count, or order changes;
+- numeric/integer/boolean type consistency fails;
+- chunk-boundary output differs;
+- input or earlier modules are modified.
+
+Do not ask Copilot to improvise a fix before returning the capsule.
