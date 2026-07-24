@@ -1,0 +1,179 @@
+UDP001 — EXECUTION GATE 2
+SELECTED-SIGNAL UPDATE STREAM
+Date: 2026-07-24
+
+======================================================================
+1. GATE PURPOSE
+======================================================================
+
+Gate 1 is accepted.
+
+Gate 2 creates one pure-logic decoder that reads only explicitly selected CAN
+messages/signals and writes a long-form source-order Update Stream.
+
+This gate does not create the final U001 application.
+
+No GUI.
+No DateTime/Time[us] sorting.
+No forward fill.
+No blank-to-zero fill.
+No FrameCount propagation.
+No frame aggregation.
+No hold.
+No validity/business classification.
+No analysis.
+No P004.
+
+======================================================================
+2. FILES TO GIVE COMPANY COPILOT IN A NEW CHAT
+======================================================================
+
+Required code/reference:
+
+1. u001_foundation_core_v0_1.py
+2. matlab_can_time_order_decoder_gui.py
+3. UDP001_legacy_reuse_assessment_v0_1.txt
+
+Control documents downloaded from GitHub:
+
+4. UDP001_G2_00_START_HERE_2026-07-24.txt
+5. UDP001_G2_01_UNIFIED_DATA_CONTRACT_v0_1_2026-07-24.txt
+6. UDP001_G2_02_SELECTED_UPDATE_DECODER_SPEC_v0_1_2026-07-24.txt
+7. UDP001_G2_03_ACCEPTANCE_PROTOCOL_v0_1_2026-07-24.txt
+
+Do not attach:
+
+- company Raw CSV;
+- DBC files;
+- P001;
+- P003;
+- P004;
+- previous large chat history.
+
+======================================================================
+3. EXACT MESSAGE TO COMPANY COPILOT
+======================================================================
+
+请完整读取附带的7个文件。
+
+Gate 1已经正式通过。严格执行
+UDP001_G2_02_SELECTED_UPDATE_DECODER_SPEC_v0_1_2026-07-24.txt。
+
+本任务只实现“选定Signal的长格式Raw Update Stream”。必须调用
+u001_foundation_core_v0_1.py中的已批准基础逻辑，只能参考P002中已验证的
+DBC解码数学，不得继承P002的排序、无限forward fill或wide output流程。
+
+不得修改u001_foundation_core_v0_1.py或P002。
+不得生成GUI、FrameCount assignment、aggregation、hold、zero fill、分析功能。
+
+请创建一个可下载的纯文本代码文件：
+
+u001_selected_update_decoder_v0_1.py.txt
+
+文件内容必须是完整Python源码。不要只粘贴在聊天中，不要拆成多个代码文件。
+
+生成后只回答：
+
+UDP001-G2-CODE-GENERATED
+
+如无法完整生成，回答：
+
+UDP001-G2-CODE-NOT-GENERATED
+
+并用一行说明原因。
+
+======================================================================
+4. COMPANY-SIDE EXECUTION
+======================================================================
+
+4.1 Prepare the working file
+
+Keep the downloaded transfer copy and create:
+
+u001_selected_update_decoder_v0_1.py
+
+Place it in the same folder as:
+
+u001_foundation_core_v0_1.py
+
+4.2 Self-test
+
+Run:
+
+python u001_selected_update_decoder_v0_1.py --self-test
+
+Required:
+
+UDP001-G2-SELFTEST-PASS-12
+
+Stop if any test fails.
+
+4.3 Create a selection template
+
+Run on one line:
+
+python u001_selected_update_decoder_v0_1.py --make-selection --catalog "PATH_TO_udp001_g1_signal_catalog.csv" --out "PATH_TO_u001_g2_selected_signals.csv"
+
+Open `u001_g2_selected_signals.csv`.
+
+Set `Selected` to 1 only for the smoke-test signals below when the exact
+Channel/CAN ID/Signal Name exists in the Gate 1 catalog:
+
+- CH2 / 0x620 / FrameCount;
+- CH1 / 0x380 / DistanceToObject;
+- CH1 / 0x380 / RelativeSpeed;
+- CH1 / 0x380 / PrecedingVehicleDetectionFlag;
+- CH2 / 0x221 / Distance;
+- CH2 / 0x251 / Distance.
+
+Do not guess a missing Signal Name. If a name differs, select the catalog row
+that the DBC explicitly maps to the intended signal and add one short Memo
+later.
+
+CanonicalName must remain unique. The generated default should include Channel,
+CAN ID, and Signal Name.
+
+4.4 Decode smoke interval
+
+Run on one line:
+
+python u001_selected_update_decoder_v0_1.py --decode --source "RAW_MATLAB_CAN_CSV_PATH" --dbc-ch1 "CH1_DBC_PATH" --dbc-ch2 "CH2_DBC_PATH" --selection "PATH_TO_u001_g2_selected_signals.csv" --out "OUTPUT_FOLDER" --chunksize 50000 --max-source-rows 100000
+
+This intentionally reads only the first 100,000 source data rows.
+
+Do not use a P002 decoded file.
+
+======================================================================
+5. RETURN
+======================================================================
+
+Expected output folder:
+
+- u001_g2_raw_decoded_updates.csv
+- u001_g2_decode_quality.json
+- udp001_g2_return_capsule.txt
+
+Return to ChatGPT only:
+
+the full content of `udp001_g2_return_capsule.txt`.
+
+Do not transcribe the decoded CSV, signal names, paths, or JSON.
+
+======================================================================
+6. STOP CONDITIONS
+======================================================================
+
+Stop and return the failure capsule if:
+
+- self-test does not pass 12/12;
+- foundation import fails;
+- selected required signal cannot resolve;
+- source row order decreases;
+- zero is treated as missing;
+- any forward fill/zero fill/sort occurs;
+- output contains values for unselected signals;
+- source input is modified;
+- the 100,000-row stop limit is ignored;
+- any output falsely reports PASS after an exception.
+
+Do not ask Copilot to improvise a fix before returning the capsule.
