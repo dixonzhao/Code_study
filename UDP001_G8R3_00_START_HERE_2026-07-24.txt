@@ -1,0 +1,272 @@
+UDP001 — GATE 8R3 CORRECTION AND REPLAY VALIDATION
+START HERE
+Date: 2026-07-24
+
+======================================================================
+1. PURPOSE
+======================================================================
+
+G8R3 corrects three narrowly confirmed defects without changing the accepted
+decode, FrameCount assignment, validity, Frame View, or Hold algorithms.
+
+Confirmed by G8R2/G8R2B:
+
+1. Both final u001_decoded_updates.csv files miss exactly:
+
+   - ClockDomain
+   - MessageCounter
+   - NativeTimestamp
+
+2. The only unclassified intermediate-quality difference is:
+
+   u001_g3_frame_assignment_quality.json#.input_modified_time
+
+   This is replay runtime metadata, not a CAN-data semantic difference.
+
+3. The candidate final manifest contains:
+
+   IdentityStatus = CONTROLLED_REPLAY
+
+   while retaining a stale:
+
+   IdentityStatus-PROVISIONAL_SMOKE
+
+   warning.
+
+G8R3 must correct these defects. It must not weaken validation merely to obtain
+PASS.
+
+======================================================================
+2. FILES TO GIVE COMPANY COPILOT
+======================================================================
+
+Download all four G8R3 documents first:
+
+1. UDP001_G8R3_00_START_HERE_2026-07-24.txt
+2. UDP001_G8R3_01_G7_G8A_SCHEMA_IDENTITY_CORRECTION_SPEC_2026-07-24.txt
+3. UDP001_G8R3_02_G8B_VALIDATOR_CORRECTION_SPEC_2026-07-24.txt
+4. UDP001_G8R3_03_ACCEPTANCE_AND_RETURN_PROTOCOL_2026-07-24.txt
+
+Keep the existing company-side source files unchanged. Every corrected program
+receives a new v0_2 filename.
+
+======================================================================
+3. GENERATION PHASE — THREE SEPARATE COPILOT CHATS
+======================================================================
+
+Use separate Copilot chats to reduce crash/context risk.
+
+----------------------------------------------------------------------
+3.1 Chat A — Gate 7 v0.2
+----------------------------------------------------------------------
+
+Give Copilot:
+
+- the existing company file:
+  u001_output_package_assembler_v0_1.py
+
+- this document:
+  UDP001_G8R3_00_START_HERE_2026-07-24.txt
+
+- the correction specification:
+  UDP001_G8R3_01_G7_G8A_SCHEMA_IDENTITY_CORRECTION_SPEC_2026-07-24.txt
+
+Instruction:
+
+Modify the supplied v0.1 source according to the G7 section only. Preserve all
+unrelated accepted behavior. Return the complete corrected source as:
+
+u001_output_package_assembler_v0_2.py.txt
+
+Do not return a code fragment. Do not overwrite the v0.1 source. Do not create
+GUI, BAT, PowerShell, XLSX, configuration, or sample company data.
+
+----------------------------------------------------------------------
+3.2 Chat B — Gate 8A v0.2
+----------------------------------------------------------------------
+
+Give Copilot:
+
+- the existing company file:
+  u001_golden_replay_orchestrator_v0_1.py
+
+- this document;
+- the same G7/G8A correction specification.
+
+Instruction:
+
+Modify the supplied v0.1 source according to the G8A section only. Preserve all
+unrelated accepted behavior. Return the complete corrected source as:
+
+u001_golden_replay_orchestrator_v0_2.py.txt
+
+Do not return a code fragment. Do not overwrite the v0.1 source.
+
+----------------------------------------------------------------------
+3.3 Chat C — Gate 8B v0.2
+----------------------------------------------------------------------
+
+Give Copilot:
+
+- the existing company file:
+  u001_independent_replay_validator_v0_1.py
+
+- this document;
+- UDP001_G8R3_02_G8B_VALIDATOR_CORRECTION_SPEC_2026-07-24.txt
+- UDP001_G8R3_03_ACCEPTANCE_AND_RETURN_PROTOCOL_2026-07-24.txt
+
+Instruction:
+
+Modify the supplied v0.1 source according to the complete v0.2 validator
+specification. Return the complete corrected source as:
+
+u001_independent_replay_validator_v0_2.py.txt
+
+Do not return a code fragment. Do not overwrite the v0.1 source.
+
+======================================================================
+4. DOWNLOAD, RENAME, AND SELF-TEST
+======================================================================
+
+Download the three generated .py.txt files and rename only the suffix:
+
+u001_output_package_assembler_v0_2.py
+u001_golden_replay_orchestrator_v0_2.py
+u001_independent_replay_validator_v0_2.py
+
+Keep the three v0.1 files as immutable evidence.
+
+Run:
+
+python u001_output_package_assembler_v0_2.py --self-test
+
+Required:
+
+UDP001-G7R3-SELFTEST-PASS-20
+
+Run:
+
+python u001_golden_replay_orchestrator_v0_2.py --self-test
+
+Required:
+
+UDP001-G8AR3-SELFTEST-PASS-20
+
+Run:
+
+python u001_independent_replay_validator_v0_2.py --self-test
+
+Required:
+
+UDP001-G8BR3-SELFTEST-PASS-20
+
+Stop if any self-test does not pass exactly.
+
+======================================================================
+5. BUILD THE CORRECTED REFERENCE PACKAGE
+======================================================================
+
+Use the already accepted manual Gate 1–Gate 6 output root. Do not rerun Gate
+1–Gate 6 for the reference package.
+
+Create a new config:
+
+python u001_output_package_assembler_v0_2.py --make-config --root "<ACCEPTED_G1_TO_G6_ROOT>" --out "<NEW_CONFIG_FOLDER>\\u001_g7r3_reference_config.json"
+
+Using JSON parsing or a text editor, change only:
+
+DatasetId      = UDP001_REFERENCE_G8R3
+RunId          = UDP001_REFERENCE_G8R3_001
+SegmentId      = SEGMENT_001
+SourceId       = SOURCE_001
+IdentityStatus = PROVISIONAL_SMOKE
+
+Do not change discovered input paths, policies, review columns, or contract
+settings.
+
+Build into a new folder:
+
+python u001_output_package_assembler_v0_2.py --build --config "<NEW_CONFIG_FOLDER>\\u001_g7r3_reference_config.json" --out-root "<NEW_REFERENCE_BUILD_ROOT>"
+
+Required package:
+
+- exactly six files;
+- Gate 7R3 capsule C-0;
+- missing required Update columns = 0;
+- ClockDomain bad-value count = 0;
+- NativeTimestamp nonblank count = 0;
+- MessageCounter nonblank count = 0;
+- IdentityStatus/warning consistency = 1.
+
+======================================================================
+6. BUILD THE CORRECTED CONTROLLED-REPLAY CANDIDATE
+======================================================================
+
+Place the seven accepted modules plus the new Gate 7 v0.2 in one correction
+module root. The Gate 7 module must be:
+
+u001_output_package_assembler_v0_2.py
+
+Use Gate 8A v0.2:
+
+python u001_golden_replay_orchestrator_v0_2.py --make-config --module-root "<CORRECTION_MODULE_ROOT>" --accepted-control-root "<ACCEPTED_CONTROL_ROOT>" --source "<RAW_MATLAB_CAN_CSV>" --dbc-ch1 "<CH1_DBC>" --dbc-ch2 "<CH2_DBC>" --out "<NEW_G8AR3_CONFIG_FOLDER>"
+
+Open the generated config and confirm:
+
+SourceId       = SOURCE_001
+IdentityStatus = CONTROLLED_REPLAY
+Gate7Program   = u001_output_package_assembler_v0_2.py
+
+Do not change data-processing parameters.
+
+Run:
+
+python u001_golden_replay_orchestrator_v0_2.py --run --config "<NEW_G8AR3_CONFIG_FOLDER>\\u001_g8a_replay_config.json" --out-root "<NEW_G8AR3_RUN_ROOT>"
+
+Required:
+
+- all seven stage C codes = 0;
+- all protected-hash flags = 1;
+- final package contains exactly six files;
+- SourceId = SOURCE_001;
+- IdentityStatus = CONTROLLED_REPLAY;
+- no IdentityStatus-PROVISIONAL_SMOKE warning in the candidate package;
+- candidate identity status/warning consistency = 1.
+
+======================================================================
+7. RUN THE CORRECTED INDEPENDENT VALIDATOR
+======================================================================
+
+Run on one line:
+
+python u001_independent_replay_validator_v0_2.py --validate --reference "<CORRECTED_REFERENCE_PACKAGE>" --candidate "<CORRECTED_CANDIDATE_PACKAGE>" --reference-intermediate-root "<ACCEPTED_REFERENCE_G1_TO_G6_ROOT>" --candidate-intermediate-root "<NEW_G8AR3_RUN_ROOT>" --orchestration-manifest "<NEW_G8AR3_ORCHESTRATION_MANIFEST>" --out "<NEW_EMPTY_G8BR3_OUTPUT_FOLDER>" --chunksize 100000
+
+The validator is read-only. It must not modify either package or any
+intermediate output.
+
+======================================================================
+8. WHAT TO RETURN
+======================================================================
+
+Return only the complete contents of:
+
+udp001_g8r3_return_capsule.txt
+
+Do not manually summarize long logs unless the capsule has C other than zero.
+If C is nonzero, add at most three short MEMO lines.
+
+======================================================================
+9. STOP RULE
+======================================================================
+
+Do not:
+
+- overwrite v0.1 sources;
+- modify Gate 1–Gate 6 algorithms;
+- forward-fill or zero-fill data;
+- change SourceId between same-source replay runs;
+- convert NativeTimestamp from untrusted SourceDateTime/SourceTimeUs;
+- invent MessageCounter values;
+- ignore arbitrary JSON hashes or warnings;
+- edit a package after it has been built;
+- declare Gate 8B PASS before the v0.2 validator returns C-0.

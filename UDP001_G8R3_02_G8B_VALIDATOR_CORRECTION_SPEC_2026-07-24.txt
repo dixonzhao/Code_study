@@ -1,0 +1,387 @@
+UDP001 G8R3 — GATE 8B v0.2 INDEPENDENT VALIDATOR CORRECTION SPEC
+Input source:
+
+u001_independent_replay_validator_v0_1.py
+
+Output:
+
+u001_independent_replay_validator_v0_2.py.txt
+
+======================================================================
+1. PURPOSE
+======================================================================
+
+Gate 8B v0.2 independently validates corrected G7/G8A packages.
+
+It fixes:
+
+- implementation-only header expectations that caused symmetric false failure;
+- missing access to the six intermediate quality JSON pairs;
+- unsafe raw-manifest hash comparison of runtime-bearing quality evidence;
+- identity status/warning consistency handling.
+
+It must not change any package or intermediate file.
+
+======================================================================
+2. CLI
+======================================================================
+
+Required modes:
+
+--self-test
+--validate
+
+Self-test:
+
+python u001_independent_replay_validator_v0_2.py --self-test
+
+Required:
+
+UDP001-G8BR3-SELFTEST-PASS-20
+
+Validation:
+
+python u001_independent_replay_validator_v0_2.py --validate
+  --reference PATH
+  --candidate PATH
+  --reference-intermediate-root PATH
+  --candidate-intermediate-root PATH
+  --orchestration-manifest PATH
+  --out PATH
+  [--chunksize 100000]
+
+Reject existing nonempty output.
+
+Capture pre-validation size and SHA-256 for:
+
+- 12 final-package files;
+- 12 intermediate-quality JSON files;
+- orchestration manifest.
+
+Recheck after validation. Any mutation is blocking.
+
+======================================================================
+3. FINAL PACKAGE INVENTORY
+======================================================================
+
+Both final package folders must contain exactly:
+
+1. u001_decoded_updates.csv
+2. u001_frame_values.csv
+3. u001_signal_catalog.csv
+4. u001_quality_report.csv
+5. u001_run_manifest.json
+6. u001_review_view.csv
+
+Reject extra, missing, duplicate/case-colliding, symlink, or path-escaping
+entries.
+
+======================================================================
+4. FILE COMPARISON POLICY
+======================================================================
+
+D1 u001_decoded_updates.csv:
+
+- exact SHA-256 equality required;
+- exact row count required;
+- exact header order required;
+- all Data Contract Section 8.1 required columns present;
+- no duplicate columns;
+- ClockDomain always FRAMECOUNT_VIDEO;
+- blank NativeTimestamp allowed;
+- blank MessageCounter allowed;
+- SourceRowIndex monotonic and identical.
+
+Do not require implementation-only fields beyond the approved Data Contract.
+
+D2 u001_frame_values.csv:
+
+- exact equality required;
+- preserve existing structural checks.
+
+D3 u001_signal_catalog.csv:
+
+- semantic keyed equality required;
+- validate only Data Contract required/reserved columns and controlled values;
+- extra implementation columns are reported but not blocking unless duplicated
+  or semantically conflicting.
+
+D4 u001_quality_report.csv:
+
+- semantic keyed equality required by (Scope, CanonicalName, Metric);
+- validate Data Contract-required metrics;
+- zero is not equivalent to unavailable.
+
+D5 u001_run_manifest.json:
+
+- normalized equality required under Section 7;
+- unexpected differences block.
+
+D6 u001_review_view.csv:
+
+- exact equality required;
+- preserve Review-to-Frame checks.
+
+======================================================================
+5. INTERMEDIATE QUALITY JSON INVENTORY
+======================================================================
+
+Resolve exactly one reference/candidate pair of each:
+
+1. u001_g2_decode_quality.json
+2. u001_g3_frame_assignment_quality.json
+3. u001_g4_semantic_validity_quality.json
+4. u001_g5_frame_quality.json
+5. u001_g6_cadence_quality.json
+6. u001_g6_hold_quality.json
+
+Reject missing, ambiguous, unparsable, symlinked, or path-escaping files.
+
+For each pair:
+
+- record basename, size, SHA-256;
+- recursively flatten JSON leaves;
+- compare exact path sets;
+- classify every difference;
+- calculate a semantic normalized digest;
+- retain the raw hashes as evidence.
+
+======================================================================
+6. NARROW QUALITY-JSON NORMALIZATION
+======================================================================
+
+Raw JSON equality is not required because runtime evidence is intentionally
+recorded. Semantic equality is required.
+
+Allowed runtime-only differences:
+
+----------------------------------------------------------------------
+6.1 Duration
+----------------------------------------------------------------------
+
+Allow numeric differences only for an exact terminal key representing execution
+duration, including the current approved key:
+
+elapsed_seconds
+
+If another duration key is encountered, report and block until explicitly
+approved.
+
+----------------------------------------------------------------------
+6.2 G3 input modified time
+----------------------------------------------------------------------
+
+Allow exactly:
+
+u001_g3_frame_assignment_quality.json#.input_modified_time
+
+as runtime TIMESTAMP metadata.
+
+Do not allow a modified-time difference in another quality file without an
+explicit future decision.
+
+----------------------------------------------------------------------
+6.3 Path hashes
+----------------------------------------------------------------------
+
+A path-hash leaf may differ only when:
+
+- the leaf is explicitly a path hash, not a content hash;
+- neither JSON contains a company absolute path;
+- the associated basename is equal;
+- all relevant protected content hashes reported by Gate 8A are equal.
+
+Different basenames are blocking.
+
+----------------------------------------------------------------------
+6.4 Generated-artifact hashes
+----------------------------------------------------------------------
+
+Do not approve a field merely because its name contains "hash".
+
+A generated-artifact hash difference is allowed only when at least one of the
+following is independently proven:
+
+1. it hashes runtime-bearing quality JSON whose normalized semantic digest is
+   equal; or
+2. it references an intermediate data artifact whose actual reference and
+   candidate SHA-256 values are equal; or
+3. it is an input path hash accepted under Section 6.3.
+
+If the referenced artifact cannot be resolved, or its actual content hashes
+differ, block.
+
+----------------------------------------------------------------------
+6.5 Never normalized
+----------------------------------------------------------------------
+
+Never normalize:
+
+- row/count/FrameCount metrics;
+- policy values;
+- validity results;
+- signal names or roles;
+- SourceId;
+- configuration fingerprints;
+- basenames;
+- errors;
+- warnings with different engineering meaning;
+- any OTHER difference.
+
+After the exact approvals above, unapproved difference count must be zero.
+
+======================================================================
+7. RUN MANIFEST NORMALIZATION
+======================================================================
+
+Flatten and compare both manifests.
+
+Allowed run-identity/runtime differences:
+
+- DatasetId
+- RunId
+- SegmentId
+- program name/version when v0.2 provenance is internally valid
+- run timestamp
+- execution duration
+- unique output folder token
+- IdentityStatus and its matching warning representation under Section 8
+
+SourceId must be exactly equal:
+
+SOURCE_001
+
+Intermediate quality JSON raw hashes may differ only if the matching pair
+passes Section 6 semantic equality. The validator must build this approval from
+the actual paired files; it must not use a basename-only blanket whitelist.
+
+Configuration fingerprints must be equal after approved identity/runtime
+normalization. Unexpected manifest leaves block.
+
+======================================================================
+8. IDENTITY STATUS AND WARNING
+======================================================================
+
+Reference corrected package:
+
+- IdentityStatus = PROVISIONAL_SMOKE
+- exactly one IdentityStatus-PROVISIONAL_SMOKE warning
+- internal consistency = 1
+
+Candidate corrected package:
+
+- IdentityStatus = CONTROLLED_REPLAY
+- no IdentityStatus-* warning
+- internal consistency = 1
+
+The status difference is an approved run-purpose difference only after both
+packages pass internal consistency.
+
+A stale PROVISIONAL_SMOKE warning in a CONTROLLED_REPLAY package is blocking.
+
+The orchestration manifest is control evidence only and cannot override a final
+package failure.
+
+======================================================================
+9. OUTPUTS
+======================================================================
+
+Write exactly:
+
+1. u001_g8r3_validation_report.csv
+2. u001_g8r3_validation_summary.json
+3. u001_g8r3_quality_json_comparison.csv
+4. udp001_g8r3_return_capsule.txt
+
+No XLSX.
+
+Do not copy raw company values or absolute company paths to the outputs.
+
+======================================================================
+10. RETURN CAPSULE
+======================================================================
+
+Format:
+
+UDP001G8R3R1
+B1-abcd
+B2-abcd
+B3-abcd
+B4-abcd
+N-Rr-Cc-Ee-Ss-Mm-Qq-Ii-Uu-Ff-Xx
+D1-Ee D2-Ee D3-Ss D4-Ss D5-Mm D6-Ee
+Q-Rr-Ss-Oo
+I-Rr-Cc
+C-n
+
+Definitions:
+
+- R/C = final package file counts
+- E = exact-equality files among D1, D2, D6
+- S = semantic-equality files among D3, D4
+- M = normalized-manifest equality
+- Q = semantic-equal intermediate-quality JSON pairs
+- I = identity-consistent final packages
+- U = Update rows
+- F = Frame rows
+- X = blocking errors
+- Q-R = resolved quality JSON pairs
+- Q-S = semantic-equal quality JSON pairs
+- Q-O = unapproved quality JSON differences
+- I-R/I-C = reference/candidate identity consistency
+
+Current smoke PASS target:
+
+N-R6-C6-E3-S2-M1-Q6-I2-U599970-F20617-X0
+D1-E1 D2-E1 D3-S1 D4-S1 D5-M1 D6-E1
+Q-R6-S6-O0
+I-R1-C1
+C-0
+
+If C is nonzero, add at most:
+
+MEMO1-<first blocking CheckId>
+MEMO2-<first unapproved basename#leaf or NONE>
+MEMO3-<identity finding or NONE>
+
+======================================================================
+11. SELF-TESTS — EXACTLY 20
+======================================================================
+
+T01 package inventory and path safety.
+T02 streaming hash/row comparison.
+T03 Data Contract Update header validation.
+T04 ClockDomain fixed-value validation.
+T05 blank NativeTimestamp/MessageCounter accepted.
+T06 Frame View structural/exact comparison.
+T07 Catalog contract-driven structural validation.
+T08 Catalog semantic comparison.
+T09 Quality Report contract-driven structural validation.
+T10 Quality Report semantic comparison and unavailable handling.
+T11 recursive quality JSON flattening.
+T12 elapsed_seconds normalization only.
+T13 exact G3 input_modified_time normalization only.
+T14 path-hash basename and protected-hash condition.
+T15 generated-artifact hash resolution and actual-hash condition.
+T16 OTHER quality difference rejection.
+T17 manifest conditional quality-hash normalization.
+T18 reference/candidate identity consistency rules.
+T19 orchestration evidence cannot bypass failure.
+T20 pre/post immutability and deterministic four-output report.
+
+Required:
+
+UDP001-G8BR3-SELFTEST-PASS-20
+
+======================================================================
+12. SAFETY
+======================================================================
+
+- Read-only inputs.
+- No repair-in-place.
+- No arbitrary wildcard whitelist.
+- No normalization based only on a word such as hash/time/path.
+- No shell=True.
+- Sequential large-file comparison.
+- Reject nonempty output.
+- C-0 only when every blocking condition passes.
