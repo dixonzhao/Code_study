@@ -25,11 +25,15 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 
-PROGRAM_NAME = "u001_g8a_thin_orchestrator_v0_1.py"
-PROGRAM_VERSION = "0.1"
-CONFIG_SCHEMA = "UDP001_G8A_THIN_CONFIG_V0_1"
+PROGRAM_NAME = "u001_g8a_thin_orchestrator_v0_2.py"
+PROGRAM_VERSION = "0.2"
+CONFIG_SCHEMA = "UDP001_G8A_THIN_CONFIG_V0_2"
 CONTRACT_VERSION = "0.1"
 PROFILE = "CAN_CSV_FRAMECOUNT_BATCH_V0_1"
+SOURCE_FOLDER_NAME = "00_SOURCE-READONLY"
+SOURCE_CSV_NAME = "CANDump.csv"
+DBC_CH1_NAME = "DBC1.dbc"
+DBC_CH2_NAME = "DBC2.dbc"
 
 MODULES: tuple[tuple[str, str, str], ...] = (
     ("G1", "u001_foundation_core_v0_1.py", "UDP001-G1-SELFTEST-PASS-16"),
@@ -266,20 +270,18 @@ def load_config(path: Path) -> dict[str, Any]:
 def build_config(args: argparse.Namespace) -> dict[str, Any]:
     udp001_root = Path(args.udp001_root).resolve()
     case_root = Path(args.case_root).resolve()
-    source_root = case_root / "00_SOURCE_READONLY"
+    source_root = case_root / SOURCE_FOLDER_NAME
     if not source_root.is_dir():
         raise ControlError(f"source folder missing: {source_root}")
     modules, controls = discover_active_files(udp001_root)
-    source = Path(args.source).resolve() if args.source else discover_single_csv(source_root)
-    dbc1 = require_file(Path(args.dbc_ch1), "Channel 1 DBC")
-    dbc2 = require_file(Path(args.dbc_ch2), "Channel 2 DBC")
+    source = require_file(source_root / SOURCE_CSV_NAME, "fixed Raw CAN CSV alias")
+    dbc1 = require_file(source_root / DBC_CH1_NAME, "fixed Channel 1 DBC alias")
+    dbc2 = require_file(source_root / DBC_CH2_NAME, "fixed Channel 2 DBC alias")
     require_file(source, "Raw CAN CSV")
     if dbc1 == dbc2:
         raise ControlError("Channel 1 and Channel 2 DBC paths must differ")
-    if source.parent != source_root:
-        raise ControlError("source CSV must be directly inside 00_SOURCE_READONLY")
-    if dbc1.parent != source_root or dbc2.parent != source_root:
-        raise ControlError("both DBC files must be directly inside 00_SOURCE_READONLY")
+    if source.parent != source_root or dbc1.parent != source_root or dbc2.parent != source_root:
+        raise ControlError(f"all three fixed aliases must be directly inside {SOURCE_FOLDER_NAME}")
     control_check = validate_controls(controls)
 
     module_records = {key: file_record(path) for key, path in modules.items()}
@@ -703,7 +705,7 @@ def self_test() -> int:
         udp = root / "UDP001"
         programs = udp / "01_PROGRAMS"
         controls = udp / "02_CONTROL"
-        source_folder = udp / "03_CASES" / "TC" / "00_SOURCE_READONLY"
+        source_folder = udp / "03_CASES" / "TC" / SOURCE_FOLDER_NAME
         programs.mkdir(parents=True)
         controls.mkdir()
         source_folder.mkdir(parents=True)
@@ -752,15 +754,14 @@ else:
         (controls / CONTROLS[3]).write_text(
             "SignalIndex,CanonicalName,HoldPolicy\nS1,A,NONE\n", encoding="utf-8"
         )
-        source = source_folder / "raw.csv"
-        dbc1 = source_folder / "ch1.dbc"
-        dbc2 = source_folder / "ch2.dbc"
+        source = source_folder / SOURCE_CSV_NAME
+        dbc1 = source_folder / DBC_CH1_NAME
+        dbc2 = source_folder / DBC_CH2_NAME
         source.write_text("x\n", encoding="utf-8")
         dbc1.write_text("dbc1\n", encoding="utf-8")
         dbc2.write_text("dbc2\n", encoding="utf-8")
         ns = argparse.Namespace(
-            udp001_root=str(udp), case_root=str(source_folder.parent), source=None,
-            dbc_ch1=str(dbc1), dbc_ch2=str(dbc2), dataset_id="TC", run_id="A",
+            udp001_root=str(udp), case_root=str(source_folder.parent), dataset_id="TC", run_id="A",
             segment_id="S", source_id="SOURCE_001", max_source_rows=1,
             decode_chunksize=1, assignment_chunksize=1, classification_chunksize=1,
             frame_chunksize=1, hold_chunksize=1, max_assignment_age_rows=1,
@@ -794,14 +795,11 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--run", action="store_true")
     parser.add_argument("--udp001-root")
     parser.add_argument("--case-root")
-    parser.add_argument("--source")
-    parser.add_argument("--dbc-ch1")
-    parser.add_argument("--dbc-ch2")
     parser.add_argument("--config")
     parser.add_argument("--out")
     parser.add_argument("--out-root")
-    parser.add_argument("--dataset-id", default="TC001_20260422")
-    parser.add_argument("--run-id", default="TC001_20260422_RUN_A")
+    parser.add_argument("--dataset-id", default="TC001_2026_0422")
+    parser.add_argument("--run-id", default="TC001_2026_0422_RUN_A")
     parser.add_argument("--segment-id", default="SEGMENT_001")
     parser.add_argument("--source-id", default="SOURCE_001")
     parser.add_argument("--max-source-rows", type=int, default=100000)
@@ -820,9 +818,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.self_test:
             return self_test()
         if args.make_config:
-            required = (args.udp001_root, args.case_root, args.dbc_ch1, args.dbc_ch2, args.out)
+            required = (args.udp001_root, args.case_root, args.out)
             if not all(required):
-                raise ControlError("--make-config requires --udp001-root --case-root --dbc-ch1 --dbc-ch2 --out")
+                raise ControlError("--make-config requires --udp001-root --case-root --out")
             out = Path(args.out)
             if out.exists():
                 raise ControlError(f"config output already exists: {out}")
