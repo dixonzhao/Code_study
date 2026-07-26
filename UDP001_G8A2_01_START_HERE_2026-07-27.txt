@@ -1,0 +1,216 @@
+UDP001 G8A2 — CLEAN-ROOM THIN ORCHESTRATOR
+START HERE / EXECUTION HANDOFF
+Date: 2026-07-27
+Status: NEW IMPLEMENTATION — SELF-TESTED LOCALLY; COMPANY PREFLIGHT REQUIRED
+
+======================================================================
+1. DECISION
+======================================================================
+
+The old G8A/G8B/G8R implementation line is archived and is not an input to
+this implementation.
+
+The new program is:
+
+u001_g8a_thin_orchestrator_v0_1.py.txt
+
+It was written from the frozen Data Contract and Gate 1–Gate 7 CLI contracts,
+not by modifying the old G8A source.
+
+The program owns only:
+
+- fixed execution order;
+- explicit path transfer;
+- module/control/input freezing by SHA-256;
+- module self-test execution;
+- stop-on-first-failure;
+- local logs, manifest, and compact capsule.
+
+The program does not:
+
+- decode CAN itself;
+- change SourceId inside Gate 7 config;
+- add schema fields;
+- fill, sort, classify, aggregate, hold, or analyze data;
+- compare Reference and Candidate packages;
+- normalize manifests;
+- contain G8B validation logic;
+- use fixed expected row counts as a PASS condition.
+
+Gate 7 identity/configuration remains Gate 7 responsibility. G8A2 calls
+Gate 7 --make-config and then uses the returned config without editing it.
+
+======================================================================
+2. REQUIRED ACTIVE FILES
+======================================================================
+
+Place exactly these seven files in:
+
+C-CODE\UDP001\01_PROGRAMS
+
+u001_foundation_core_v0_1.py
+u001_selected_update_decoder_v0_1.py
+u001_framecount_assignment_v0_1.py
+u001_semantic_validity_classifier_v0_1.py
+u001_framecount_view_builder_v0_1.py
+u001_signal_cadence_bounded_hold_v0_1.py
+u001_output_package_assembler_v0_2.py
+
+Do not place any old G8A, G8B, G8R, validator, audit, or diagnostic program in
+01_PROGRAMS.
+
+Place exactly these four approved control files in:
+
+C-CODE\UDP001\02_CONTROL
+
+u001_g2_selected_signals.csv
+u001_g4_signal_policy.csv
+u001_g5_frame_policy.csv
+u001_g6_hold_policy.csv
+
+Original company source remains in:
+
+C-CODE\UDP001\03_CASES\TC001_20260422\00_SOURCE_READONLY
+
+Expected source inventory:
+
+- one Raw CAN CSV;
+- Channel 1 DBC;
+- Channel 2 DBC;
+- one original video, which G8A2 ignores.
+
+======================================================================
+3. DOWNLOAD AND QUARANTINE
+======================================================================
+
+Download the program to:
+
+C-CODE\UDP001\04_TEMP
+
+From the C-CODE PowerShell terminal:
+
+Rename-Item .\UDP001\04_TEMP\u001_g8a_thin_orchestrator_v0_1.py.txt u001_g8a_thin_orchestrator_v0_1.py
+
+Do not move it into 01_PROGRAMS yet.
+
+======================================================================
+4. PROGRAM SELF-TEST
+======================================================================
+
+From C-CODE:
+
+python .\UDP001\04_TEMP\u001_g8a_thin_orchestrator_v0_1.py --self-test
+
+Required exact output:
+
+UDP001-G8A2-SELFTEST-PASS-16
+
+If the exact line is not printed, stop. Do not create config or run data.
+
+======================================================================
+5. CREATE TC001 RUN-A CONFIG
+======================================================================
+
+Replace <CH1_DBC_FILENAME> and <CH2_DBC_FILENAME> with the two real DBC
+basenames. Do not guess the channel assignment.
+
+Run from C-CODE as one PowerShell command:
+
+python .\UDP001\04_TEMP\u001_g8a_thin_orchestrator_v0_1.py --make-config --udp001-root .\UDP001 --case-root .\UDP001\03_CASES\TC001_20260422 --dbc-ch1 ".\UDP001\03_CASES\TC001_20260422\00_SOURCE_READONLY\<CH1_DBC_FILENAME>" --dbc-ch2 ".\UDP001\03_CASES\TC001_20260422\00_SOURCE_READONLY\<CH2_DBC_FILENAME>" --out .\UDP001\03_CASES\TC001_20260422\01_CONFIG\u001_g8a2_run_a_config.json --dataset-id TC001_20260422 --run-id TC001_20260422_RUN_A --segment-id SEGMENT_001 --source-id SOURCE_001 --max-source-rows 100000
+
+The program automatically selects the only CSV directly inside
+00_SOURCE_READONLY. It refuses zero or multiple CSV files.
+
+The config operation reads and hashes the Raw CAN CSV, DBCs, seven modules,
+and four controls. It does not execute a Gate and does not read the video.
+
+Required output:
+
+UDP001-G8A2-CONFIG-CREATED u001_g8a2_run_a_config.json
+
+If the config already exists, the program refuses overwrite. Move the old
+config to ARCH or remove the empty failed config only after explicit review.
+
+======================================================================
+6. PREFLIGHT — EXECUTE NOW, THEN STOP
+======================================================================
+
+The preflight hashes all frozen files again, checks the four policy files, and
+runs all seven module self-tests. It does not process Raw CAN rows.
+
+Run from C-CODE:
+
+python .\UDP001\04_TEMP\u001_g8a_thin_orchestrator_v0_1.py --preflight --config .\UDP001\03_CASES\TC001_20260422\01_CONFIG\u001_g8a2_run_a_config.json --out .\UDP001\03_CASES\TC001_20260422\05_RETURN\G8A2_PREFLIGHT_01
+
+Required capsule:
+
+.\UDP001\03_CASES\TC001_20260422\05_RETURN\G8A2_PREFLIGHT_01\udp001_g8a2_preflight_capsule.txt
+
+Expected compact return:
+
+UDP001G8A2P1 N-M7-C4-I3-X0 C-0
+
+Return that capsule to ChatGPT. Stop before Run A even when C-0. This gives a
+clean checkpoint proving which archived Gate programs remain reusable.
+
+======================================================================
+7. INSTALL COMMAND — ONLY AFTER PREFLIGHT APPROVAL
+======================================================================
+
+After ChatGPT explicitly approves the preflight:
+
+Move-Item .\UDP001\04_TEMP\u001_g8a_thin_orchestrator_v0_1.py .\UDP001\01_PROGRAMS\u001_g8a_thin_orchestrator_v0_1.py
+
+Do not keep a second active copy in 04_TEMP.
+
+======================================================================
+8. RUN-A COMMAND — PREWRITTEN, DO NOT EXECUTE BEFORE APPROVAL
+======================================================================
+
+python .\UDP001\01_PROGRAMS\u001_g8a_thin_orchestrator_v0_1.py --run --config .\UDP001\03_CASES\TC001_20260422\01_CONFIG\u001_g8a2_run_a_config.json --out-root .\UDP001\03_CASES\TC001_20260422\02_RUN_A_REFERENCE
+
+02_RUN_A_REFERENCE must be absent or completely empty. G8A2 refuses resume or
+overwrite.
+
+The run writes only inside 02_RUN_A_REFERENCE:
+
+CONTROL
+G1_PROBE
+G2_DECODE
+G3_ASSIGN
+G4_CLASSIFY
+G5_FRAME
+G6_PROFILE
+G6_APPLY
+G7_CONFIG
+G7_BUILD
+CONTROL_OUTPUT
+
+Final return file:
+
+CONTROL_OUTPUT\udp001_g8a2_return_capsule.txt
+
+Success requires:
+
+- nine subprocess stages completed;
+- seven module self-tests passed;
+- all stage capsules C-0;
+- exactly one six-file Gate 7 package;
+- full protected SHA-256 equality before/after;
+- final capsule C-0.
+
+No Reference-versus-Candidate equivalence claim is made by G8A2.
+
+======================================================================
+9. FAILURE RULE
+======================================================================
+
+On any C-7 or error:
+
+- do not let Copilot modify the program;
+- do not rerun into the same output folder;
+- preserve config, run folder, logs, manifest, and capsule;
+- return the compact capsule plus at most three short Memo lines;
+- correction is issued from the exact failed StageId and logs.
+
+END
