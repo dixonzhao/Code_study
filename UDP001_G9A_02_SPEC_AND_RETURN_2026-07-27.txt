@@ -1,0 +1,132 @@
+UDP001 G9A — SIX-FILE PACKAGE HANDOFF SPECIFICATION
+Date: 2026-07-27
+Version: 0.1
+
+======================================================================
+1. DECISION BEING IMPLEMENTED
+======================================================================
+
+The successful U001 package already has six distinct responsibilities:
+
+D1 u001_decoded_updates.csv
+   Long real-update stream. Preserve for traceability and future dynamic/SysID
+   analysis. It is not the default static Analyzer table.
+
+D2 u001_frame_values.csv
+   Machine-facing FrameCount Analysis View. This is the formal static Analyzer
+   input candidate.
+
+D3 u001_signal_catalog.csv
+   Required metadata and policy sidecar for D2. Column meaning, unit, type,
+   validity, aggregation, and hold policy must not be guessed from headers.
+
+D4 u001_quality_report.csv
+   Data-quality gate. Analyzer execution must not silently ignore package or
+   required-signal errors.
+
+D5 u001_run_manifest.json
+   Provenance and configuration evidence. It is not an analysis table.
+
+D6 u001_review_view.csv
+   Narrow human-facing comparison view. It is the default input for manual
+   chart/video review, not the complete machine Analyzer input.
+
+This separation is the U001-to-U002 handoff boundary.
+
+======================================================================
+2. G9A SCOPE
+======================================================================
+
+G9A may:
+
+- recursively resolve exactly one copy of each fixed six-file basename under
+  the frozen Run A root;
+- validate required contract headers and unique columns;
+- count D1 and D2 rows;
+- require strictly increasing unique FrameCount in D2;
+- validate every D2 signal group has the seven contract suffix columns;
+- require exact D2 group order to equal D3 IncludeInFrameView order;
+- require D4 package_file_count=6 and package_error_count=0;
+- validate D5 as JSON and reject company absolute path leakage;
+- require D6 to be an exact row-aligned subset of D2;
+- hash the six source files for evidence;
+- write a company-local Analyzer handoff profile, evidence JSON, and capsule.
+
+G9A must not:
+
+- write inside Run A;
+- decode CAN or read DBC files;
+- alter, sort, fill, aggregate, hold, interpolate, or select signal values;
+- decide Reference/Target roles;
+- perform camera target fusion;
+- calculate discrepancy, baseline, residual, threshold, or Event;
+- call Radar ground truth;
+- modify U001 Gates 1–7;
+- perform replay comparison.
+
+======================================================================
+3. GENERATED COMPANY-LOCAL FILES
+======================================================================
+
+u001_g9a_analyzer_handoff_profile.csv
+
+One row per D2 signal group. It records the exact company-local CanonicalName,
+CAN/Channel/Signal metadata, unit/type/policy, exact D2 column names, and basic
+availability counts. AnalyzerInputRole remains
+CANDIDATE_REQUIRES_U002_ROLE_ASSIGNMENT; G9A does not invent business roles.
+
+u001_g9a_evidence.json
+
+Machine evidence containing only basenames, hashes, counts, fixed file roles,
+and structural PASS status. It is not intended for manual return.
+
+udp001_g9a_return_capsule.txt
+
+Compact return only.
+
+======================================================================
+4. RETURN CAPSULE
+======================================================================
+
+UDP001G9A1
+N-Ff-Uu-Rr-Kk-Qq-Hh-Xx
+D1-Ll-D2-Aa-D3-Mm-D4-Qq-D5-Pp-D6-Hh
+C-n
+
+Definitions:
+
+F = six-file package count, expected 6
+U = D1 decoded Update rows
+R = D2 Frame View rows
+K = D2/D3 aligned Frame View signal groups
+Q = D4 package-quality gate, expected 1
+H = D6 row-aligned human Review View, expected 1
+X = blocking errors, expected 0
+
+D1-L = long Update input structurally available
+D2-A = machine Analysis View structurally available
+D3-M = metadata sidecar aligned
+D4-Q = quality sidecar passed
+D5-P = provenance manifest readable and path-safe
+D6-H = human Review View aligned
+
+PASS requires:
+
+F6 Q1 H1 X0
+D1-L1 D2-A1 D3-M1 D4-Q1 D5-P1 D6-H1
+C-0
+
+U, R, and K are runtime evidence; do not hard-code their present values.
+
+======================================================================
+5. NEXT DECISION AFTER PASS
+======================================================================
+
+After G9A passes, Codex will freeze the U001-to-U002 file-role contract and
+design the first U002 adapter. That adapter will consume D2/D3/D4/D5, retain
+validity/update/age provenance, and generate one Analyzer-ready table without
+zero fill or unlimited forward fill.
+
+No Analyzer mathematical method is approved by G9A.
+
+END

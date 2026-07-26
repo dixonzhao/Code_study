@@ -1,0 +1,76 @@
+UDP001 G9A — START HERE
+Date: 2026-07-27
+
+PURPOSE
+
+Read the frozen six-file Run A package, confirm the Analyzer handoff structure,
+and generate one company-local handoff profile. This program is read-only with
+respect to Run A. It performs no decode, fill, correction, fusion, baseline,
+or anomaly analysis.
+
+======================================================================
+1. THREE DOWNLOADED FILES
+======================================================================
+
+1. u001_package_handoff_probe_v0_1.py.txt
+2. UDP001_G9A_01_START_HERE_2026-07-27.txt
+3. UDP001_G9A_02_SPEC_AND_RETURN_2026-07-27.txt
+
+Put all three in:
+
+C-CODE\UDP001\04_TEMP\
+
+Rename only:
+
+u001_package_handoff_probe_v0_1.py.txt
+
+to:
+
+u001_package_handoff_probe_v0_1.py
+
+Run every command below from C-CODE.
+
+======================================================================
+2. SELF-TEST
+======================================================================
+
+python .\UDP001\04_TEMP\u001_package_handoff_probe_v0_1.py --self-test
+
+Required exact result:
+
+UDP001-G9A-SELFTEST-PASS-12
+
+Stop if it does not pass. Do not ask Copilot to modify the program.
+
+======================================================================
+3. READ-ONLY RUN A INSPECTION
+======================================================================
+
+The output folder must be absent or empty.
+
+python .\UDP001\04_TEMP\u001_package_handoff_probe_v0_1.py --inspect --run-root .\UDP001\03_CASES\TC001_20260422\02_RUN_A_REFERENCE --out .\UDP001\03_CASES\TC001_20260422\05_RETURN\G9A_HANDOFF_01
+
+Expected capsule shape:
+
+UDP001G9A1
+N-F6-U<runtime>-R<runtime>-K<runtime>-Q1-H1-X0
+D1-L1-D2-A1-D3-M1-D4-Q1-D5-P1-D6-H1
+C-0
+
+Return only the capsule from:
+
+.\UDP001\03_CASES\TC001_20260422\05_RETURN\G9A_HANDOFF_01\udp001_g9a_return_capsule.txt
+
+Do not manually transcribe the profile CSV.
+
+======================================================================
+4. AFTER PASS — DO NOT MOVE YET
+======================================================================
+
+Keep the program in 04_TEMP until Codex accepts the capsule.
+
+Do not modify or overwrite:
+
+.\UDP001\03_CASES\TC001_20260422\02_RUN_A_REFERENCE
+
+END

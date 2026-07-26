@@ -1,0 +1,514 @@
+#!/usr/bin/env python3
+"""UDP001 G9A read-only six-file package and Analyzer handoff probe."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+import math
+import re
+import sys
+import tempfile
+from pathlib import Path
+from typing import Dict, Iterable, List, Sequence, Tuple
+
+
+PROGRAM_NAME = "u001_package_handoff_probe"
+PROGRAM_VERSION = "0.1"
+SELFTEST_TOKEN = "UDP001-G9A-SELFTEST-PASS-12"
+
+PACKAGE_NAMES = (
+    "u001_decoded_updates.csv",
+    "u001_frame_values.csv",
+    "u001_signal_catalog.csv",
+    "u001_quality_report.csv",
+    "u001_run_manifest.json",
+    "u001_review_view.csv",
+)
+
+D1_REQUIRED = (
+    "SourceRowIndex", "SourceId", "SourceType", "ClockDomain",
+    "NativeTimestamp", "NativeSequence", "FrameCount", "SyncKey",
+    "SyncQuality", "FrameAssignmentStatus", "FrameAssignmentAgeRows",
+    "CAN_ID", "Channel", "MessageName", "CanonicalName", "RawCode",
+    "PhysicalValue", "ValueLabel", "ValueKind", "SignalRole", "Valid",
+    "MissingReason", "MessageCounter", "SourceDateTime", "SourceTimeUs",
+)
+
+D2_LEADING = ("FrameCount", "SourceRowFirst", "SourceRowLast", "SourceUpdateCount")
+D2_SUFFIXES = (
+    "__value", "__label", "__updated", "__update_count",
+    "__age", "__valid", "__missing_reason",
+)
+
+D3_REQUIRED = (
+    "CanonicalName", "CAN_ID", "Channel", "MessageName", "SignalName",
+    "Unit", "ValueKind", "SignalRole", "UpdateMode", "StorageDtype",
+    "StartBit", "BitLength", "ByteOrder", "Signed", "Scale", "Offset",
+    "DBCMinimum", "DBCMaximum", "EnumerationMap", "ValidityRule",
+    "ValiditySourceSignal", "ValidityExpression", "WithinFramePolicy",
+    "HoldPolicy", "MaxAgeFrames", "NominalRateHz", "RequiredForAnalysis",
+    "IncludeInFrameView", "IncludeInReviewView", "Notes",
+)
+
+D4_REQUIRED = (
+    "Scope", "CanonicalName", "Metric", "Value", "Unit", "SourceGate",
+    "Status", "Notes",
+)
+
+PROFILE_COLUMNS = (
+    "SignalIndex", "CanonicalName", "CAN_ID", "Channel", "MessageName",
+    "SignalName", "Unit", "ValueKind", "SignalRole", "StorageDtype",
+    "WithinFramePolicy", "HoldPolicy", "MaxAgeFrames",
+    "RequiredForAnalysis", "IncludeInReviewView", "FrameValueColumn",
+    "FrameUpdatedColumn", "FrameAgeColumn", "FrameValidColumn",
+    "FrameMissingReasonColumn", "FrameRows", "NonBlankValueRows",
+    "ValidRows", "UpdatedRows", "MissingRows", "AnalyzerInputRole",
+)
+
+
+class ProbeError(RuntimeError):
+    pass
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def read_header(path: Path) -> List[str]:
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        row = next(csv.reader(f), None)
+    if not row:
+        raise ProbeError(f"EMPTY_CSV:{path.name}")
+    if len(row) != len(set(row)):
+        raise ProbeError(f"DUPLICATE_HEADER:{path.name}")
+    return row
+
+
+def require_columns(header: Sequence[str], required: Sequence[str], tag: str) -> None:
+    missing = [name for name in required if name not in header]
+    if missing:
+        raise ProbeError(f"{tag}_MISSING_COLUMNS:{','.join(missing)}")
+
+
+def find_package_files(run_root: Path) -> Dict[str, Path]:
+    if not run_root.is_dir():
+        raise ProbeError("RUN_ROOT_NOT_DIRECTORY")
+    result: Dict[str, Path] = {}
+    for name in PACKAGE_NAMES:
+        matches = sorted(p for p in run_root.rglob(name) if p.is_file())
+        if len(matches) != 1:
+            raise ProbeError(f"PACKAGE_FILE_COUNT:{name}:{len(matches)}")
+        result[name] = matches[0]
+    return result
+
+
+def count_csv_rows(path: Path) -> int:
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.reader(f)
+        next(reader, None)
+        return sum(1 for _ in reader)
+
+
+def parse_int_text(value: str, field: str) -> int:
+    text = (value or "").strip()
+    if not text:
+        raise ProbeError(f"BLANK_INTEGER:{field}")
+    try:
+        number = float(text)
+    except ValueError as exc:
+        raise ProbeError(f"NON_NUMERIC_INTEGER:{field}") from exc
+    if not math.isfinite(number) or not number.is_integer():
+        raise ProbeError(f"NON_INTEGER_VALUE:{field}")
+    return int(number)
+
+
+def bool01(value: str, field: str) -> int:
+    text = (value or "").strip().lower()
+    if text in {"1", "true"}:
+        return 1
+    if text in {"0", "false"}:
+        return 0
+    raise ProbeError(f"INVALID_BOOLEAN:{field}:{value}")
+
+
+def frame_groups(header: Sequence[str]) -> List[str]:
+    if tuple(header[:4]) != D2_LEADING:
+        raise ProbeError("D2_LEADING_COLUMNS")
+    groups = [name[:-7] for name in header if name.endswith("__value")]
+    if not groups or len(groups) != len(set(groups)):
+        raise ProbeError("D2_SIGNAL_GROUPS")
+    expected = list(D2_LEADING)
+    for group in groups:
+        expected.extend(group + suffix for suffix in D2_SUFFIXES)
+    if list(header) != expected:
+        raise ProbeError("D2_GROUP_ORDER_OR_COLUMNS")
+    return groups
+
+
+def inspect_frame_values(path: Path) -> Tuple[int, int, int, List[str], Dict[str, Dict[str, int]]]:
+    header = read_header(path)
+    groups = frame_groups(header)
+    stats = {
+        group: {"nonblank": 0, "valid": 0, "updated": 0, "missing": 0}
+        for group in groups
+    }
+    rows = 0
+    first_frame = None
+    last_frame = None
+    previous = None
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            rows += 1
+            frame = parse_int_text(row["FrameCount"], "FrameCount")
+            if previous is not None and frame <= previous:
+                raise ProbeError("D2_FRAME_NOT_STRICTLY_INCREASING")
+            if first_frame is None:
+                first_frame = frame
+            last_frame = frame
+            previous = frame
+            for group in groups:
+                value = (row[group + "__value"] or "").strip()
+                valid = bool01(row[group + "__valid"], group + "__valid")
+                updated = bool01(row[group + "__updated"], group + "__updated")
+                if value:
+                    stats[group]["nonblank"] += 1
+                else:
+                    stats[group]["missing"] += 1
+                stats[group]["valid"] += valid
+                stats[group]["updated"] += updated
+    if rows == 0:
+        raise ProbeError("D2_NO_ROWS")
+    return rows, int(first_frame), int(last_frame), groups, stats
+
+
+def read_catalog(path: Path) -> Tuple[List[dict], Dict[str, dict]]:
+    header = read_header(path)
+    require_columns(header, D3_REQUIRED, "D3")
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+    keyed: Dict[str, dict] = {}
+    for row in rows:
+        name = (row.get("CanonicalName") or "").strip()
+        if not name or name in keyed:
+            raise ProbeError("D3_CANONICAL_NAME_KEY")
+        keyed[name] = row
+    return rows, keyed
+
+
+def included_catalog_names(rows: Iterable[dict]) -> List[str]:
+    names = []
+    for row in rows:
+        text = (row.get("IncludeInFrameView") or "").strip().lower()
+        if text in {"1", "true"}:
+            names.append((row.get("CanonicalName") or "").strip())
+        elif text not in {"0", "false"}:
+            raise ProbeError("D3_INCLUDE_IN_FRAME_VIEW_VALUE")
+    return names
+
+
+def inspect_quality(path: Path) -> int:
+    header = read_header(path)
+    require_columns(header, D4_REQUIRED, "D4")
+    required_metrics = {
+        "package_file_count", "package_error_count", "frame_view_signal_count",
+    }
+    found = {}
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            if (row.get("Scope") or "").strip() == "GLOBAL":
+                metric = (row.get("Metric") or "").strip()
+                if metric in required_metrics:
+                    found[metric] = row
+    if set(found) != required_metrics:
+        raise ProbeError("D4_REQUIRED_GLOBAL_METRICS")
+    if parse_int_text(found["package_file_count"]["Value"], "package_file_count") != 6:
+        raise ProbeError("D4_PACKAGE_FILE_COUNT")
+    if parse_int_text(found["package_error_count"]["Value"], "package_error_count") != 0:
+        raise ProbeError("D4_PACKAGE_ERROR_COUNT")
+    return parse_int_text(found["frame_view_signal_count"]["Value"], "frame_view_signal_count")
+
+
+def inspect_manifest(path: Path) -> None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ProbeError("D5_INVALID_JSON") from exc
+    if not isinstance(payload, dict):
+        raise ProbeError("D5_NOT_OBJECT")
+    serialized = json.dumps(payload, ensure_ascii=False)
+    forbidden = ("C:\\\\", "/Users/", "\\\\Users\\", "/home/")
+    if any(item in serialized for item in forbidden):
+        raise ProbeError("D5_ABSOLUTE_PATH_LEAK")
+
+
+def inspect_review(frame_path: Path, review_path: Path) -> int:
+    frame_header = read_header(frame_path)
+    review_header = read_header(review_path)
+    if not review_header or review_header[0] != "FrameCount":
+        raise ProbeError("D6_FIRST_COLUMN")
+    if any(name not in frame_header for name in review_header):
+        raise ProbeError("D6_NOT_FRAME_SUBSET")
+    rows = 0
+    with frame_path.open("r", encoding="utf-8-sig", newline="") as ff, review_path.open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as rf:
+        frame_reader = csv.DictReader(ff)
+        review_reader = csv.DictReader(rf)
+        while True:
+            frame_row = next(frame_reader, None)
+            review_row = next(review_reader, None)
+            if frame_row is None or review_row is None:
+                if frame_row is not None or review_row is not None:
+                    raise ProbeError("D6_ROW_COUNT_MISMATCH")
+                break
+            rows += 1
+            for column in review_header:
+                if (frame_row.get(column) or "") != (review_row.get(column) or ""):
+                    raise ProbeError("D6_VALUE_MISMATCH")
+    return rows
+
+
+def write_profile(
+    path: Path,
+    groups: Sequence[str],
+    catalog: Dict[str, dict],
+    stats: Dict[str, Dict[str, int]],
+    frame_rows: int,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(path.name + ".tmp")
+    with temp.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=PROFILE_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        for index, group in enumerate(groups, 1):
+            source = catalog[group]
+            row = {column: source.get(column, "") for column in PROFILE_COLUMNS}
+            row.update({
+                "SignalIndex": f"K{index}",
+                "CanonicalName": group,
+                "FrameValueColumn": group + "__value",
+                "FrameUpdatedColumn": group + "__updated",
+                "FrameAgeColumn": group + "__age",
+                "FrameValidColumn": group + "__valid",
+                "FrameMissingReasonColumn": group + "__missing_reason",
+                "FrameRows": frame_rows,
+                "NonBlankValueRows": stats[group]["nonblank"],
+                "ValidRows": stats[group]["valid"],
+                "UpdatedRows": stats[group]["updated"],
+                "MissingRows": stats[group]["missing"],
+                "AnalyzerInputRole": "CANDIDATE_REQUIRES_U002_ROLE_ASSIGNMENT",
+            })
+            writer.writerow(row)
+    temp.replace(path)
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(path.name + ".tmp")
+    temp.write_bytes(text.encode("utf-8"))
+    temp.replace(path)
+
+
+def inspect_package(run_root: Path, out: Path) -> str:
+    if out.exists() and any(out.iterdir()):
+        raise ProbeError("OUTPUT_NOT_EMPTY")
+    out.mkdir(parents=True, exist_ok=True)
+    files = find_package_files(run_root)
+
+    d1 = files["u001_decoded_updates.csv"]
+    d2 = files["u001_frame_values.csv"]
+    d3 = files["u001_signal_catalog.csv"]
+    d4 = files["u001_quality_report.csv"]
+    d5 = files["u001_run_manifest.json"]
+    d6 = files["u001_review_view.csv"]
+
+    require_columns(read_header(d1), D1_REQUIRED, "D1")
+    update_rows = count_csv_rows(d1)
+    frame_rows, frame_min, frame_max, groups, stats = inspect_frame_values(d2)
+    catalog_rows, catalog = read_catalog(d3)
+    included = included_catalog_names(catalog_rows)
+    if included != groups:
+        raise ProbeError("D2_D3_SIGNAL_ORDER_MISMATCH")
+    quality_signal_count = inspect_quality(d4)
+    if quality_signal_count != len(groups):
+        raise ProbeError("D4_SIGNAL_COUNT_MISMATCH")
+    inspect_manifest(d5)
+    review_rows = inspect_review(d2, d6)
+    if review_rows != frame_rows:
+        raise ProbeError("D6_FRAME_ROW_COUNT")
+
+    write_profile(out / "u001_g9a_analyzer_handoff_profile.csv", groups, catalog, stats, frame_rows)
+    inventory = {
+        name: {"basename": path.name, "size": path.stat().st_size, "sha256": sha256_file(path)}
+        for name, path in files.items()
+    }
+    evidence = {
+        "Program": PROGRAM_NAME,
+        "Version": PROGRAM_VERSION,
+        "RunRootBasename": run_root.name,
+        "PackageFiles": inventory,
+        "UpdateRows": update_rows,
+        "FrameRows": frame_rows,
+        "FrameMin": frame_min,
+        "FrameMax": frame_max,
+        "FrameViewSignals": len(groups),
+        "ReviewRows": review_rows,
+        "AnalyzerMachineInput": "u001_frame_values.csv",
+        "AnalyzerMetadataInput": "u001_signal_catalog.csv",
+        "AnalyzerQualityInput": "u001_quality_report.csv",
+        "AnalyzerProvenanceInput": "u001_run_manifest.json",
+        "HumanReviewInput": "u001_review_view.csv",
+        "DynamicUpdateInput": "u001_decoded_updates.csv",
+        "Status": "HANDOFF_STRUCTURE_PASS",
+    }
+    write_text_atomic(out / "u001_g9a_evidence.json", json.dumps(evidence, ensure_ascii=False, indent=2) + "\n")
+    capsule = (
+        "UDP001G9A1\n"
+        f"N-F6-U{update_rows}-R{frame_rows}-K{len(groups)}-Q1-H1-X0\n"
+        "D1-L1-D2-A1-D3-M1-D4-Q1-D5-P1-D6-H1\n"
+        "C-0\n"
+    )
+    write_text_atomic(out / "udp001_g9a_return_capsule.txt", capsule)
+    return capsule
+
+
+def write_csv(path: Path, header: Sequence[str], rows: Sequence[Sequence[object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(rows)
+
+
+def make_synthetic_package(root: Path) -> None:
+    package = root / "FINAL_PACKAGE"
+    package.mkdir(parents=True)
+    d1_rows = []
+    for source_index, frame in enumerate((10, 10, 11, 12), 1):
+        row = {name: "" for name in D1_REQUIRED}
+        row.update({
+            "SourceRowIndex": source_index, "SourceId": "SOURCE_001",
+            "SourceType": "CAN", "ClockDomain": "FRAMECOUNT_VIDEO",
+            "FrameCount": frame, "SyncKey": frame, "SyncQuality": "EXACT",
+            "FrameAssignmentStatus": "ASSIGNED", "CAN_ID": "0x380",
+            "Channel": "1", "CanonicalName": "RADAR_DISTANCE",
+            "PhysicalValue": "12.0", "ValueKind": "MEASUREMENT",
+            "SignalRole": "MEASUREMENT", "Valid": "1",
+            "MissingReason": "VALID_UPDATE",
+        })
+        d1_rows.append([row[name] for name in D1_REQUIRED])
+    write_csv(package / PACKAGE_NAMES[0], D1_REQUIRED, d1_rows)
+
+    groups = ("RADAR_DISTANCE", "CAMERA_DISTANCE")
+    d2_header = list(D2_LEADING)
+    for group in groups:
+        d2_header.extend(group + suffix for suffix in D2_SUFFIXES)
+    d2_rows = []
+    for frame, radar, camera in ((10, "12", "10"), (11, "13", "11"), (12, "14", "12")):
+        row = [frame, frame, frame, 2]
+        for value in (radar, camera):
+            row.extend([value, "", 1, 1, 0, 1, "VALID_UPDATE"])
+        d2_rows.append(row)
+    write_csv(package / PACKAGE_NAMES[1], d2_header, d2_rows)
+
+    catalog_rows = []
+    for group, can_id, channel in ((groups[0], "0x380", "1"), (groups[1], "0x221", "2")):
+        row = {name: "" for name in D3_REQUIRED}
+        row.update({
+            "CanonicalName": group, "CAN_ID": can_id, "Channel": channel,
+            "MessageName": group, "SignalName": "Distance", "Unit": "m",
+            "ValueKind": "MEASUREMENT", "SignalRole": "MEASUREMENT",
+            "StorageDtype": "float64", "WithinFramePolicy": "LAST_UPDATE",
+            "HoldPolicy": "NONE", "RequiredForAnalysis": "1",
+            "IncludeInFrameView": "1", "IncludeInReviewView": "1",
+        })
+        catalog_rows.append([row[name] for name in D3_REQUIRED])
+    write_csv(package / PACKAGE_NAMES[2], D3_REQUIRED, catalog_rows)
+
+    qrows = [
+        ["GLOBAL", "", "package_file_count", "6", "files", "G7", "PASS", ""],
+        ["GLOBAL", "", "package_error_count", "0", "errors", "G7", "PASS", ""],
+        ["GLOBAL", "", "frame_view_signal_count", "2", "signals", "G7", "PASS", ""],
+    ]
+    write_csv(package / PACKAGE_NAMES[3], D4_REQUIRED, qrows)
+    (package / PACKAGE_NAMES[4]).write_text(
+        json.dumps({"DatasetId": "SYNTHETIC", "Status": "SUCCESS"}), encoding="utf-8"
+    )
+    review_header = ["FrameCount", groups[0] + "__value", groups[1] + "__value"]
+    review_rows = [[row[0], row[4], row[11]] for row in d2_rows]
+    write_csv(package / PACKAGE_NAMES[5], review_header, review_rows)
+
+
+def run_self_test() -> None:
+    passed = 0
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "RUN"
+        make_synthetic_package(root)
+        files = find_package_files(root)
+        assert len(files) == 6
+        passed += 1
+        assert count_csv_rows(files[PACKAGE_NAMES[0]]) == 4
+        passed += 1
+        header = read_header(files[PACKAGE_NAMES[1]])
+        assert frame_groups(header) == ["RADAR_DISTANCE", "CAMERA_DISTANCE"]
+        passed += 1
+        frame = inspect_frame_values(files[PACKAGE_NAMES[1]])
+        assert frame[0:3] == (3, 10, 12)
+        passed += 1
+        catalog_rows, catalog = read_catalog(files[PACKAGE_NAMES[2]])
+        assert len(catalog) == 2
+        passed += 1
+        assert included_catalog_names(catalog_rows) == frame[3]
+        passed += 1
+        assert inspect_quality(files[PACKAGE_NAMES[3]]) == 2
+        passed += 1
+        inspect_manifest(files[PACKAGE_NAMES[4]])
+        passed += 1
+        assert inspect_review(files[PACKAGE_NAMES[1]], files[PACKAGE_NAMES[5]]) == 3
+        passed += 1
+        out = Path(td) / "OUT"
+        capsule = inspect_package(root, out)
+        assert "N-F6-U4-R3-K2-Q1-H1-X0" in capsule
+        passed += 1
+        assert count_csv_rows(out / "u001_g9a_analyzer_handoff_profile.csv") == 2
+        passed += 1
+        assert json.loads((out / "u001_g9a_evidence.json").read_text(encoding="utf-8"))["Status"] == "HANDOFF_STRUCTURE_PASS"
+        passed += 1
+    if passed != 12:
+        raise AssertionError(f"SELFTEST_COUNT:{passed}")
+    print(SELFTEST_TOKEN)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--inspect", action="store_true")
+    parser.add_argument("--run-root", type=Path)
+    parser.add_argument("--out", type=Path)
+    args = parser.parse_args(argv)
+    try:
+        if args.self_test:
+            run_self_test()
+            return 0
+        if args.inspect:
+            if args.run_root is None or args.out is None:
+                raise ProbeError("INSPECT_REQUIRES_RUN_ROOT_AND_OUT")
+            capsule = inspect_package(args.run_root.resolve(), args.out.resolve())
+            print(capsule, end="")
+            return 0
+        parser.error("choose --self-test or --inspect")
+    except (ProbeError, OSError, csv.Error) as exc:
+        print(f"UDP001G9A1\nN-F0-U0-R0-K0-Q0-H0-X1\nC-1\nMEMO-{type(exc).__name__}:{exc}")
+        return 1
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
