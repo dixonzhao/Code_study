@@ -1,5 +1,11 @@
-UDP001 G8A2 v0.2 — TECHNICAL SPECIFICATION AND RETURN PROTOCOL
+UDP001 G8A2 v0.3 — TECHNICAL SPECIFICATION AND RETURN PROTOCOL
 Date: 2026-07-27
+
+v0.3 portability correction:
+
+- T01 writes exact LF bytes instead of using platform text translation;
+- T02 checks exact atomic-output bytes;
+- no runtime orchestration, data, interface, alias, or acceptance rule changed.
 
 ======================================================================
 1. PURPOSE

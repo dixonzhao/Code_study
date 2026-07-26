@@ -1,4 +1,4 @@
-UDP001 G8A2 v0.2 — START HERE
+UDP001 G8A2 v0.3 — START HERE
 Date: 2026-07-27
 Status: COMPANY PREFLIGHT REQUIRED
 
@@ -6,9 +6,9 @@ Status: COMPANY PREFLIGHT REQUIRED
 1. THREE-FILE DELIVERY
 ======================================================================
 
-1. u001_g8a_thin_orchestrator_v0_2.py.txt
-2. UDP001_G8A2_01_START_HERE_v0_2_2026-07-27.txt
-3. UDP001_G8A2_02_SPEC_AND_RETURN_v0_2_2026-07-27.txt
+1. u001_g8a_thin_orchestrator_v0_3.py.txt
+2. UDP001_G8A2_01_START_HERE_v0_3_2026-07-27.txt
+3. UDP001_G8A2_02_SPEC_AND_RETURN_v0_3_2026-07-27.txt
 
 Download all three files to:
 
@@ -32,7 +32,7 @@ DBC2.dbc must be the approved Channel 2 DBC.
 Rename only once before the source is frozen. Renaming does not alter file
 content. Do not send the original sensitive basenames outside the company.
 
-G8A2 v0.2 reads the three fixed aliases automatically. It never asks for or
+G8A2 v0.3 reads the three fixed aliases automatically. It never asks for or
 guesses the source/DBC filenames. The video is ignored by U001.
 
 ======================================================================
@@ -47,7 +47,7 @@ u001_framecount_assignment_v0_1.py
 u001_semantic_validity_classifier_v0_1.py
 u001_framecount_view_builder_v0_1.py
 u001_signal_cadence_bounded_hold_v0_1.py
-u001_output_package_assembler_v0_2.py
+u001_output_package_assembler_v0_3.py
 
 02_CONTROL must contain:
 
@@ -64,9 +64,9 @@ Do not place any old G8A/G8B/G8R/validator/diagnostic file in 01_PROGRAMS.
 
 Run every command from C-CODE.
 
-Rename-Item .\UDP001\04_TEMP\u001_g8a_thin_orchestrator_v0_2.py.txt u001_g8a_thin_orchestrator_v0_2.py
+Rename-Item .\UDP001\04_TEMP\u001_g8a_thin_orchestrator_v0_3.py.txt u001_g8a_thin_orchestrator_v0_3.py
 
-python .\UDP001\04_TEMP\u001_g8a_thin_orchestrator_v0_2.py --self-test
+python .\UDP001\04_TEMP\u001_g8a_thin_orchestrator_v0_3.py --self-test
 
 Required exact result:
 
@@ -78,11 +78,11 @@ Otherwise stop.
 5. CREATE RUN-A CONFIG
 ======================================================================
 
-python .\UDP001\04_TEMP\u001_g8a_thin_orchestrator_v0_2.py --make-config --udp001-root .\UDP001 --case-root .\UDP001\03_CASES\TC001_2026_0422 --out .\UDP001\03_CASES\TC001_2026_0422\01_CONFIG\u001_g8a2_run_a_config_v0_2.json --max-source-rows 100000
+python .\UDP001\04_TEMP\u001_g8a_thin_orchestrator_v0_3.py --make-config --udp001-root .\UDP001 --case-root .\UDP001\03_CASES\TC001_2026_0422 --out .\UDP001\03_CASES\TC001_2026_0422\01_CONFIG\u001_g8a2_run_a_config_v0_3.json --max-source-rows 100000
 
 Required result:
 
-UDP001-G8A2-CONFIG-CREATED u001_g8a2_run_a_config_v0_2.json
+UDP001-G8A2-CONFIG-CREATED u001_g8a2_run_a_config_v0_3.json
 
 The program automatically uses:
 
@@ -96,7 +96,7 @@ No Gate is executed during config creation.
 6. PREFLIGHT — EXECUTE, RETURN, THEN STOP
 ======================================================================
 
-python .\UDP001\04_TEMP\u001_g8a_thin_orchestrator_v0_2.py --preflight --config .\UDP001\03_CASES\TC001_2026_0422\01_CONFIG\u001_g8a2_run_a_config_v0_2.json --out .\UDP001\03_CASES\TC001_2026_0422\05_RETURN\G8A2_V02_PREFLIGHT_01
+python .\UDP001\04_TEMP\u001_g8a_thin_orchestrator_v0_3.py --preflight --config .\UDP001\03_CASES\TC001_2026_0422\01_CONFIG\u001_g8a2_run_a_config_v0_3.json --out .\UDP001\03_CASES\TC001_2026_0422\05_RETURN\G8A2_V02_PREFLIGHT_01
 
 Return file:
 
@@ -114,13 +114,13 @@ Return these three lines to ChatGPT and stop before Run A.
 7. INSTALL — ONLY AFTER PREFLIGHT APPROVAL
 ======================================================================
 
-Move-Item .\UDP001\04_TEMP\u001_g8a_thin_orchestrator_v0_2.py .\UDP001\01_PROGRAMS\u001_g8a_thin_orchestrator_v0_2.py
+Move-Item .\UDP001\04_TEMP\u001_g8a_thin_orchestrator_v0_3.py .\UDP001\01_PROGRAMS\u001_g8a_thin_orchestrator_v0_3.py
 
 ======================================================================
 8. RUN A — PREWRITTEN, DO NOT EXECUTE BEFORE APPROVAL
 ======================================================================
 
-python .\UDP001\01_PROGRAMS\u001_g8a_thin_orchestrator_v0_2.py --run --config .\UDP001\03_CASES\TC001_2026_0422\01_CONFIG\u001_g8a2_run_a_config_v0_2.json --out-root .\UDP001\03_CASES\TC001_2026_0422\02_RUN_A_REFERENCE
+python .\UDP001\01_PROGRAMS\u001_g8a_thin_orchestrator_v0_3.py --run --config .\UDP001\03_CASES\TC001_2026_0422\01_CONFIG\u001_g8a2_run_a_config_v0_3.json --out-root .\UDP001\03_CASES\TC001_2026_0422\02_RUN_A_REFERENCE
 
 02_RUN_A_REFERENCE must be absent or empty.
 

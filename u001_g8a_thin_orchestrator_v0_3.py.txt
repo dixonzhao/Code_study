@@ -25,9 +25,9 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 
-PROGRAM_NAME = "u001_g8a_thin_orchestrator_v0_2.py"
-PROGRAM_VERSION = "0.2"
-CONFIG_SCHEMA = "UDP001_G8A_THIN_CONFIG_V0_2"
+PROGRAM_NAME = "u001_g8a_thin_orchestrator_v0_3.py"
+PROGRAM_VERSION = "0.3"
+CONFIG_SCHEMA = "UDP001_G8A_THIN_CONFIG_V0_3"
 CONTRACT_VERSION = "0.1"
 PROFILE = "CAN_CSV_FRAMECOUNT_BATCH_V0_1"
 SOURCE_FOLDER_NAME = "00_SOURCE-READONLY"
@@ -662,10 +662,12 @@ def self_test() -> int:
     with tempfile.TemporaryDirectory() as temp_name:
         root = Path(temp_name)
         file_a = root / "a.txt"
-        file_a.write_text("abc\n", encoding="utf-8")
+        # Use exact bytes so the portability test is independent of Windows
+        # CRLF translation in text mode.
+        file_a.write_bytes(b"abc\n")
         check("T01_SHA256", sha256_file(file_a) == hashlib.sha256(b"abc\n").hexdigest())
         atomic_write_text(root / "atomic.txt", "ok\n")
-        check("T02_ATOMIC_TEXT", (root / "atomic.txt").read_text(encoding="utf-8") == "ok\n")
+        check("T02_ATOMIC_LF_BYTES", (root / "atomic.txt").read_bytes() == b"ok\n")
         value = {"b": 2, "a": 1}
         check("T03_CANONICAL_JSON", canonical_json(value) == '{"a":1,"b":2}')
         cfg = {"Schema": CONFIG_SCHEMA, "Safety": {}}
