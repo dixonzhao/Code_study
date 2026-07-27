@@ -1,0 +1,37 @@
+UDP001 PK01D1 — DEPENDENCY RETURN CORRECTION
+Date: 2026-07-27
+Execution environment: Windows CMD
+
+1. DOWNLOAD
+
+Download u001_packaging_dependency_return_v0_1.py.txt to:
+
+C-CODE\UDP001\04_TEMP
+
+Rename:
+
+ren .\UDP001\04_TEMP\u001_packaging_dependency_return_v0_1.py.txt u001_packaging_dependency_return_v0_1.py
+
+2. SELF-TEST
+
+python .\UDP001\04_TEMP\u001_packaging_dependency_return_v0_1.py --self-test
+
+Required:
+
+U001-PACKAGING-DEPENDENCY-RETURN-SELFTEST-PASS-8
+
+3. GENERATE RETURN FROM THE EXISTING JSON
+
+Run as one CMD line from C-CODE:
+
+python .\UDP001\04_TEMP\u001_packaging_dependency_return_v0_1.py --report .\UDP001\03_CASES\TC001_20260422\03_RETURN\PK01_PREFLIGHT_01\u001_packaging_preflight_report.json
+
+The program also saves u001_packaging_dependency_capsule.txt beside the JSON.
+
+4. RETURN
+
+Return only the four generated lines beginning with U001PKD1.
+
+No manual JSON inspection or manually assembled code is required.
+
+END

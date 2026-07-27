@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""Generate the missing dependency-name capsule from a PK01 preflight JSON."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import tempfile
+from pathlib import Path
+from typing import Sequence
+
+
+SELFTEST_TOKEN = "U001-PACKAGING-DEPENDENCY-RETURN-SELFTEST-PASS-8"
+OUTPUT_NAME = "u001_packaging_dependency_capsule.txt"
+
+
+class ReturnError(RuntimeError):
+    pass
+
+
+def atomic_write(path: Path, text: str) -> None:
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_bytes(text.encode("utf-8"))
+    temporary.replace(path)
+
+
+def load_report(path: Path) -> dict:
+    if not path.is_file():
+        raise ReturnError("REPORT_NOT_FOUND")
+    try:
+        report = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ReturnError("REPORT_INVALID_JSON") from exc
+    if report.get("Schema") != "UDP001_PACKAGING_PREFLIGHT_V0_1":
+        raise ReturnError("REPORT_SCHEMA_MISMATCH")
+    return report
+
+
+def build_capsule(report: dict) -> str:
+    summary = report.get("Summary", {})
+    environment = report.get("Environment", {})
+    pyinstaller = environment.get("PyInstaller", {})
+    dependencies = summary.get("ExternalImports")
+    if not isinstance(dependencies, list) or not all(isinstance(item, str) for item in dependencies):
+        raise ReturnError("EXTERNAL_IMPORTS_INVALID")
+    dependencies = sorted(set(dependencies))
+    dependency_text = ",".join(dependencies) if dependencies else "NONE"
+    pyinstaller_available = int(bool(pyinstaller.get("Available")))
+    pythonw_exists = int(bool(environment.get("PythonwExists")))
+    errors = int(not dependencies)
+    return (
+        "U001PKD1\n"
+        f"N-D{len(dependencies)}-P{pyinstaller_available}-Y{pythonw_exists}-X{errors}\n"
+        f"D-{dependency_text}\n"
+        f"C-{0 if errors == 0 else 7}\n"
+    )
+
+
+def run_report(path: Path, emit: bool = True) -> int:
+    capsule = build_capsule(load_report(path))
+    atomic_write(path.parent / OUTPUT_NAME, capsule)
+    if emit:
+        print(capsule, end="")
+    return 0 if capsule.rstrip().endswith("C-0") else 7
+
+
+def run_self_test() -> None:
+    passed = 0
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        report_path = root / "report.json"
+        report = {
+            "Schema": "UDP001_PACKAGING_PREFLIGHT_V0_1",
+            "Environment": {
+                "PythonwExists": True,
+                "PyInstaller": {"Available": False},
+            },
+            "Summary": {"ExternalImports": ["pandas"]},
+        }
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+        loaded = load_report(report_path)
+        passed += int(loaded["Schema"] == "UDP001_PACKAGING_PREFLIGHT_V0_1")
+        capsule = build_capsule(loaded)
+        passed += int(capsule.startswith("U001PKD1\n"))
+        passed += int("N-D1-P0-Y1-X0" in capsule)
+        passed += int("D-pandas" in capsule)
+        passed += int(capsule.endswith("C-0\n"))
+        passed += int(run_report(report_path, emit=False) == 0)
+        passed += int((root / OUTPUT_NAME).read_text(encoding="utf-8") == capsule)
+        try:
+            load_report(root / "absent.json")
+        except ReturnError:
+            passed += 1
+        if passed != 8:
+            raise AssertionError(f"SELFTEST_COUNT:{passed}")
+    print(SELFTEST_TOKEN)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="U001 packaging dependency return generator")
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--report")
+    args = parser.parse_args(argv)
+    if args.self_test:
+        run_self_test()
+        return 0
+    if args.report:
+        return run_report(Path(args.report))
+    parser.error("select --self-test or --report")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
