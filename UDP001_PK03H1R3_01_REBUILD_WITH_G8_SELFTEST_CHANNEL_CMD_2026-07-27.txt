@@ -1,0 +1,64 @@
+UDP001 PK03H1R3 - Controlled G8 self-test channel (Windows CMD)
+Date: 2026-07-27
+
+CONFIRMED CAUSE
+The previous package passed hosted self-tests for programs 1 through 7 and failed
+only at program 8, u001_g8a_thin_orchestrator_v0_5.py.
+
+G8A self-test T16 creates seven temporary Gate stubs and runs a synthetic end-to-end
+test through sys.executable. Runtime Host correctly rejected those temporary scripts
+because they are outside the nine-program production allowlist. This is a test-harness
+compatibility conflict, not a G8 algorithm failure and not a firewall/antivirus block.
+
+CONTROLLED CORRECTION
+Runtime Host v0.3 permits a temporary Gate fixture only when all conditions hold:
+- an approved G8A process was started with exactly --self-test;
+- the child process parent PID matches the authorizing G8A Host process;
+- the fixture is below the operating-system TEMP folder;
+- its basename matches one of the seven approved Gate program basenames.
+
+The normal production allowlist remains unchanged. The nine accepted U001 programs,
+Data Contract, algorithms, input files, and output schemas are not modified.
+
+DOWNLOAD THESE THREE FILES
+1. u001_portable_runtime_host_v0_3.py.txt
+2. u001_portable_host_package_builder_v0_4.py.txt
+3. This instruction file
+
+STEP 1 - COPY AND RENAME
+Put the first two files in UDP001\04_TEMP and remove only the final .txt suffix:
+
+u001_portable_runtime_host_v0_3.py
+u001_portable_host_package_builder_v0_4.py
+
+Keep older versions as history. Do not edit UDP001\01_PROGRAMS.
+
+STEP 2 - OPEN CMD AT C-CODE ROOT
+Use the existing activated venv.
+
+STEP 3 - SELF-TEST
+python .\UDP001\04_TEMP\u001_portable_runtime_host_v0_3.py --self-test
+python .\UDP001\04_TEMP\u001_portable_host_package_builder_v0_4.py --self-test
+
+Expected:
+U001-PORTABLE-RUNTIME-HOST-V03-SELFTEST-PASS-22
+U001-PORTABLE-HOST-PACKAGE-BUILDER-V04-SELFTEST-PASS-23
+
+STEP 4 - BUILD
+python .\UDP001\04_TEMP\u001_portable_host_package_builder_v0_4.py --build --udp001-root .\UDP001 --preflight-report .\UDP001\03_CASES\TC001_20260422\03_RETURN\PK01_PREFLIGHT_01\u001_packaging_preflight_report.json --host-source .\UDP001\04_TEMP\u001_portable_runtime_host_v0_3.py --out .\UDP001\05_PORTABLE_RELEASE
+
+Expected:
+U001PK03H1
+N-R1-D1-P9-H1-B1-E1-S9-Z1-M1-X0
+C-0
+
+STEP 5 - GUI SMOKE TEST
+Open:
+UDP001\05_PORTABLE_RELEASE\U001_Portable_v0_1\UDP001\00_LAUNCHER\U001_Workbench.exe
+
+If it opens, return:
+PK03H1R3-GUI-OPEN-OK
+
+IF BUILD FAILS
+Return only the U001PK03H1-ERROR line and C-code. Do not allow Copilot to edit the
+nine U001 programs, Runtime Host, Builder, validator, or Data Contract.
