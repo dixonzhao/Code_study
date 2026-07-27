@@ -1,0 +1,95 @@
+UDP001 PK03H1R4 - Frozen tkinter submodule correction (Windows CMD)
+Date: 2026-07-27
+
+CONFIRMED CAUSE
+The PK03H1 build passed all nine hosted --self-test programs, but real GUI creation
+failed because PyInstaller analyzed the Runtime Host entry point and did not discover
+the tkinter submodules imported only by the external runpy-loaded GUI.
+
+Missing frozen modules:
+- tkinter.filedialog
+- tkinter.messagebox
+- tkinter.ttk
+
+This is a packaging dependency-declaration defect. Do not modify the accepted GUI,
+the other eight U001 programs, Data Contract, algorithms, or program interfaces.
+
+CORRECTION
+- Runtime Host v0.4 explicitly imports the three tkinter submodules.
+- Builder v0.5 also declares the three PyInstaller hidden imports.
+- Runtime Host self-test verifies the required GUI APIs.
+
+DOWNLOAD THESE THREE FILES
+1. u001_portable_runtime_host_v0_4.py.txt
+2. u001_portable_host_package_builder_v0_5.py.txt
+3. This instruction file
+
+STEP 1 - COPY AND RENAME
+Put the first two files in UDP001\04_TEMP and remove only the final .txt suffix:
+
+u001_portable_runtime_host_v0_4.py
+u001_portable_host_package_builder_v0_5.py
+
+Keep previous versions as history. Do not edit UDP001\01_PROGRAMS.
+
+STEP 2 - ARCHIVE THE PREVIOUS C-0 BUILD
+Run from the C-CODE root in Windows CMD:
+
+move .\UDP001\05_PORTABLE_RELEASE .\UDP001\ARCH\PK03H1_BUILD_C0_PRE_GUI_IMPORT_FIX_20260727
+
+If the source folder does not exist, continue. If the destination already exists,
+stop and use a new archive suffix rather than overwriting it.
+
+STEP 3 - SELF-TEST
+Use the existing activated venv:
+
+python .\UDP001\04_TEMP\u001_portable_runtime_host_v0_4.py --self-test
+python .\UDP001\04_TEMP\u001_portable_host_package_builder_v0_5.py --self-test
+
+Expected:
+U001-PORTABLE-RUNTIME-HOST-V04-SELFTEST-PASS-25
+U001-PORTABLE-HOST-PACKAGE-BUILDER-V05-SELFTEST-PASS-25
+
+STEP 4 - REBUILD
+python .\UDP001\04_TEMP\u001_portable_host_package_builder_v0_5.py --build --udp001-root .\UDP001 --preflight-report .\UDP001\03_CASES\TC001_20260422\03_RETURN\PK01_PREFLIGHT_01\u001_packaging_preflight_report.json --host-source .\UDP001\04_TEMP\u001_portable_runtime_host_v0_4.py --out .\UDP001\05_PORTABLE_RELEASE
+
+Expected:
+U001PK03H1
+N-R1-D1-P9-H1-B1-E1-S9-Z1-M1-X0
+C-0
+
+STEP 5 - REAL GUI SMOKE
+Open:
+
+UDP001\05_PORTABLE_RELEASE\U001_Portable_v0_1\UDP001\00_LAUNCHER\U001_Workbench.exe
+
+Confirm:
+- GUI window opens;
+- no tkinter import dialog appears;
+- window remains responsive.
+
+STEP 6 - GUI G8A SELF-TEST
+Use the GUI Self Test action.
+
+Expected in GUI log:
+UDP001-G8A2V05-SELFTEST-PASS-16
+
+RETURN
+If all steps pass, return:
+
+U001PK03H1R4 N-B1-O1-S1-X0 C-0
+
+Where:
+- B1 = rebuild C-0;
+- O1 = real GUI opened;
+- S1 = GUI G8A self-test PASS-16;
+- X0 = no remaining blocking error.
+
+IF FAILURE
+Return only:
+- first exact error line or dialog text;
+- the failed step number;
+- C-7.
+
+Do not allow Copilot to modify the nine U001 programs, Runtime Host, Builder,
+validator, Data Contract, or algorithms during this correction.
