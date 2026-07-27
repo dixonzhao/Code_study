@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""Read-only diagnosis of the first failed PK03H1 hosted program self-test."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import tempfile
+from pathlib import Path
+from typing import Sequence
+
+
+PROGRAM_NAME = "u001_pk03h1_hosted_selftest_failure_probe_v0_1.py"
+PROGRAM_VERSION = "0.1"
+SELFTEST_TOKEN = "U001-PK03H1-HOSTED-SELFTEST-FAILURE-PROBE-PASS-12"
+PACKAGE_NAME = "U001_Portable_v0_1"
+TARGET_NAME = "u001_foundation_core_v0_1.py"
+
+
+class ProbeError(RuntimeError):
+    pass
+
+
+def atomic_write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_bytes(text.encode("utf-8"))
+    temporary.replace(path)
+
+
+def latest_build_root(udp001_root: Path) -> Path:
+    values = sorted(
+        (path for path in (udp001_root / "04_TEMP").glob("PK03_HOST_BUILD_*") if path.is_dir()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if not values:
+        raise ProbeError("PK03_HOST_BUILD_NOT_FOUND")
+    return values[0]
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
+
+
+def last_nonempty(text: str) -> str:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines[-1] if lines else ""
+
+
+def compact(tag: str, text: str) -> str:
+    value = last_nonempty(text) or "EMPTY"
+    value = re.sub(r"\s+", "_", value)
+    value = re.sub(r"[^A-Za-z0-9_.:+\\/-]", "?", value)
+    return f"M-{tag}-{value[:160]}"
+
+
+def rerun(executable: Path, target: Path) -> dict:
+    try:
+        result = subprocess.run(
+            [str(executable), str(target), "--self-test"],
+            cwd=str(target.parent),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=300,
+            shell=False,
+        )
+        return {"ReturnCode": result.returncode, "Stdout": result.stdout, "Stderr": result.stderr}
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"ReturnCode": 999, "Stdout": "", "Stderr": f"{type(exc).__name__}:{exc}"}
+
+
+def run_probe(udp001_root: Path, out: Path) -> int:
+    if not udp001_root.is_dir() or udp001_root.name != "UDP001":
+        raise ProbeError("UDP001_ROOT_INVALID")
+    if out.exists() and (not out.is_dir() or any(out.iterdir())):
+        raise ProbeError("OUTPUT_MUST_BE_ABSENT_OR_EMPTY")
+    out.mkdir(parents=True, exist_ok=True)
+    build = latest_build_root(udp001_root)
+    package = build / "release_stage" / PACKAGE_NAME
+    executable = package / "UDP001" / "00_LAUNCHER" / "U001_Workbench.exe"
+    target = package / "UDP001" / "01_PROGRAMS" / TARGET_NAME
+    evidence = package / "_internal" / "evidence"
+    old_stdout = read_text(evidence / "hosted_u001_foundation_core_v0_1_stdout.txt")
+    old_stderr = read_text(evidence / "hosted_u001_foundation_core_v0_1_stderr.txt")
+    host_probe = read_text(evidence / "u001_runtime_host_probe.txt")
+    replay = rerun(executable, target) if executable.is_file() and target.is_file() else {
+        "ReturnCode": 998, "Stdout": "", "Stderr": "EXECUTABLE_OR_TARGET_MISSING"
+    }
+    flags = {
+        "Build": build.is_dir(),
+        "Executable": executable.is_file(),
+        "Target": target.is_file(),
+        "HostProbe": host_probe.rstrip().endswith("C-0"),
+        "OldStdout": bool(old_stdout),
+        "OldStderr": bool(old_stderr),
+        "ReplayStdout": bool(replay["Stdout"]),
+        "ReplayStderr": bool(replay["Stderr"]),
+        "ReplayPass": replay["ReturnCode"] == 0 and "PASS" in replay["Stdout"].upper(),
+    }
+    report = {
+        "Schema": "UDP001_PK03H1_HOSTED_SELFTEST_FAILURE_PROBE_V0_1",
+        "BuildRoot": str(build),
+        "Flags": flags,
+        "OldStdout": old_stdout,
+        "OldStderr": old_stderr,
+        "HostProbe": host_probe,
+        "Replay": replay,
+    }
+    atomic_write(out / "u001_pk03h1_hosted_selftest_failure_probe_report.json", json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    if replay["Stderr"]:
+        memo = compact("RE", replay["Stderr"])
+    elif replay["Stdout"]:
+        memo = compact("RO", replay["Stdout"])
+    elif old_stderr:
+        memo = compact("OE", old_stderr)
+    elif old_stdout:
+        memo = compact("OO", old_stdout)
+    else:
+        memo = "M-IO-EMPTY"
+    capsule = (
+        "U001PK03H1D1\n"
+        f"N-B{int(flags['Build'])}-E{int(flags['Executable'])}-T{int(flags['Target'])}-"
+        f"H{int(flags['HostProbe'])}-OO{int(flags['OldStdout'])}-OE{int(flags['OldStderr'])}-"
+        f"RO{int(flags['ReplayStdout'])}-RE{int(flags['ReplayStderr'])}-P{int(flags['ReplayPass'])}\n"
+        f"Z-OO{len(old_stdout)}-OE{len(old_stderr)}-RO{len(replay['Stdout'])}-RE{len(replay['Stderr'])}\n"
+        f"RC-{replay['ReturnCode']}\n"
+        f"{memo}\n"
+        "C-0\n"
+    )
+    atomic_write(out / "u001_pk03h1_hosted_selftest_failure_probe_capsule.txt", capsule)
+    print(capsule, end="")
+    return 0
+
+
+def run_self_test() -> None:
+    passed = 0
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "UDP001"
+        first = root / "04_TEMP" / "PK03_HOST_BUILD_1"
+        second = root / "04_TEMP" / "PK03_HOST_BUILD_2"
+        first.mkdir(parents=True)
+        second.mkdir(parents=True)
+        passed += int(latest_build_root(root) in {first, second})
+        text = "a\n\nb\n"
+        passed += int(last_nonempty(text) == "b")
+        passed += int(compact("X", "bad error") == "M-X-bad_error")
+        file = second / "x.txt"
+        atomic_write(file, "x")
+        passed += int(read_text(file) == "x")
+        passed += int(read_text(second / "missing") == "")
+        command = rerun(Path("missing"), Path("missing"))
+        passed += int(command["ReturnCode"] != 0)
+        passed += int(command["Stdout"] == "")
+        passed += int(bool(command["Stderr"]))
+        passed += int(PROGRAM_NAME.endswith("v0_1.py"))
+        passed += int(PROGRAM_VERSION == "0.1")
+        passed += int(PACKAGE_NAME == "U001_Portable_v0_1")
+        passed += int(TARGET_NAME.endswith("v0_1.py"))
+    if passed != 12:
+        raise AssertionError(f"SELFTEST_COUNT:{passed}")
+    print(SELFTEST_TOKEN)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Diagnose PK03H1 hosted self-test failure")
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--probe", action="store_true")
+    parser.add_argument("--udp001-root")
+    parser.add_argument("--out")
+    args = parser.parse_args(argv)
+    if args.self_test:
+        run_self_test()
+        return 0
+    if args.probe:
+        if not args.udp001_root or not args.out:
+            parser.error("--probe requires --udp001-root --out")
+        try:
+            return run_probe(Path(args.udp001_root), Path(args.out))
+        except ProbeError as exc:
+            print(f"U001PK03H1D1-ERROR:{exc}")
+            print("C-7")
+            return 7
+    parser.error("select --self-test or --probe")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
