@@ -1,0 +1,163 @@
+UDP001 G10A2 - ACCEPTANCE AND EXECUTION PROTOCOL v0.2
+Date: 2026-07-28
+Status: AUTHORITATIVE EXECUTION ORDER FOR COMPANY PC
+
+======================================================================
+1. GENERATION
+======================================================================
+
+In a fresh Company Copilot chat, provide only the three G10A RESET v0.2 design
+files.
+
+Required Copilot output:
+
+u001_auto_discovery_profile_builder_v0_2.py
+
+Copilot must return the actual downloadable Python file, not only chat text.
+
+Save initially as:
+
+C-CODE\UDP001\04_TEMP\u001_auto_discovery_profile_builder_v0_2.py
+
+Do not supply or patch the rejected v0.1 program.
+
+======================================================================
+2. SELF-TEST FROM CMD
+======================================================================
+
+Run from C-CODE in CMD:
+
+python .\UDP001\04_TEMP\u001_auto_discovery_profile_builder_v0_2.py --self-test
+
+Required exact final line:
+
+UDP001-G10A2-SELFTEST-PASS-20
+
+The 20 deterministic tests must cover:
+
+T01 import safety;
+T02 exact required catalog-column validation;
+T03 MATCHED + complete technical eligibility;
+T04 SOURCE_ONLY/DBC_ONLY/non-MATCHED exclusions;
+T05 incomplete-source exclusion;
+T06 invalid Channel/CAN ID/blank SignalName exclusions;
+T07 CanonicalName normalization;
+T08 CanonicalName collision blocks;
+T09 missing FrameCount blocks;
+T10 duplicate FrameCount blocks;
+T11 exact FrameCount semantic override and Required=1;
+T12 invalid proposals receive counted documented fallbacks;
+T13 exact G2 schema/membership/Selected/Required;
+T14 exact G4 schema and NONE-validity provisional policy;
+T15 exact G5 schema and aggregation proposals;
+T16 exact G6 schema, candidate-only membership and NONE hold;
+T17 deterministic batch ordering, width and final partial batch;
+T18 output CSV hashes/rows/columns and manifest/capsule agreement;
+T19 reject inconsistent C705/E706/X406/K1/V706/B23;
+T20 accept coherent C1112/E706/X406/K1/V705/B23 at batch size 32.
+
+Stop on any self-test failure.  Do not modify Gate 1-G9 to make G10A pass.
+
+======================================================================
+3. LOCATE THE ACCEPTED GATE 1 CATALOG
+======================================================================
+
+Case identity:
+
+TC001_20260422
+
+Input is the already accepted Gate 1 catalog generated from the Case:
+
+udp001_g1_signal_catalog.csv
+
+Company Copilot may inspect C-CODE\UDP001\03_CASES\TC001_20260422 and tell the
+user its exact existing path.  Do not move, rename or regenerate the catalog
+merely to satisfy the command.
+
+The Raw CAN and DBC files are not direct G10A inputs.
+
+======================================================================
+4. BUILD FROM CMD
+======================================================================
+
+Target output folder:
+
+C-CODE\UDP001\03_CASES\TC001_20260422\01_CONFIG\AUTO_DISCOVERY_ALL_V0_2
+
+Before running, confirm this target is absent or empty.  If it already contains
+files, stop and report; do not use --overwrite without Codex approval.
+
+Run from C-CODE in CMD on one line after replacing only CATALOG_PATH:
+
+python .\UDP001\04_TEMP\u001_auto_discovery_profile_builder_v0_2.py --build --catalog "CATALOG_PATH" --out ".\UDP001\03_CASES\TC001_20260422\01_CONFIG\AUTO_DISCOVERY_ALL_V0_2" --profile-id "AUTO_DISCOVERY_ALL_V0_2" --frame-key-channel 2 --frame-key-can-id 0x620 --frame-key-signal FrameCount --batch-size 32
+
+Do not run the full G8A processing chain with this all-signal configuration.
+That belongs to G10B bounded-width processing.
+
+======================================================================
+5. READ-ONLY VALIDATION FROM CMD
+======================================================================
+
+Run from C-CODE:
+
+python .\UDP001\04_TEMP\u001_auto_discovery_profile_builder_v0_2.py --validate-output --out ".\UDP001\03_CASES\TC001_20260422\01_CONFIG\AUTO_DISCOVERY_ALL_V0_2"
+
+Required form of final line:
+
+UDP001-G10A2-VALIDATE-PASS C#-E#-X#-K1-V#-B#-F#-H0
+
+The validator is read-only.  If it fails, preserve the folder and report the
+first exact failure.  Do not patch the validator merely to accept the output.
+
+======================================================================
+6. HUMAN ACCEPTANCE CHECK
+======================================================================
+
+Confirm only these high-value facts:
+
+- exactly eight required output files exist;
+- one FrameCount row is Required=1;
+- every other eligible row is Selected=1 and Required=0;
+- C = E + X;
+- K = 1;
+- V = E - 1;
+- B = ceil(V/32);
+- no G6 row uses a hold other than NONE;
+- no G4 row uses a validity rule other than NONE;
+- validator and capsule both indicate success.
+
+No manual inspection of hundreds of signal rows is required.
+
+======================================================================
+7. COMPACT RETURN TO CODEX
+======================================================================
+
+Return exactly three short lines on success:
+
+G10A2ST-UDP001-G10A2-SELFTEST-PASS-20
+G10A2R1-<exact udp001_g10a_return_capsule.txt line>
+G10A2V1-<exact validate-output final line>
+
+Use at most three additional short memos only on failure:
+
+MEMO1-<first exact failure>
+MEMO2-<filename or stage>
+MEMO3-<whether any artifact was modified>
+
+Do not manually retype tables, paths, hashes or long logs.
+
+======================================================================
+8. ACCEPTANCE DECISION
+======================================================================
+
+Codex accepts G10A2 only when:
+
+- self-test is exact PASS-20;
+- build capsule is internally coherent and C-0;
+- read-only validation passes;
+- no input or existing U001 program was modified.
+
+After acceptance, wait.  Codex will issue promotion/move instructions and the
+separate G10B design.  G10A2 acceptance does not authorize G10B implementation.
+
+END OF PROTOCOL
