@@ -1,0 +1,29 @@
+UDP001 PK03D2 - PANDAS SOURCE/COPY/PATH DIAGNOSIS
+Date: 2026-07-27
+Environment: Windows CMD, started from C-CODE
+Mode: READ ONLY / NO RUNTIME COPY
+
+1. Download:
+
+u001_pk03_pandas_path_probe_v0_1.py.txt
+
+Place it in C-CODE\UDP001\04_TEMP and rename:
+
+ren .\UDP001\04_TEMP\u001_pk03_pandas_path_probe_v0_1.py.txt u001_pk03_pandas_path_probe_v0_1.py
+
+2. Self-test:
+
+python .\UDP001\04_TEMP\u001_pk03_pandas_path_probe_v0_1.py --self-test
+
+Required:
+
+U001-PK03-PANDAS-PATH-PROBE-SELFTEST-PASS-14
+
+3. Run as one CMD line:
+
+python .\UDP001\04_TEMP\u001_pk03_pandas_path_probe_v0_1.py --probe --udp001-root .\UDP001 --runtime-report .\UDP001\03_CASES\TC001_20260422\03_RETURN\PK03_RUNTIME_PROBE_01\u001_portable_runtime_probe_report.json --out .\UDP001\03_CASES\TC001_20260422\03_RETURN\PK03_PANDAS_DIAG_01
+
+This checks source pandas, copied pandas files, target sys.path, and
+normal versus isolated imports. It does not copy or modify the runtime.
+
+4. Return only the five U001PK03D2 lines.
