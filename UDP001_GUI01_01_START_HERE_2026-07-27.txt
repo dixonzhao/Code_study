@@ -1,0 +1,139 @@
+U001 DATA PREPARATION WORKBENCH GUI v0.1 — START HERE
+Date: 2026-07-27
+Status: GUI ACCEPTANCE CANDIDATE
+
+======================================================================
+1. PURPOSE
+======================================================================
+
+This is the first user-facing U001 GUI. It controls the accepted G8A2 backend
+without copying or changing any Gate 1–Gate 7 data algorithm.
+
+The first acceptance objective is one clean GUI-driven replay of the same
+100,000-row bounded reference scope into 03_RUN_B_REPLAY.
+
+======================================================================
+2. THREE DOWNLOADED FILES
+======================================================================
+
+1. u001_data_preparation_workbench_gui_v0_1.py.txt
+2. UDP001_GUI01_01_START_HERE_2026-07-27.txt
+3. UDP001_GUI01_02_SPEC_AND_RETURN_2026-07-27.txt
+
+Put all three in:
+
+C-CODE\UDP001\04_TEMP\
+
+Rename only:
+
+u001_data_preparation_workbench_gui_v0_1.py.txt
+
+to:
+
+u001_data_preparation_workbench_gui_v0_1.py
+
+Run commands from C-CODE.
+
+======================================================================
+3. PROGRAM SELF-TEST
+======================================================================
+
+python .\UDP001\04_TEMP\u001_data_preparation_workbench_gui_v0_1.py --self-test
+
+Required exact result:
+
+U001-GUI-SELFTEST-PASS-12
+
+Stop if it fails. Do not ask Copilot to change the GUI.
+
+======================================================================
+4. START THE GUI
+======================================================================
+
+python .\UDP001\04_TEMP\u001_data_preparation_workbench_gui_v0_1.py
+
+The GUI should auto-detect:
+
+- UDP001 root;
+- TC001_20260422 Case root;
+- u001_g8a_thin_orchestrator_v0_4.py in 01_PROGRAMS;
+- fixed source aliases under 00_SOURCE-READONLY.
+
+If a field is blank, click Auto-detect current layout once.
+
+======================================================================
+5. ACCEPTANCE WORKFLOW — USE THE BUTTONS IN ORDER
+======================================================================
+
+Before starting, the following paths must not already exist as non-empty
+accepted output:
+
+- 01_CONFIG\u001_gui_replay_config_v0_1.json
+- 05_RETURN\U001_GUI_PREFLIGHT_01
+- 03_RUN_B_REPLAY
+
+If an old failed attempt exists, move the complete folder to ARCH. Do not
+delete accepted evidence and do not overwrite.
+
+GUI values:
+
+Dataset ID:
+TC001_20260422
+
+Run ID:
+TC001_20260422_GUI_REPLAY
+
+Segment ID:
+SEGMENT_001
+
+Source ID:
+SOURCE_001
+
+Maximum Raw rows:
+100000
+
+Click in exact order:
+
+1. Orchestrator Self-test
+2. Create Config
+3. Preflight
+4. Run
+
+Wait for PASS after each step. The Run button remains locked until Preflight
+passes in the current GUI session.
+
+During Run, the progress bar reads the orchestration manifest and advances
+from 0/9 to 9/9. The GUI does not estimate fake percentage progress inside a
+Gate.
+
+======================================================================
+6. RETURN
+======================================================================
+
+After Run PASS, return two compact capsules.
+
+GUI capsule:
+
+.\UDP001\03_CASES\TC001_20260422\03_RUN_B_REPLAY\CONTROL_OUTPUT\u001_gui_acceptance_capsule.txt
+
+Backend capsule:
+
+.\UDP001\03_CASES\TC001_20260422\03_RUN_B_REPLAY\CONTROL_OUTPUT\udp001_g8a2_return_capsule.txt
+
+Expected GUI shape:
+
+U001GUI1
+N-T1-C1-P1-R1-S9-L1-X0
+C-0
+
+Do not move the GUI to 01_PROGRAMS until Codex accepts both capsules.
+
+======================================================================
+7. CANCEL SAFETY
+======================================================================
+
+Cancel terminates only the GUI-started process tree. Partial output is retained
+as FAILURE evidence and must not be reused or accepted. Move a cancelled run
+folder to ARCH before choosing a new empty output path.
+
+END

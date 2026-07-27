@@ -1,0 +1,696 @@
+#!/usr/bin/env python3
+"""U001 Data Preparation Workbench GUI v0.1.
+
+Thin user-facing control layer over the accepted G8A2 orchestrator.  This GUI
+does not implement or modify CAN decoding, FrameCount assignment, validity,
+aggregation, hold, package assembly, or analysis algorithms.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import queue
+import re
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, Sequence
+
+
+PROGRAM_NAME = "u001_data_preparation_workbench_gui_v0_1.py"
+PROGRAM_VERSION = "0.1"
+ORCHESTRATOR_NAME = "u001_g8a_thin_orchestrator_v0_4.py"
+SELFTEST_TOKEN = "U001-GUI-SELFTEST-PASS-12"
+SOURCE_FILES = ("CANDump.csv", "DBC1.dbc", "DBC2.dbc")
+CASE_SOURCE_FOLDER = "00_SOURCE-READONLY"
+EXPECTED_ORCHESTRATOR_SELFTEST = "UDP001-G8A2-SELFTEST-PASS-16"
+
+
+class GuiControlError(RuntimeError):
+    pass
+
+
+def now_tag() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def discover_udp001_root(script_path: Path) -> Path:
+    resolved = script_path.resolve()
+    for parent in (resolved.parent, *resolved.parents):
+        if parent.name == "UDP001":
+            return parent
+    return resolved.parent.parent
+
+
+def valid_case_root(path: Path) -> bool:
+    source = path / CASE_SOURCE_FOLDER
+    return path.is_dir() and all((source / name).is_file() for name in SOURCE_FILES)
+
+
+def discover_case_root(udp001_root: Path) -> Path | None:
+    cases = udp001_root / "03_CASES"
+    if not cases.is_dir():
+        return None
+    matches = sorted(path for path in cases.iterdir() if path.is_dir() and valid_case_root(path))
+    if len(matches) == 1:
+        return matches[0]
+    preferred = cases / "TC001_20260422"
+    return preferred if preferred in matches else None
+
+
+def require_file(path: Path, label: str) -> None:
+    if not path.is_file():
+        raise GuiControlError(f"{label} not found: {path}")
+
+
+def require_case(case_root: Path) -> None:
+    if not valid_case_root(case_root):
+        raise GuiControlError(
+            "Case source folder must contain CANDump.csv, DBC1.dbc, and DBC2.dbc"
+        )
+
+
+def is_empty_or_absent(path: Path) -> bool:
+    return not path.exists() or (path.is_dir() and not any(path.iterdir()))
+
+
+def command_selftest(python_exe: str, orchestrator: Path) -> list[str]:
+    return [python_exe, str(orchestrator), "--self-test"]
+
+
+def command_make_config(
+    python_exe: str,
+    orchestrator: Path,
+    udp001_root: Path,
+    case_root: Path,
+    config_path: Path,
+    dataset_id: str,
+    run_id: str,
+    segment_id: str,
+    source_id: str,
+    max_source_rows: int,
+) -> list[str]:
+    return [
+        python_exe, str(orchestrator), "--make-config",
+        "--udp001-root", str(udp001_root),
+        "--case-root", str(case_root),
+        "--out", str(config_path),
+        "--dataset-id", dataset_id,
+        "--run-id", run_id,
+        "--segment-id", segment_id,
+        "--source-id", source_id,
+        "--max-source-rows", str(max_source_rows),
+    ]
+
+
+def command_preflight(
+    python_exe: str, orchestrator: Path, config_path: Path, out: Path
+) -> list[str]:
+    return [
+        python_exe, str(orchestrator), "--preflight",
+        "--config", str(config_path), "--out", str(out),
+    ]
+
+
+def command_run(
+    python_exe: str, orchestrator: Path, config_path: Path, out_root: Path
+) -> list[str]:
+    return [
+        python_exe, str(orchestrator), "--run",
+        "--config", str(config_path), "--out-root", str(out_root),
+    ]
+
+
+def parse_final_code(text: str) -> int | None:
+    matches = re.findall(r"(?m)^C-(\d+)\s*$", text)
+    return int(matches[-1]) if matches else None
+
+
+def parse_stage_count(text: str) -> int:
+    match = re.search(r"(?m)^N-S(\d+)-P\d+", text)
+    return int(match.group(1)) if match else 0
+
+
+def make_gui_capsule(
+    selftest_ok: bool,
+    config_ok: bool,
+    preflight_ok: bool,
+    run_ok: bool,
+    stages: int,
+    log_ok: bool,
+) -> str:
+    errors = sum(
+        not value
+        for value in (selftest_ok, config_ok, preflight_ok, run_ok, stages == 9, log_ok)
+    )
+    code = 0 if errors == 0 else 1
+    return (
+        "U001GUI1\n"
+        f"N-T{int(selftest_ok)}-C{int(config_ok)}-P{int(preflight_ok)}-R{int(run_ok)}-S{stages}-L{int(log_ok)}-X{errors}\n"
+        f"C-{code}\n"
+    )
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(path.name + ".tmp")
+    temp.write_bytes(text.encode("utf-8"))
+    temp.replace(path)
+
+
+@dataclass
+class ProcessResult:
+    action: str
+    command: list[str]
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+class WorkbenchApp:
+    def __init__(self, root, script_path: Path):
+        import tkinter as tk
+        from tkinter import filedialog, messagebox, ttk
+
+        self.tk = tk
+        self.ttk = ttk
+        self.filedialog = filedialog
+        self.messagebox = messagebox
+        self.root = root
+        self.script_path = script_path.resolve()
+        self.events: queue.Queue[tuple] = queue.Queue()
+        self.process: subprocess.Popen[str] | None = None
+        self.worker: threading.Thread | None = None
+        self.current_action = ""
+        self.current_run_root: Path | None = None
+        self.cancel_requested = False
+        self.session_selftest_ok = False
+        self.session_config_ok = False
+        self.session_preflight_ok = False
+        self.session_run_ok = False
+        self.session_log_ok = False
+        self.session_stage_count = 0
+
+        self.root.title("U001 Data Preparation Workbench v0.1")
+        self.root.minsize(980, 720)
+        self.root.geometry("1180x820")
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        udp_root = discover_udp001_root(self.script_path)
+        case_root = discover_case_root(udp_root)
+        orchestrator = udp_root / "01_PROGRAMS" / ORCHESTRATOR_NAME
+        case_text = str(case_root) if case_root else ""
+        config_default = (
+            case_root / "01_CONFIG" / "u001_gui_replay_config_v0_1.json"
+            if case_root else Path()
+        )
+        run_default = case_root / "03_RUN_B_REPLAY" if case_root else Path()
+        preflight_default = (
+            case_root / "05_RETURN" / "U001_GUI_PREFLIGHT_01" if case_root else Path()
+        )
+
+        self.vars = {
+            "udp_root": tk.StringVar(value=str(udp_root)),
+            "case_root": tk.StringVar(value=case_text),
+            "orchestrator": tk.StringVar(value=str(orchestrator)),
+            "config": tk.StringVar(value=str(config_default) if case_root else ""),
+            "preflight_out": tk.StringVar(value=str(preflight_default) if case_root else ""),
+            "run_out": tk.StringVar(value=str(run_default) if case_root else ""),
+            "dataset_id": tk.StringVar(value=case_root.name if case_root else "TC001_20260422"),
+            "run_id": tk.StringVar(value=(case_root.name + "_GUI_REPLAY") if case_root else "TC001_20260422_GUI_REPLAY"),
+            "segment_id": tk.StringVar(value="SEGMENT_001"),
+            "source_id": tk.StringVar(value="SOURCE_001"),
+            "max_rows": tk.StringVar(value="100000"),
+            "status": tk.StringVar(value="Ready — verify paths, then run Orchestrator Self-test"),
+            "stage": tk.StringVar(value="0 / 9"),
+        }
+        self.build_ui()
+        self.root.after(150, self.poll_events)
+
+    def build_ui(self) -> None:
+        ttk = self.ttk
+        outer = ttk.Frame(self.root, padding=12)
+        outer.pack(fill="both", expand=True)
+
+        title = ttk.Label(outer, text="U001 Data Preparation Workbench", font=("Segoe UI", 18, "bold"))
+        title.pack(anchor="w")
+        ttk.Label(
+            outer,
+            text="Thin GUI over the accepted G8A2 backend — no data algorithm is implemented here.",
+        ).pack(anchor="w", pady=(0, 10))
+
+        paths = ttk.LabelFrame(outer, text="Workspace and Case", padding=8)
+        paths.pack(fill="x")
+        path_rows = (
+            ("UDP001 root", "udp_root", "dir"),
+            ("Case root", "case_root", "dir"),
+            ("G8A2 orchestrator", "orchestrator", "file"),
+            ("Config JSON", "config", "save"),
+            ("Preflight output", "preflight_out", "dir"),
+            ("Run output", "run_out", "dir"),
+        )
+        for row, (label, key, kind) in enumerate(path_rows):
+            ttk.Label(paths, text=label, width=20).grid(row=row, column=0, sticky="w", padx=(0, 6), pady=3)
+            ttk.Entry(paths, textvariable=self.vars[key]).grid(row=row, column=1, sticky="ew", pady=3)
+            ttk.Button(paths, text="Browse", command=lambda k=key, t=kind: self.browse(k, t)).grid(
+                row=row, column=2, padx=(6, 0), pady=3
+            )
+        paths.columnconfigure(1, weight=1)
+        ttk.Button(paths, text="Auto-detect current layout", command=self.auto_detect).grid(
+            row=len(path_rows), column=1, sticky="e", pady=(6, 0)
+        )
+
+        identity = ttk.LabelFrame(outer, text="Run identity and bounded test scope", padding=8)
+        identity.pack(fill="x", pady=(10, 0))
+        identity_fields = (
+            ("Dataset ID", "dataset_id"), ("Run ID", "run_id"),
+            ("Segment ID", "segment_id"), ("Source ID", "source_id"),
+            ("Maximum Raw rows (0 = full source)", "max_rows"),
+        )
+        for column, (label, key) in enumerate(identity_fields):
+            frame = ttk.Frame(identity)
+            frame.grid(row=0, column=column, sticky="ew", padx=4)
+            ttk.Label(frame, text=label).pack(anchor="w")
+            ttk.Entry(frame, textvariable=self.vars[key], width=22).pack(fill="x")
+            identity.columnconfigure(column, weight=1)
+
+        actions = ttk.LabelFrame(outer, text="Controlled execution", padding=8)
+        actions.pack(fill="x", pady=(10, 0))
+        buttons = (
+            ("1  Orchestrator Self-test", self.do_selftest),
+            ("2  Create Config", self.do_create_config),
+            ("3  Preflight", self.do_preflight),
+            ("4  Run", self.do_run),
+            ("Cancel", self.do_cancel),
+            ("Open output", self.open_output),
+        )
+        self.action_buttons = []
+        for column, (text, command) in enumerate(buttons):
+            button = ttk.Button(actions, text=text, command=command)
+            button.grid(row=0, column=column, padx=4, sticky="ew")
+            actions.columnconfigure(column, weight=1)
+            self.action_buttons.append(button)
+
+        progress_frame = ttk.Frame(outer)
+        progress_frame.pack(fill="x", pady=(10, 0))
+        ttk.Label(progress_frame, textvariable=self.vars["status"]).pack(anchor="w")
+        self.progress = ttk.Progressbar(progress_frame, maximum=9, mode="determinate")
+        self.progress.pack(side="left", fill="x", expand=True, pady=(4, 0))
+        ttk.Label(progress_frame, textvariable=self.vars["stage"], width=8).pack(side="right", padx=(8, 0))
+
+        log_frame = ttk.LabelFrame(outer, text="Execution log", padding=6)
+        log_frame.pack(fill="both", expand=True, pady=(10, 0))
+        self.log = self.tk.Text(log_frame, wrap="word", height=18, font=("Consolas", 10))
+        scroll = ttk.Scrollbar(log_frame, command=self.log.yview)
+        self.log.configure(yscrollcommand=scroll.set)
+        self.log.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.append_log("GUI started. Source files remain read-only.\n")
+
+    def browse(self, key: str, kind: str) -> None:
+        current = self.vars[key].get().strip()
+        initial = str(Path(current).parent if current else Path.cwd())
+        if kind == "file":
+            value = self.filedialog.askopenfilename(initialdir=initial, filetypes=[("Python", "*.py"), ("All", "*.*")])
+        elif kind == "save":
+            value = self.filedialog.asksaveasfilename(
+                initialdir=initial, defaultextension=".json", filetypes=[("JSON", "*.json")]
+            )
+        else:
+            value = self.filedialog.askdirectory(initialdir=initial)
+        if value:
+            self.vars[key].set(value)
+
+    def auto_detect(self) -> None:
+        udp = Path(self.vars["udp_root"].get()).resolve()
+        case = discover_case_root(udp)
+        self.vars["orchestrator"].set(str(udp / "01_PROGRAMS" / ORCHESTRATOR_NAME))
+        if case:
+            self.vars["case_root"].set(str(case))
+            self.vars["dataset_id"].set(case.name)
+            self.vars["run_id"].set(case.name + "_GUI_REPLAY")
+            self.vars["config"].set(str(case / "01_CONFIG" / "u001_gui_replay_config_v0_1.json"))
+            self.vars["preflight_out"].set(str(case / "05_RETURN" / "U001_GUI_PREFLIGHT_01"))
+            self.vars["run_out"].set(str(case / "03_RUN_B_REPLAY"))
+            self.vars["status"].set("Layout detected")
+        else:
+            self.vars["status"].set("No unique prepared Case detected — select Case root")
+
+    def append_log(self, text: str) -> None:
+        self.log.insert("end", text)
+        self.log.see("end")
+
+    def set_busy(self, busy: bool) -> None:
+        state = "disabled" if busy else "normal"
+        for button in self.action_buttons[:4]:
+            button.configure(state=state)
+
+    def paths(self) -> tuple[Path, Path, Path, Path, Path, Path]:
+        return tuple(
+            Path(self.vars[key].get().strip()).resolve()
+            for key in ("udp_root", "case_root", "orchestrator", "config", "preflight_out", "run_out")
+        )
+
+    def validate_common(self) -> tuple[Path, Path, Path, Path, Path, Path]:
+        udp, case, orchestrator, config, preflight, run_out = self.paths()
+        if udp.name != "UDP001" or not udp.is_dir():
+            raise GuiControlError("Select the UDP001 root folder")
+        require_case(case)
+        require_file(orchestrator, "G8A2 orchestrator")
+        if orchestrator.name != ORCHESTRATOR_NAME:
+            raise GuiControlError(f"Orchestrator must be {ORCHESTRATOR_NAME}")
+        return udp, case, orchestrator, config, preflight, run_out
+
+    def max_rows(self) -> int:
+        try:
+            value = int(self.vars["max_rows"].get().strip())
+        except ValueError as exc:
+            raise GuiControlError("Maximum Raw rows must be an integer") from exc
+        if value < 0:
+            raise GuiControlError("Maximum Raw rows must be 0 or greater")
+        return value
+
+    def start_process(self, action: str, command: list[str], monitor_run: Path | None = None) -> None:
+        if self.worker and self.worker.is_alive():
+            raise GuiControlError("Another action is still running")
+        self.current_action = action
+        self.current_run_root = monitor_run
+        self.cancel_requested = False
+        self.set_busy(True)
+        self.vars["status"].set(f"Running: {action}")
+        if action != "run":
+            self.progress.configure(mode="indeterminate")
+            self.progress.start(10)
+        else:
+            self.progress.stop()
+            self.progress.configure(mode="determinate", value=0)
+            self.vars["stage"].set("0 / 9")
+        self.append_log("\n> " + subprocess.list2cmdline(command) + "\n")
+        self.worker = threading.Thread(
+            target=self.process_worker, args=(action, command, monitor_run), daemon=True
+        )
+        self.worker.start()
+
+    def process_worker(self, action: str, command: list[str], monitor_run: Path | None) -> None:
+        kwargs = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "shell": False,
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+        try:
+            self.process = subprocess.Popen(command, **kwargs)
+            last_stage = -1
+            while self.process.poll() is None:
+                if action == "run" and monitor_run is not None:
+                    stage = self.read_manifest_stage_count(monitor_run)
+                    if stage != last_stage:
+                        self.events.put(("progress", stage))
+                        last_stage = stage
+                time.sleep(0.35)
+            stdout, stderr = self.process.communicate()
+            result = ProcessResult(action, command, self.process.returncode, stdout, stderr)
+            self.events.put(("result", result))
+        except Exception as exc:
+            self.events.put(("worker_error", action, str(exc)))
+        finally:
+            self.process = None
+
+    @staticmethod
+    def read_manifest_stage_count(run_root: Path) -> int:
+        path = run_root / "CONTROL_OUTPUT" / "u001_g8a2_orchestration_manifest.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+            stages = data.get("Stages", [])
+            return len(stages) if isinstance(stages, list) else 0
+        except (OSError, json.JSONDecodeError):
+            return 0
+
+    def do_selftest(self) -> None:
+        try:
+            _, _, orchestrator, _, _, _ = self.validate_common()
+            self.start_process("selftest", command_selftest(sys.executable, orchestrator))
+        except Exception as exc:
+            self.show_error(exc)
+
+    def do_create_config(self) -> None:
+        try:
+            udp, case, orchestrator, config, _, _ = self.validate_common()
+            if not self.session_selftest_ok:
+                raise GuiControlError("Create Config is locked until Orchestrator Self-test passes")
+            if config.exists():
+                raise GuiControlError("Config already exists. Choose a new filename; no overwrite is allowed")
+            for key in ("dataset_id", "run_id", "segment_id", "source_id"):
+                if not self.vars[key].get().strip():
+                    raise GuiControlError(f"{key} must not be blank")
+            config.parent.mkdir(parents=True, exist_ok=True)
+            command = command_make_config(
+                sys.executable, orchestrator, udp, case, config,
+                self.vars["dataset_id"].get().strip(),
+                self.vars["run_id"].get().strip(),
+                self.vars["segment_id"].get().strip(),
+                self.vars["source_id"].get().strip(),
+                self.max_rows(),
+            )
+            self.start_process("config", command)
+        except Exception as exc:
+            self.show_error(exc)
+
+    def do_preflight(self) -> None:
+        try:
+            _, _, orchestrator, config, preflight, _ = self.validate_common()
+            if not self.session_config_ok:
+                raise GuiControlError("Preflight is locked until this GUI session creates the config")
+            require_file(config, "Config JSON")
+            if not is_empty_or_absent(preflight):
+                raise GuiControlError("Preflight output must be absent or empty")
+            self.start_process(
+                "preflight", command_preflight(sys.executable, orchestrator, config, preflight)
+            )
+        except Exception as exc:
+            self.show_error(exc)
+
+    def do_run(self) -> None:
+        try:
+            _, _, orchestrator, config, _, run_out = self.validate_common()
+            require_file(config, "Config JSON")
+            if not self.session_preflight_ok:
+                raise GuiControlError("Run is locked until Preflight passes in this GUI session")
+            if not is_empty_or_absent(run_out):
+                raise GuiControlError("Run output must be absent or empty; accepted evidence is never overwritten")
+            answer = self.messagebox.askyesno(
+                "Start controlled run",
+                "Run all nine backend stages now?\n\nThe source and Gate files remain protected."
+            )
+            if not answer:
+                return
+            self.start_process(
+                "run", command_run(sys.executable, orchestrator, config, run_out), monitor_run=run_out
+            )
+        except Exception as exc:
+            self.show_error(exc)
+
+    def do_cancel(self) -> None:
+        process = self.process
+        if process is None or process.poll() is not None:
+            self.vars["status"].set("No running process")
+            return
+        if not self.messagebox.askyesno(
+            "Cancel execution",
+            "Cancel the current process tree? Partial output will be retained as FAILURE evidence and must not be accepted."
+        ):
+            return
+        self.cancel_requested = True
+        try:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=False,
+                )
+            else:
+                os.killpg(process.pid, signal.SIGTERM)
+        except Exception as exc:
+            self.append_log(f"Cancel error: {exc}\n")
+
+    def open_output(self) -> None:
+        try:
+            path = Path(self.vars["run_out"].get().strip()).resolve()
+            if not path.exists():
+                raise GuiControlError("Run output folder does not exist")
+            if os.name == "nt":
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(path)], shell=False)
+            else:
+                subprocess.Popen(["xdg-open", str(path)], shell=False)
+        except Exception as exc:
+            self.show_error(exc)
+
+    def poll_events(self) -> None:
+        try:
+            while True:
+                event = self.events.get_nowait()
+                kind = event[0]
+                if kind == "progress":
+                    stage = int(event[1])
+                    self.progress.configure(value=stage)
+                    self.vars["stage"].set(f"{stage} / 9")
+                    self.vars["status"].set(f"Run in progress — completed stages: {stage} / 9")
+                elif kind == "result":
+                    self.handle_result(event[1])
+                elif kind == "worker_error":
+                    self.finish_busy()
+                    self.show_error(GuiControlError(event[2]))
+        except queue.Empty:
+            pass
+        self.root.after(150, self.poll_events)
+
+    def finish_busy(self) -> None:
+        self.progress.stop()
+        self.progress.configure(mode="determinate")
+        self.set_busy(False)
+
+    def handle_result(self, result: ProcessResult) -> None:
+        self.finish_busy()
+        if result.stdout:
+            self.append_log(result.stdout.rstrip() + "\n")
+        if result.stderr:
+            self.append_log("STDERR:\n" + result.stderr.rstrip() + "\n")
+        success = result.returncode == 0
+        if result.action == "selftest":
+            success = success and EXPECTED_ORCHESTRATOR_SELFTEST in result.stdout
+            self.session_selftest_ok = success
+        elif result.action == "config":
+            success = success and "UDP001-G8A2-CONFIG-CREATED" in result.stdout
+            self.session_config_ok = success
+        elif result.action == "preflight":
+            _, _, _, _, preflight, _ = self.paths()
+            capsule = preflight / "udp001_g8a2_preflight_capsule.txt"
+            text = capsule.read_text(encoding="utf-8-sig") if capsule.is_file() else ""
+            if text:
+                self.append_log(text)
+            success = success and "N-M7-C4-I3-X0" in text and parse_final_code(text) == 0
+            self.session_preflight_ok = success
+        elif result.action == "run":
+            _, _, _, _, _, run_out = self.paths()
+            capsule = run_out / "CONTROL_OUTPUT" / "udp001_g8a2_return_capsule.txt"
+            text = capsule.read_text(encoding="utf-8-sig") if capsule.is_file() else ""
+            if text:
+                self.append_log(text)
+            stages = parse_stage_count(text)
+            success = success and stages == 9 and parse_final_code(text) == 0
+            self.session_run_ok = success
+            self.session_stage_count = stages
+            self.session_log_ok = (
+                run_out.joinpath("CONTROL_OUTPUT", "u001_g8a2_orchestration_manifest.json").is_file()
+            )
+            gui_capsule = make_gui_capsule(
+                self.session_selftest_ok,
+                self.session_config_ok,
+                self.session_preflight_ok,
+                self.session_run_ok,
+                self.session_stage_count,
+                self.session_log_ok,
+            )
+            atomic_write_text(
+                run_out / "CONTROL_OUTPUT" / "u001_gui_acceptance_capsule.txt", gui_capsule
+            )
+            self.append_log(gui_capsule)
+            self.progress.configure(value=stages)
+            self.vars["stage"].set(f"{stages} / 9")
+        if success and not self.cancel_requested:
+            self.vars["status"].set(f"PASS — {result.action}")
+        else:
+            self.vars["status"].set(f"FAIL — {result.action}; preserve output and stop")
+
+    def show_error(self, exc: Exception) -> None:
+        self.vars["status"].set("Blocked — correct the displayed issue")
+        self.append_log(f"ERROR: {exc}\n")
+        self.messagebox.showerror("U001 Workbench", str(exc))
+
+    def on_close(self) -> None:
+        if self.process is not None and self.process.poll() is None:
+            self.messagebox.showwarning("Execution running", "Cancel or wait for the running action before closing.")
+            return
+        self.root.destroy()
+
+
+def run_self_test() -> None:
+    passed = 0
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "UDP001"
+        script = root / "04_TEMP" / PROGRAM_NAME
+        script.parent.mkdir(parents=True)
+        script.write_text("x", encoding="utf-8")
+        assert discover_udp001_root(script) == root.resolve()
+        passed += 1
+
+        case = root / "03_CASES" / "TC001_20260422"
+        source = case / CASE_SOURCE_FOLDER
+        source.mkdir(parents=True)
+        for name in SOURCE_FILES:
+            (source / name).write_text("x", encoding="utf-8")
+        assert valid_case_root(case)
+        passed += 1
+        assert discover_case_root(root) == case
+        passed += 1
+
+        orch = root / "01_PROGRAMS" / ORCHESTRATOR_NAME
+        cfg = case / "01_CONFIG" / "a.json"
+        out = case / "RUN"
+        assert command_selftest("python", orch)[-1] == "--self-test"
+        passed += 1
+        make = command_make_config("python", orch, root, case, cfg, "D", "R", "S", "SRC", 100)
+        assert make[2] == "--make-config" and make[-1] == "100"
+        passed += 1
+        pre = command_preflight("python", orch, cfg, out)
+        assert pre[2] == "--preflight" and str(cfg) in pre
+        passed += 1
+        run = command_run("python", orch, cfg, out)
+        assert run[2] == "--run" and str(out) == run[-1]
+        passed += 1
+        assert parse_final_code("X\nC-0\n") == 0
+        passed += 1
+        assert parse_stage_count("N-S9-P7-U1-R1-F6-I1-X0\nC-0\n") == 9
+        passed += 1
+        assert make_gui_capsule(True, True, True, True, 9, True).endswith("C-0\n")
+        passed += 1
+        assert make_gui_capsule(True, True, False, True, 9, True).endswith("C-1\n")
+        passed += 1
+        assert is_empty_or_absent(case / "ABSENT")
+        passed += 1
+    if passed != 12:
+        raise AssertionError(f"SELFTEST_COUNT:{passed}")
+    print(SELFTEST_TOKEN)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="U001 Data Preparation Workbench GUI")
+    parser.add_argument("--self-test", action="store_true")
+    args = parser.parse_args(argv)
+    if args.self_test:
+        run_self_test()
+        return 0
+    import tkinter as tk
+    root = tk.Tk()
+    WorkbenchApp(root, Path(__file__))
+    root.mainloop()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
