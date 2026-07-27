@@ -1,0 +1,414 @@
+#!/usr/bin/env python3
+"""Build and validate a PyInstaller-hosted cross-PC U001 package."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import datetime
+from pathlib import Path
+from typing import Sequence
+
+
+PROGRAM_NAME = "u001_portable_host_package_builder_v0_6.py"
+PROGRAM_VERSION = "0.6"
+SELFTEST_TOKEN = "U001-PORTABLE-HOST-PACKAGE-BUILDER-V06-SELFTEST-PASS-30"
+PREFLIGHT_SCHEMA = "UDP001_PACKAGING_PREFLIGHT_V0_1"
+PACKAGE_NAME = "U001_Portable_v0_1"
+EXPECTED_DEPENDENCIES = ["pandas"]
+TKINTER_HIDDEN_IMPORTS = (
+    "tkinter.filedialog",
+    "tkinter.messagebox",
+    "tkinter.ttk",
+)
+RUNTIME_EXCLUDES = (
+    "pandas.tests",
+    "numpy.tests",
+)
+EXPECTED_PROGRAMS = (
+    "u001_foundation_core_v0_1.py",
+    "u001_selected_update_decoder_v0_1.py",
+    "u001_framecount_assignment_v0_1.py",
+    "u001_semantic_validity_classifier_v0_1.py",
+    "u001_framecount_view_builder_v0_1.py",
+    "u001_signal_cadence_bounded_hold_v0_1.py",
+    "u001_output_package_assembler_v0_3.py",
+    "u001_g8a_thin_orchestrator_v0_5.py",
+    "u001_data_preparation_workbench_gui_v0_3.py",
+)
+
+
+class HostBuildError(RuntimeError):
+    pass
+
+
+def atomic_write(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_bytes(data)
+    temporary.replace(path)
+
+
+def atomic_json(path: Path, value: dict) -> None:
+    atomic_write(path, (json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def load_preflight(path: Path) -> dict:
+    if not path.is_file():
+        raise HostBuildError("PREFLIGHT_REPORT_NOT_FOUND")
+    try:
+        report = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HostBuildError("PREFLIGHT_REPORT_INVALID") from exc
+    if report.get("Schema") != PREFLIGHT_SCHEMA:
+        raise HostBuildError("PREFLIGHT_SCHEMA_MISMATCH")
+    if int(report.get("Summary", {}).get("BlockingErrorCount", 1)) != 0:
+        raise HostBuildError("PREFLIGHT_NOT_ACCEPTED")
+    dependencies = sorted(set(report.get("Summary", {}).get("ExternalImports", [])))
+    if dependencies != EXPECTED_DEPENDENCIES:
+        raise HostBuildError("DEPENDENCY_INVENTORY_CHANGED")
+    return report
+
+
+def verify_build_environment() -> None:
+    if importlib.util.find_spec("PyInstaller") is None:
+        raise HostBuildError("PYINSTALLER_NOT_INSTALLED")
+    for name in EXPECTED_DEPENDENCIES:
+        if importlib.util.find_spec(name) is None:
+            raise HostBuildError(f"DEPENDENCY_NOT_IMPORTABLE:{name}")
+
+
+def program_records(preflight: dict) -> dict[str, dict]:
+    records = preflight.get("Programs")
+    if not isinstance(records, list):
+        raise HostBuildError("PROGRAM_RECORDS_INVALID")
+    result = {record.get("Filename"): record for record in records if isinstance(record, dict)}
+    if set(result) != set(EXPECTED_PROGRAMS):
+        raise HostBuildError("PROGRAM_INVENTORY_MISMATCH")
+    return result
+
+
+def copy_programs(udp001_root: Path, preflight: dict, destination: Path) -> list[dict]:
+    records = program_records(preflight)
+    destination.mkdir(parents=True)
+    copied: list[dict] = []
+    for filename in EXPECTED_PROGRAMS:
+        source = udp001_root / "01_PROGRAMS" / filename
+        if not source.is_file():
+            raise HostBuildError(f"PROGRAM_NOT_FOUND:{filename}")
+        digest = sha256_file(source)
+        if digest != records[filename].get("SHA256"):
+            raise HostBuildError(f"PROGRAM_HASH_CHANGED:{filename}")
+        target = destination / filename
+        shutil.copy2(source, target)
+        copied.append({"Filename": filename, "Bytes": target.stat().st_size, "SHA256": digest})
+    return copied
+
+
+def pyinstaller_host_command(host_source: Path, dist: Path, work: Path, spec: Path) -> list[str]:
+    command = [
+        sys.executable,
+        "-m",
+        "PyInstaller",
+        "--noconfirm",
+        "--clean",
+        "--onedir",
+        "--windowed",
+    ]
+    for name in TKINTER_HIDDEN_IMPORTS:
+        command.extend(("--hidden-import", name))
+    for name in RUNTIME_EXCLUDES:
+        command.extend(("--exclude-module", name))
+    command.extend((
+        "--name",
+        "U001_Workbench",
+        "--distpath",
+        str(dist),
+        "--workpath",
+        str(work),
+        "--specpath",
+        str(spec),
+        str(host_source),
+    ))
+    return command
+
+
+def build_host(host_source: Path, build_root: Path, evidence: Path) -> Path:
+    if not host_source.is_file():
+        raise HostBuildError("RUNTIME_HOST_SOURCE_NOT_FOUND")
+    source_test = subprocess.run(
+        [sys.executable, str(host_source), "--self-test"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        shell=False,
+    )
+    atomic_write(evidence / "host_source_selftest_stdout.txt", source_test.stdout.encode("utf-8"))
+    atomic_write(evidence / "host_source_selftest_stderr.txt", source_test.stderr.encode("utf-8"))
+    if source_test.returncode != 0 or "U001-PORTABLE-RUNTIME-HOST-V04-SELFTEST-PASS-25" not in source_test.stdout:
+        raise HostBuildError("RUNTIME_HOST_SOURCE_SELFTEST_FAILED")
+    dist = build_root / "host_dist"
+    work = build_root / "host_work"
+    spec = build_root / "host_spec"
+    for path in (dist, work, spec):
+        path.mkdir()
+    command = pyinstaller_host_command(host_source, dist, work, spec)
+    build = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=1800,
+        shell=False,
+    )
+    atomic_write(evidence / "pyinstaller_host_stdout.txt", build.stdout.encode("utf-8"))
+    atomic_write(evidence / "pyinstaller_host_stderr.txt", build.stderr.encode("utf-8"))
+    runtime_folder = dist / "U001_Workbench"
+    executable = runtime_folder / "U001_Workbench.exe"
+    if (
+        build.returncode != 0
+        or not runtime_folder.is_dir()
+        or not executable.is_file()
+        or executable.stat().st_size <= 0
+    ):
+        raise HostBuildError("RUNTIME_HOST_BUILD_FAILED")
+    return runtime_folder
+
+
+def probe_host(executable: Path, udp001_root: Path, evidence: Path) -> str:
+    executable = executable.resolve()
+    udp001_root = udp001_root.resolve()
+    output = (evidence / "u001_runtime_host_probe.txt").resolve()
+    result = subprocess.run(
+        [str(executable), "--probe", "--udp001-root", str(udp001_root), "--probe-out", str(output)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=300,
+        shell=False,
+    )
+    text = output.read_text(encoding="utf-8-sig") if output.is_file() else ""
+    if result.returncode != 0 or "N-F1-R1-A1-P1-T1-G1-O1-X0" not in text or not text.rstrip().endswith("C-0"):
+        raise HostBuildError("RUNTIME_HOST_PROBE_FAILED")
+    return text
+
+
+def hosted_selftest_command(executable: Path, programs: Path, filename: str) -> list[str]:
+    """Return cwd-independent absolute paths for a hosted program self-test."""
+    return [
+        str(executable.resolve()),
+        str((programs / filename).resolve()),
+        "--self-test",
+    ]
+
+
+def run_hosted_program_selftests(executable: Path, programs: Path, evidence: Path) -> list[dict]:
+    executable = executable.resolve()
+    programs = programs.resolve()
+    results: list[dict] = []
+    for filename in EXPECTED_PROGRAMS:
+        result = subprocess.run(
+            hosted_selftest_command(executable, programs, filename),
+            cwd=str(programs),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=600,
+            shell=False,
+        )
+        stem = Path(filename).stem
+        atomic_write(evidence / f"hosted_{stem}_stdout.txt", result.stdout.encode("utf-8"))
+        atomic_write(evidence / f"hosted_{stem}_stderr.txt", result.stderr.encode("utf-8"))
+        passed = result.returncode == 0 and "PASS" in result.stdout.upper()
+        results.append({"Filename": filename, "ReturnCode": result.returncode, "PassTokenObserved": passed})
+        if not passed:
+            raise HostBuildError(f"HOSTED_PROGRAM_SELFTEST_FAILED:{filename}")
+    return results
+
+
+def run_build(udp001_root: Path, preflight_path: Path, host_source: Path, out: Path) -> int:
+    if os.name != "nt" or udp001_root.name != "UDP001" or not udp001_root.is_dir():
+        raise HostBuildError("WINDOWS_UDP001_ROOT_REQUIRED")
+    udp001_root = udp001_root.resolve()
+    preflight_path = preflight_path.resolve()
+    host_source = host_source.resolve()
+    out = out.resolve()
+    if out.exists() and (not out.is_dir() or any(out.iterdir())):
+        raise HostBuildError("RELEASE_OUTPUT_MUST_BE_ABSENT_OR_EMPTY")
+    verify_build_environment()
+    preflight = load_preflight(preflight_path)
+    build_root = udp001_root / "04_TEMP" / f"PK03_HOST_BUILD_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    build_root.mkdir(parents=True)
+    release_stage = build_root / "release_stage"
+    package = release_stage / PACKAGE_NAME
+    portable_udp001 = package / "UDP001"
+    programs = portable_udp001 / "01_PROGRAMS"
+    launcher_folder = portable_udp001 / "00_LAUNCHER"
+    cases = portable_udp001 / "03_CASES"
+    evidence = package / "_internal" / "evidence"
+    evidence.mkdir(parents=True)
+    cases.mkdir(parents=True)
+    copied_programs = copy_programs(udp001_root, preflight, programs)
+    built_runtime = build_host(host_source, build_root, evidence)
+    shutil.copytree(built_runtime, launcher_folder)
+    executable = launcher_folder / "U001_Workbench.exe"
+    host_probe = probe_host(executable, portable_udp001, evidence)
+    program_tests = run_hosted_program_selftests(executable, programs, evidence)
+    readme = (
+        "U001 PORTABLE WORKBENCH\n\n"
+        "Open UDP001\\00_LAUNCHER\\U001_Workbench.exe.\n"
+        "The adjacent _internal folder contains the private Python runtime and dependencies.\n"
+        "Keep the entire U001_Portable_v0_1 folder together.\n"
+        "No company CAN, DBC, video, Case, or result data is included.\n"
+    )
+    atomic_write(package / "README_FIRST.txt", readme.encode("utf-8"))
+    manifest = {
+        "Schema": "UDP001_PORTABLE_HOST_PACKAGE_V0_1",
+        "CreatedLocal": datetime.now().isoformat(timespec="seconds"),
+        "PackageName": PACKAGE_NAME,
+        "Architecture": "PYINSTALLER_ONEDIR_RUNTIME_HOST_WITH_EXTERNAL_ACCEPTED_PROGRAMS",
+        "CompanyDataIncluded": False,
+        "DependenciesBundled": EXPECTED_DEPENDENCIES,
+        "Programs": copied_programs,
+        "HostedProgramSelftests": program_tests,
+        "RuntimeHost": {
+            "Bytes": executable.stat().st_size,
+            "SHA256": sha256_file(executable),
+            "RuntimeFolderFileCount": sum(1 for path in launcher_folder.rglob("*") if path.is_file()),
+            "RuntimeFolderBytes": sum(path.stat().st_size for path in launcher_folder.rglob("*") if path.is_file()),
+            "Probe": host_probe.strip().splitlines(),
+        },
+        "InputEvidence": {
+            "PreflightSHA256": sha256_file(preflight_path),
+            "RuntimeHostSourceSHA256": sha256_file(host_source),
+        },
+        "AcceptanceBoundary": [
+            "The frozen host and all nine hosted program self-tests passed on the build PC.",
+            "Final cross-PC acceptance requires one GUI launch on a second compatible Windows PC.",
+        ],
+    }
+    atomic_json(evidence / "u001_portable_host_package_manifest.json", manifest)
+    capsule = "U001PK03H1\nN-R1-D1-P9-H1-B1-E1-S9-Z1-M1-X0\nC-0\n"
+    atomic_write(evidence / "u001_portable_host_package_capsule.txt", capsule.encode("utf-8"))
+    archive_base = release_stage / PACKAGE_NAME
+    zip_path = Path(shutil.make_archive(str(archive_base), "zip", root_dir=release_stage, base_dir=PACKAGE_NAME))
+    if not zip_path.is_file() or zip_path.stat().st_size <= 0:
+        raise HostBuildError("PORTABLE_ZIP_BUILD_FAILED")
+    if out.exists():
+        out.rmdir()
+    release_stage.replace(out)
+    shutil.rmtree(build_root, ignore_errors=True)
+    print(capsule, end="")
+    return 0
+
+
+def run_self_test() -> None:
+    passed = 0
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "UDP001"
+        programs = root / "01_PROGRAMS"
+        programs.mkdir(parents=True)
+        records = []
+        for filename in EXPECTED_PROGRAMS:
+            path = programs / filename
+            path.write_text(filename, encoding="utf-8")
+            records.append({"Filename": filename, "SHA256": sha256_file(path)})
+        report = {
+            "Schema": PREFLIGHT_SCHEMA,
+            "Programs": records,
+            "Summary": {"BlockingErrorCount": 0, "ExternalImports": ["pandas"]},
+        }
+        report_path = root / "preflight.json"
+        atomic_json(report_path, report)
+        loaded = load_preflight(report_path)
+        passed += int(loaded["Schema"] == PREFLIGHT_SCHEMA)
+        passed += int(program_records(loaded).keys() == {item["Filename"] for item in records})
+        copied = root / "copied"
+        copied_records = copy_programs(root, loaded, copied)
+        passed += int(len(copied_records) == 9)
+        passed += int(all((copied / name).is_file() for name in EXPECTED_PROGRAMS))
+        passed += int(len(EXPECTED_PROGRAMS) == 9)
+        passed += int(EXPECTED_DEPENDENCIES == ["pandas"])
+        passed += int(importlib.util.find_spec("json") is not None)
+        passed += int(len(sha256_file(programs / EXPECTED_PROGRAMS[0])) == 64)
+        payload = {"x": 1}
+        atomic_json(root / "x.json", payload)
+        passed += int(json.loads((root / "x.json").read_text(encoding="utf-8")) == payload)
+        passed += int(PROGRAM_NAME.endswith("v0_6.py"))
+        passed += int(PROGRAM_VERSION == "0.6")
+        passed += int(PACKAGE_NAME == "U001_Portable_v0_1")
+        passed += int(PREFLIGHT_SCHEMA.endswith("V0_1"))
+        passed += int("u001_g8a_thin_orchestrator_v0_5.py" in EXPECTED_PROGRAMS)
+        passed += int("u001_data_preparation_workbench_gui_v0_3.py" in EXPECTED_PROGRAMS)
+        passed += int(all(name.endswith(".py") for name in EXPECTED_PROGRAMS))
+        passed += int(len(set(EXPECTED_PROGRAMS)) == 9)
+        passed += int(root.name == "UDP001")
+        passed += int(SELFTEST_TOKEN.endswith("PASS-30"))
+        passed += int(sha256_file(report_path) != sha256_file(programs / EXPECTED_PROGRAMS[0]))
+        command = hosted_selftest_command(Path("relative.exe"), programs, EXPECTED_PROGRAMS[0])
+        passed += int(Path(command[0]).is_absolute())
+        passed += int(Path(command[1]).is_absolute())
+        passed += int(command[2] == "--self-test")
+        passed += int(len(TKINTER_HIDDEN_IMPORTS) == 3)
+        passed += int(all(name.startswith("tkinter.") for name in TKINTER_HIDDEN_IMPORTS))
+        build_command = pyinstaller_host_command(
+            Path("host.py"), Path("dist"), Path("work"), Path("spec")
+        )
+        passed += int("--onedir" in build_command)
+        passed += int("--onefile" not in build_command)
+        passed += int("--collect-all" not in build_command)
+        passed += int(all(name in build_command for name in TKINTER_HIDDEN_IMPORTS))
+        passed += int(all(name in build_command for name in RUNTIME_EXCLUDES))
+    if passed != 30:
+        raise AssertionError(f"SELFTEST_COUNT:{passed}")
+    print(SELFTEST_TOKEN)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Build U001 PyInstaller runtime-host portable package")
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--build", action="store_true")
+    parser.add_argument("--udp001-root")
+    parser.add_argument("--preflight-report")
+    parser.add_argument("--host-source")
+    parser.add_argument("--out")
+    args = parser.parse_args(argv)
+    if args.self_test:
+        run_self_test()
+        return 0
+    if args.build:
+        if not all((args.udp001_root, args.preflight_report, args.host_source, args.out)):
+            parser.error("--build requires --udp001-root --preflight-report --host-source --out")
+        try:
+            return run_build(Path(args.udp001_root), Path(args.preflight_report), Path(args.host_source), Path(args.out))
+        except HostBuildError as exc:
+            print(f"U001PK03H1-ERROR:{exc}")
+            print("C-7")
+            return 7
+    parser.error("select --self-test or --build")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
