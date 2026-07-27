@@ -45,9 +45,12 @@ Do not ask Copilot to regenerate or modify either program.
 3. INSTALL THE MISSING PACKAGER
 ======================================================================
 
-PK01 reported P0, so run from C-CODE CMD:
+PK01 reported P0.  The current Python is a virtual environment, so install into
+that active environment.  Do not use --user inside a venv.
 
-python -m pip install --user pyinstaller
+Run from C-CODE CMD:
+
+python -m pip install pyinstaller
 
 Then verify:
 
