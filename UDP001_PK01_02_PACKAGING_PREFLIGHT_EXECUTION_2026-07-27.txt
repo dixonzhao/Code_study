@@ -1,0 +1,100 @@
+UDP001 PK01 — PACKAGING PREFLIGHT EXECUTION
+Date: 2026-07-27
+Status: READ-ONLY ENVIRONMENT AND DEPENDENCY INSPECTION
+
+======================================================================
+1. PURPOSE
+======================================================================
+
+Inspect the accepted active U001 programs and the company Python environment
+before generating a one-click package.  This prevents packaging from silently
+breaking the accepted child-program dispatch chain.
+
+The probe reads Python source only.  It does not read CAN/DBC content, run a
+Gate, modify source, or create an application package.
+
+======================================================================
+2. DOWNLOAD
+======================================================================
+
+Download:
+
+u001_packaging_preflight_probe_v0_1.py.txt
+
+Place it in:
+
+C-CODE/UDP001/04_TEMP/
+
+Rename only the final suffix:
+
+u001_packaging_preflight_probe_v0_1.py
+
+No Copilot generation or modification is permitted.
+
+======================================================================
+3. INSTALL ACCEPTED GUI v0.3
+======================================================================
+
+Close the GUI.  From C-CODE PowerShell run:
+
+$archive = ".\UDP001\ARCH\SUPERSEDED_20260727"
+New-Item -ItemType Directory -Force $archive | Out-Null
+
+if (Test-Path ".\UDP001\01_PROGRAMS\u001_data_preparation_workbench_gui_v0_2.py") {
+    Move-Item ".\UDP001\01_PROGRAMS\u001_data_preparation_workbench_gui_v0_2.py" $archive
+}
+
+if (Test-Path ".\UDP001\04_TEMP\u001_data_preparation_workbench_gui_v0_3.py") {
+    Move-Item ".\UDP001\04_TEMP\u001_data_preparation_workbench_gui_v0_3.py" ".\UDP001\01_PROGRAMS\"
+}
+
+Do not move or change any Gate program.
+
+======================================================================
+4. PROBE SELF-TEST
+======================================================================
+
+Run from C-CODE:
+
+python .\UDP001\04_TEMP\u001_packaging_preflight_probe_v0_1.py --self-test
+
+Required exact output:
+
+U001-PACKAGING-PREFLIGHT-SELFTEST-PASS-14
+
+Stop on any other result.
+
+======================================================================
+5. READ-ONLY PACKAGING INSPECTION
+======================================================================
+
+Run from C-CODE as one line:
+
+python .\UDP001\04_TEMP\u001_packaging_preflight_probe_v0_1.py --inspect --udp001-root .\UDP001 --gui .\UDP001\01_PROGRAMS\u001_data_preparation_workbench_gui_v0_3.py --out .\UDP001\03_CASES\TC001_20260422\03_RETURN\PK01_PREFLIGHT_01
+
+The command creates exactly:
+
+- u001_packaging_preflight_report.json
+- u001_packaging_preflight_capsule.txt
+
+The report contains program hashes, syntax status, import/dependency inventory,
+Python path/version, Windows architecture, tkinter availability, and whether
+PyInstaller is already installed.
+
+PyInstaller absence is information, not a failure.  Missing accepted programs,
+syntax failure, unresolved U001 imports, missing tkinter, non-Windows execution,
+or non-64-bit Python is blocking.
+
+======================================================================
+6. RETURN
+======================================================================
+
+Return the exact three lines printed by the inspection, beginning with:
+
+U001PKP1
+
+Do not manually summarize the JSON.  If C-7 occurs, add at most one short Memo.
+
+After C-0, Codex will select and issue the exact one-click package builder.
+
+END

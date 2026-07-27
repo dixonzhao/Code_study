@@ -1,0 +1,352 @@
+#!/usr/bin/env python3
+"""Read-only U001 packaging preflight probe v0.1."""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import hashlib
+import importlib.util
+import json
+import os
+import platform
+import shutil
+import struct
+import sys
+import sysconfig
+import tempfile
+from datetime import datetime
+from pathlib import Path
+from typing import Sequence
+
+
+PROGRAM_NAME = "u001_packaging_preflight_probe_v0_1.py"
+PROGRAM_VERSION = "0.1"
+SELFTEST_TOKEN = "U001-PACKAGING-PREFLIGHT-SELFTEST-PASS-14"
+GUI_NAME = "u001_data_preparation_workbench_gui_v0_3.py"
+CORE_NAMES = (
+    "u001_foundation_core_v0_1.py",
+    "u001_selected_update_decoder_v0_1.py",
+    "u001_framecount_assignment_v0_1.py",
+    "u001_semantic_validity_classifier_v0_1.py",
+    "u001_framecount_view_builder_v0_1.py",
+    "u001_signal_cadence_bounded_hold_v0_1.py",
+    "u001_output_package_assembler_v0_3.py",
+    "u001_g8a_thin_orchestrator_v0_5.py",
+)
+
+
+class ProbeError(RuntimeError):
+    pass
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def atomic_write(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_bytes(data)
+    temporary.replace(path)
+
+
+def atomic_json(path: Path, value: dict) -> None:
+    atomic_write(
+        path,
+        (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8"),
+    )
+
+
+def import_roots(tree: ast.AST) -> set[str]:
+    roots: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots.update(alias.name.split(".", 1)[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            roots.add(node.module.split(".", 1)[0])
+    return roots
+
+
+def stdlib_roots() -> set[str]:
+    values = set(getattr(sys, "stdlib_module_names", set()))
+    values.update(sys.builtin_module_names)
+    values.update({"__future__"})
+    return values
+
+
+def path_is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def is_stdlib_module(name: str) -> bool:
+    if name in stdlib_roots():
+        return True
+    try:
+        specification = importlib.util.find_spec(name)
+    except (ImportError, AttributeError, ValueError):
+        return False
+    if specification is None:
+        return False
+    if specification.origin in (None, "built-in", "frozen"):
+        return specification.origin in ("built-in", "frozen")
+    try:
+        origin = Path(specification.origin).resolve()
+        stdlib = Path(sysconfig.get_path("stdlib")).resolve()
+        purelib = Path(sysconfig.get_path("purelib")).resolve()
+        platlib = Path(sysconfig.get_path("platlib")).resolve()
+        return path_is_within(origin, stdlib) and not (
+            path_is_within(origin, purelib) or path_is_within(origin, platlib)
+        )
+    except (OSError, TypeError):
+        return False
+
+
+def inspect_program(path: Path, local_stems: set[str]) -> dict:
+    record = {
+        "Filename": path.name,
+        "Exists": path.is_file(),
+        "Bytes": 0,
+        "SHA256": "",
+        "SyntaxOK": False,
+        "Imports": [],
+        "LocalImports": [],
+        "UnresolvedU001Imports": [],
+        "ExternalImports": [],
+        "Error": "",
+    }
+    if not path.is_file():
+        record["Error"] = "MISSING"
+        return record
+    try:
+        raw = path.read_bytes()
+        record["Bytes"] = len(raw)
+        record["SHA256"] = hashlib.sha256(raw).hexdigest()
+        text = raw.decode("utf-8-sig")
+        tree = ast.parse(text, filename=path.name)
+        imports = sorted(import_roots(tree))
+        standard = {name for name in imports if is_stdlib_module(name)}
+        local = sorted(name for name in imports if name in local_stems)
+        unresolved = sorted(
+            name for name in imports if name.startswith(("u001_", "udp001_")) and name not in local_stems
+        )
+        external = sorted(
+            name
+            for name in imports
+            if name not in standard
+            and name not in local_stems
+            and not name.startswith(("u001_", "udp001_"))
+        )
+        record.update(
+            {
+                "SyntaxOK": True,
+                "Imports": imports,
+                "LocalImports": local,
+                "UnresolvedU001Imports": unresolved,
+                "ExternalImports": external,
+            }
+        )
+    except Exception as exc:
+        record["Error"] = f"{type(exc).__name__}:{exc}"
+    return record
+
+
+def tkinter_profile() -> dict:
+    try:
+        import tkinter
+
+        return {
+            "Available": True,
+            "TkVersion": str(tkinter.TkVersion),
+            "TclVersion": str(tkinter.TclVersion),
+            "Error": "",
+        }
+    except Exception as exc:
+        return {"Available": False, "TkVersion": "", "TclVersion": "", "Error": str(exc)}
+
+
+def pyinstaller_profile() -> dict:
+    available = importlib.util.find_spec("PyInstaller") is not None
+    version = ""
+    error = ""
+    if available:
+        try:
+            import PyInstaller
+
+            version = str(PyInstaller.__version__)
+        except Exception as exc:
+            error = str(exc)
+    return {"Available": available, "Version": version, "Error": error}
+
+
+def inspect_environment(udp001_root: Path, gui_path: Path) -> dict:
+    programs = udp001_root / "01_PROGRAMS"
+    paths = [programs / name for name in CORE_NAMES] + [gui_path]
+    local_stems = {path.stem for path in paths if path.is_file()}
+    records = [inspect_program(path, local_stems) for path in paths]
+    tkinter = tkinter_profile()
+    pyinstaller = pyinstaller_profile()
+    expected = len(paths)
+    found = sum(bool(item["Exists"]) for item in records)
+    syntax_ok = sum(bool(item["SyntaxOK"]) for item in records)
+    unresolved = sorted({name for item in records for name in item["UnresolvedU001Imports"]})
+    external = sorted({name for item in records for name in item["ExternalImports"]})
+    is_windows = os.name == "nt" and platform.system().lower() == "windows"
+    is_64bit = struct.calcsize("P") * 8 == 64
+    python_exe = Path(sys.executable).resolve()
+    pythonw = python_exe.with_name("pythonw.exe") if is_windows else python_exe
+    errors = (
+        (expected - found)
+        + (expected - syntax_ok)
+        + len(unresolved)
+        + int(not tkinter["Available"])
+        + int(not is_windows)
+        + int(not is_64bit)
+    )
+    capsule = (
+        "U001PKP1\n"
+        f"N-E{expected}-F{found}-S{syntax_ok}-L{len(unresolved)}-D{len(external)}-"
+        f"T{int(tkinter['Available'])}-P{int(pyinstaller['Available'])}-"
+        f"W{int(is_windows)}-A{int(is_64bit)}-X{errors}\n"
+        f"C-{0 if errors == 0 else 7}\n"
+    )
+    return {
+        "Schema": "UDP001_PACKAGING_PREFLIGHT_V0_1",
+        "ProgramName": PROGRAM_NAME,
+        "ProgramVersion": PROGRAM_VERSION,
+        "CreatedLocal": datetime.now().isoformat(timespec="seconds"),
+        "UDP001Root": str(udp001_root),
+        "GUIPath": str(gui_path),
+        "Environment": {
+            "OS": platform.system(),
+            "OSRelease": platform.release(),
+            "Machine": platform.machine(),
+            "PointerBits": struct.calcsize("P") * 8,
+            "PythonVersion": platform.python_version(),
+            "PythonExecutable": str(python_exe),
+            "PythonwCandidate": str(pythonw),
+            "PythonwExists": pythonw.is_file(),
+            "Tkinter": tkinter,
+            "PyInstaller": pyinstaller,
+        },
+        "Programs": records,
+        "Summary": {
+            "Expected": expected,
+            "Found": found,
+            "SyntaxOK": syntax_ok,
+            "UnresolvedLocalImports": unresolved,
+            "ExternalImports": external,
+            "Windows": is_windows,
+            "Architecture64Bit": is_64bit,
+            "BlockingErrorCount": errors,
+        },
+        "Capsule": capsule.strip().splitlines(),
+    }
+
+
+def ensure_output_target(path: Path) -> None:
+    if path.exists() and (not path.is_dir() or any(path.iterdir())):
+        raise ProbeError("Output folder must be absent or empty")
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def run_inspect(udp001_root: Path, gui_path: Path, out: Path) -> int:
+    if udp001_root.name != "UDP001" or not udp001_root.is_dir():
+        raise ProbeError("--udp001-root must identify the UDP001 folder")
+    ensure_output_target(out)
+    report = inspect_environment(udp001_root.resolve(), gui_path.resolve())
+    capsule = "\n".join(report["Capsule"]) + "\n"
+    atomic_json(out / "u001_packaging_preflight_report.json", report)
+    atomic_write(out / "u001_packaging_preflight_capsule.txt", capsule.encode("utf-8"))
+    print(capsule, end="")
+    return 0 if report["Summary"]["BlockingErrorCount"] == 0 else 7
+
+
+def run_self_test() -> None:
+    passed = 0
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        root = base / "UDP001"
+        programs = root / "01_PROGRAMS"
+        programs.mkdir(parents=True)
+        for index, name in enumerate(CORE_NAMES):
+            import_line = "import json\n"
+            if index == 1:
+                import_line += "import u001_foundation_core_v0_1\n"
+            (programs / name).write_text(import_line + "VALUE = 1\n", encoding="utf-8")
+        gui = root / "04_TEMP" / GUI_NAME
+        gui.parent.mkdir()
+        gui.write_text("import tkinter\nVALUE = 1\n", encoding="utf-8")
+        report = inspect_environment(root, gui)
+        assert report["Summary"]["Expected"] == 9
+        passed += 1
+        assert report["Summary"]["Found"] == 9
+        passed += 1
+        assert report["Summary"]["SyntaxOK"] == 9
+        passed += 1
+        assert report["Summary"]["UnresolvedLocalImports"] == []
+        passed += 1
+        assert report["Summary"]["ExternalImports"] == []
+        passed += 1
+        first = inspect_program(programs / CORE_NAMES[0], {path.stem for path in programs.iterdir()})
+        assert first["Exists"] and first["SyntaxOK"]
+        passed += 1
+        assert len(first["SHA256"]) == 64
+        passed += 1
+        assert import_roots(ast.parse("import a.b\nfrom c.d import e\n")) == {"a", "c"}
+        passed += 1
+        assert is_stdlib_module("json")
+        passed += 1
+        out = root / "OUT"
+        ensure_output_target(out)
+        assert out.is_dir()
+        passed += 1
+        (out / "x").write_text("x", encoding="utf-8")
+        try:
+            ensure_output_target(out)
+        except ProbeError:
+            passed += 1
+        else:
+            raise AssertionError("non-empty output must be rejected")
+        payload = {"x": 1}
+        atomic_json(root / "a.json", payload)
+        assert json.loads((root / "a.json").read_text(encoding="utf-8")) == payload
+        passed += 1
+        assert sha256_file(programs / CORE_NAMES[0]) == first["SHA256"]
+        passed += 1
+        assert report["Environment"]["PointerBits"] in (32, 64)
+        passed += 1
+    if passed != 14:
+        raise AssertionError(f"SELFTEST_COUNT:{passed}")
+    print(SELFTEST_TOKEN)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="U001 packaging preflight probe")
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--inspect", action="store_true")
+    parser.add_argument("--udp001-root")
+    parser.add_argument("--gui")
+    parser.add_argument("--out")
+    args = parser.parse_args(argv)
+    if args.self_test:
+        run_self_test()
+        return 0
+    if args.inspect:
+        if not all((args.udp001_root, args.gui, args.out)):
+            parser.error("--inspect requires --udp001-root --gui --out")
+        return run_inspect(Path(args.udp001_root), Path(args.gui), Path(args.out))
+    parser.error("select --self-test or --inspect")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
