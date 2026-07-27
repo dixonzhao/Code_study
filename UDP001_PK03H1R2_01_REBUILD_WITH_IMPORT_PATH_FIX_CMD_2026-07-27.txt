@@ -1,0 +1,55 @@
+UDP001 PK03H1R2 - Runtime Host import-path correction (Windows CMD)
+Date: 2026-07-27
+
+DIAGNOSIS
+The previous absolute-path correction worked: the first hosted program passed.
+The second program failed because Runtime Host v0.1 executed external programs with
+runpy but did not add UDP001\01_PROGRAMS to Python sys.path. A program that imports
+u001_foundation_core_v0_1 therefore cannot resolve its sibling module.
+
+This correction preserves the Host program allowlist. It does not modify the nine
+accepted U001 programs, U001 algorithms, Data Contract, input data, or output schema.
+
+DOWNLOAD THESE THREE FILES
+1. u001_portable_runtime_host_v0_2.py.txt
+2. u001_portable_host_package_builder_v0_3.py.txt
+3. This instruction file
+
+STEP 1 - COPY AND RENAME
+Put the first two files in UDP001\04_TEMP and remove only their final .txt suffix:
+
+u001_portable_runtime_host_v0_2.py
+u001_portable_host_package_builder_v0_3.py
+
+Keep the previous v0.1/v0.2 files as history. Do not overwrite the nine files in
+UDP001\01_PROGRAMS.
+
+STEP 2 - OPEN CMD AT C-CODE ROOT
+Use the existing activated venv.
+
+STEP 3 - SELF-TEST BOTH NEW FILES
+python .\UDP001\04_TEMP\u001_portable_runtime_host_v0_2.py --self-test
+python .\UDP001\04_TEMP\u001_portable_host_package_builder_v0_3.py --self-test
+
+Expected:
+U001-PORTABLE-RUNTIME-HOST-V02-SELFTEST-PASS-18
+U001-PORTABLE-HOST-PACKAGE-BUILDER-V03-SELFTEST-PASS-23
+
+STEP 4 - BUILD
+python .\UDP001\04_TEMP\u001_portable_host_package_builder_v0_3.py --build --udp001-root .\UDP001 --preflight-report .\UDP001\03_CASES\TC001_20260422\03_RETURN\PK01_PREFLIGHT_01\u001_packaging_preflight_report.json --host-source .\UDP001\04_TEMP\u001_portable_runtime_host_v0_2.py --out .\UDP001\05_PORTABLE_RELEASE
+
+Expected:
+U001PK03H1
+N-R1-D1-P9-H1-B1-E1-S9-Z1-M1-X0
+C-0
+
+STEP 5 - GUI SMOKE TEST
+Open:
+UDP001\05_PORTABLE_RELEASE\U001_Portable_v0_1\UDP001\00_LAUNCHER\U001_Workbench.exe
+
+If it opens, return:
+PK03H1R2-GUI-OPEN-OK
+
+IF THE BUILD FAILS
+Return only the U001PK03H1-ERROR line and C-code. Do not let Copilot edit any U001
+program, the Runtime Host, Builder, validator, or Data Contract.
