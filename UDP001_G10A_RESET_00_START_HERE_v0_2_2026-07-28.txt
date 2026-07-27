@@ -1,0 +1,130 @@
+UDP001 G10A RESET - START HERE v0.2
+Date: 2026-07-28
+Status: CLEAN-ROOM REBUILD; AUTHORITATIVE COPILOT ENTRY FILE
+
+======================================================================
+1. PURPOSE
+======================================================================
+
+Build the missing AUTO_DISCOVERY configuration layer of U001.
+
+The Raw CAN source contains roughly 700 technically decodable signals.  U001
+must be able to expose all source-present, DBC-matched signals to U002 in
+deterministic bounded-width batches without asking a person to select hundreds
+of variables manually.
+
+G10A does configuration generation only:
+
+accepted Gate 1 signal catalog
+-> discovery inventory
+-> provisional G2/G4/G5/G6 controls
+-> deterministic batch map
+-> machine-readable manifest
+
+G10A does not decode the Raw CAN data and does not perform analysis.
+
+======================================================================
+2. CLEAN-ROOM RULE
+======================================================================
+
+This is a from-scratch v0.2 implementation.
+
+Do not read, reuse, patch, translate, or imitate:
+
+- u001_auto_discovery_profile_builder_v0_1.py;
+- AUTO_DISCOVERY_ALL_V0_1 outputs;
+- the rejected G10A1 count logic;
+- code pasted from an earlier Copilot chat.
+
+The rejected v0.1 evidence is retained only in ARCH.  It is not an
+implementation input.
+
+======================================================================
+3. FILES TO GIVE THE NEW COPILOT CHAT
+======================================================================
+
+Give exactly these three design files, in this order:
+
+1. UDP001_G10A_RESET_00_START_HERE_v0_2_2026-07-28.txt
+2. UDP001_G10A_RESET_01_COMPLETE_IMPLEMENTATION_SPEC_v0_2_2026-07-28.txt
+3. UDP001_G10A_RESET_02_ACCEPTANCE_EXECUTION_PROTOCOL_v0_2_2026-07-28.txt
+
+Do not give the rejected v0.1 Python program.
+
+No company Raw CAN data or DBC is needed during code generation.  The program
+must include deterministic synthetic self-tests.
+
+======================================================================
+4. REQUIRED COPILOT DELIVERABLE
+======================================================================
+
+Generate and return one directly downloadable Python file:
+
+u001_auto_discovery_profile_builder_v0_2.py
+
+Do not return only a code block or an explanation.  Return the actual Python
+file so the user can download it.
+
+Allowed dependencies:
+
+- Python standard library;
+- pandas.
+
+Initial company-PC location:
+
+C-CODE\UDP001\04_TEMP\u001_auto_discovery_profile_builder_v0_2.py
+
+Promotion to UDP001\01_PROGRAMS is forbidden until Codex accepts G10A2.
+
+======================================================================
+5. FROZEN RESPONSIBILITY BOUNDARY
+======================================================================
+
+U001 owns:
+
+- source/DBC inventory and decode truth;
+- FrameCount alignment;
+- canonical signal identity, units and data semantics;
+- explicit missingness, validity, aggregation and hold provenance;
+- deterministic machine-readable packages and quality gates.
+
+U002 owns:
+
+- outcome definition;
+- automatic association screening across discovery batches;
+- ranking, evidence metrics and shortlist proposals;
+- approved statistical, scenario and dynamic analysis.
+
+U003 owns:
+
+- synchronized video/CAN human review;
+- review decisions, short memos, screenshots and plot exports.
+
+G10A must not decide relevance, causality, ground truth, reference/target roles,
+correlation, anomaly score, baseline, residual or root cause.
+
+======================================================================
+6. IMPLEMENTATION SEQUENCE
+======================================================================
+
+G10A2 inventory/control/batch generation
+-> G10B bounded-width discovery decode and frame shards
+-> G10C Workbench/headless request/package integration
+-> U002 automatic screening
+
+Do not begin G10B or U002 during this task.
+
+======================================================================
+7. STOP RULE
+======================================================================
+
+Stop and report instead of improvising if:
+
+- any of the three design files conflict;
+- an exact required input column is absent;
+- an existing v0.2 output folder would be overwritten;
+- a count invariant fails;
+- the configured FrameCount row is missing or duplicated;
+- the requested design would require modifying Gate 1-G9 programs.
+
+END OF START HERE
