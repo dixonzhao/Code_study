@@ -1,0 +1,335 @@
+UDP001 G10A - AUTO DISCOVERY PROFILE BUILDER
+IMPLEMENTATION SPECIFICATION v0.1
+Date: 2026-07-27
+
+======================================================================
+1. PROGRAM IDENTITY
+======================================================================
+
+Filename:
+
+u001_auto_discovery_profile_builder_v0_1.py
+
+Program purpose:
+
+Convert one accepted Gate 1 signal catalog into a complete, traceable,
+provisional AUTO_DISCOVERY control set without manual selection of hundreds of
+signals.
+
+This program makes no relevance, causality, ground-truth, reference/target, or
+root-cause decision.
+
+Import safety:
+
+- importing the module performs no file I/O, GUI work, or computation;
+- CLI runs only under the main guard;
+- inputs are read-only;
+- output is written only under the explicit --out folder.
+
+Allowed dependencies:
+
+- Python standard library;
+- pandas.
+
+======================================================================
+2. CLI
+======================================================================
+
+Self-test:
+
+python u001_auto_discovery_profile_builder_v0_1.py --self-test
+
+Build:
+
+python u001_auto_discovery_profile_builder_v0_1.py --build ^
+  --catalog "PATH_TO_u001_signal_catalog.csv" ^
+  --out "PATH_TO_DISCOVERY_CONFIG_FOLDER" ^
+  --profile-id "AUTO_DISCOVERY_ALL_V0_1" ^
+  --frame-key-channel 2 ^
+  --frame-key-can-id 0x620 ^
+  --frame-key-signal FrameCount ^
+  --batch-size 32
+
+Optional:
+
+--overwrite
+
+Without --overwrite, refuse to replace an existing nonempty output folder.
+
+batch-size must be an integer from 8 through 64.  Default is 32.
+
+======================================================================
+3. REQUIRED GATE 1 INPUT COLUMNS
+======================================================================
+
+The program must require these exact logical fields, accepting only documented
+case-insensitive header normalization:
+
+- Channel
+- CAN_ID_Hex
+- MessageName
+- SignalName
+- Unit
+- SourceGroupComplete
+- ReuseStatus
+- ProposedValueKind
+- ProposedSignalRole
+- ProposedUpdateMode
+- InferenceWarning
+
+If a required field is missing, stop.  Do not silently create an empty field.
+
+CanonicalName shall be generated as:
+
+CH{Channel}_{CAN_ID_without_0x}_{SignalName}
+
+Sanitize to ASCII letters, digits, and underscore.  A collision after
+sanitization is blocking and must list the colliding source identities.
+
+======================================================================
+4. TECHNICAL ELIGIBILITY - NOT RELEVANCE SELECTION
+======================================================================
+
+AUTO_DISCOVERY eligible rows satisfy all conditions:
+
+- ReuseStatus = MATCHED;
+- SourceGroupComplete is true/1;
+- Channel is a valid positive integer;
+- CAN_ID_Hex is parseable;
+- SignalName is nonblank;
+- generated CanonicalName is unique.
+
+Every eligible signal receives Selected=1 in the Gate 2 control file.
+
+Do not exclude a signal by name because it appears to be a counter, flag,
+identifier, reserved value, or unfamiliar business term.  Preserve it and
+classify it provisionally.  U002 or a later approved profile may exclude it.
+
+Ineligible rows remain in the discovery inventory with Selected=0 and an exact
+ExclusionReason.  They do not enter the four control policies or batch map.
+
+The configured FrameCount row must exist among eligible rows exactly once.  It
+is the only Required=1 row.  Missing or duplicate FrameCount is blocking.
+
+All other eligible rows use Required=0 because one unavailable exploratory
+candidate must not block the complete run.
+
+======================================================================
+5. PROVISIONAL SEMANTIC POLICY
+======================================================================
+
+G10A may use Gate 1 ProposedValueKind, ProposedSignalRole, and
+ProposedUpdateMode because those proposals and their InferenceWarning are
+already explicit catalog evidence.
+
+Allowed values must match the existing Gate 4 vocabulary.
+
+Fallback when a proposal is blank or outside the accepted vocabulary:
+
+- ValueKind = FLOAT
+- SignalRole = MEASUREMENT
+- UpdateMode = UNKNOWN
+- append the exact fallback to InferenceWarning and Notes
+
+StorageDtype mapping:
+
+- FLOAT -> Float64
+- INTEGER -> Int64
+- BOOLEAN -> boolean
+- ENUM -> Int64
+- BITFIELD -> Int64
+
+FrameCount override:
+
+- ValueKind = INTEGER
+- SignalRole = FRAME_KEY
+- UpdateMode = PERIODIC
+- StorageDtype = Int64
+- Required = 1
+
+All discovery signals use:
+
+- ValidityRule = NONE
+- InvalidExactValues blank
+- DBCMinimum blank
+- DBCMaximum blank
+- UserMinimum blank
+- UserMaximum blank
+- InvalidReasonCode blank
+- ValiditySourceSignal blank
+- ValidityExpression blank
+
+Reason: invalid default values such as 327.66 or other signal-specific codes
+are not universal.  G10A must not invent validity rules.
+
+Every generated policy Notes field begins with:
+
+AUTO_DISCOVERY_PROVISIONAL
+
+and includes the input InferenceWarning when nonblank.
+
+======================================================================
+6. PROVISIONAL FRAME AND HOLD POLICY
+======================================================================
+
+Gate 5 policy:
+
+- FrameCount: IncludeInFrameView=0, WithinFramePolicy=KEEP_STREAM_ONLY;
+- non-FrameCount EVENT_FLAG with BOOLEAN ValueKind:
+  IncludeInFrameView=1, WithinFramePolicy=ANY_TRUE;
+- every other eligible candidate:
+  IncludeInFrameView=1, WithinFramePolicy=LAST_UPDATE;
+- Required=1 only for FrameCount; every candidate Required=0.
+
+These are discovery aggregation rules, not approved business semantics.
+
+Gate 6 policy:
+
+- include every Gate 5 IncludeInFrameView=1 candidate;
+- SignalIndex uses S1, S2, ... in stable candidate order;
+- HoldPolicy = NONE;
+- MaxAgeFrames blank;
+- Required = 0;
+- PolicyBasis = AUTO_DISCOVERY_FIRST_PASS_NO_HOLD;
+- Notes = AUTO_DISCOVERY_PROVISIONAL.
+
+No zero fill, unlimited forward fill, inferred bounded hold, or automatic
+invalid-default replacement is permitted.
+
+======================================================================
+7. DETERMINISTIC DISCOVERY BATCH MAP
+======================================================================
+
+Create a stable candidate order using:
+
+1. Channel numeric ascending;
+2. CAN ID numeric ascending;
+3. MessageName ordinal ascending;
+4. SignalName ordinal ascending;
+5. CanonicalName ordinal ascending.
+
+FrameCount is not a discovery candidate and is not assigned to a batch.
+
+Split remaining eligible signals into consecutive batches of --batch-size.
+Batch IDs are B001, B002, ... with no skipped ID.
+
+Batch assignment must be byte-for-byte repeatable for the same catalog,
+profile ID, frame-key identity, and batch size.
+
+Required batch-map columns:
+
+- ProfileId
+- BatchId
+- BatchOrdinal
+- SignalOrdinalGlobal
+- SignalOrdinalInBatch
+- CanonicalName
+- Channel
+- CAN_ID_Hex
+- MessageName
+- SignalName
+- Unit
+- ValueKind
+- SignalRole
+- UpdateMode
+- PolicyStatus
+
+PolicyStatus is always AUTO_DISCOVERY_PROVISIONAL in G10A.
+
+======================================================================
+8. REQUIRED OUTPUTS
+======================================================================
+
+Write exactly these eight files:
+
+1. u001_discovery_signal_inventory.csv
+2. u001_g2_selected_signals.csv
+3. u001_g4_signal_policy.csv
+4. u001_g5_frame_policy.csv
+5. u001_g6_hold_policy.csv
+6. u001_discovery_batch_map.csv
+7. u001_discovery_profile_manifest.json
+8. udp001_g10a_return_capsule.txt
+
+Inventory required columns:
+
+- ProfileId
+- CatalogRowOrdinal
+- Selected
+- ExclusionReason
+- Required
+- CanonicalName
+- Channel
+- CAN_ID_Hex
+- MessageName
+- SignalName
+- Unit
+- SourceGroupComplete
+- ReuseStatus
+- ProposedValueKind
+- ProposedSignalRole
+- ProposedUpdateMode
+- InferenceWarning
+- PolicyStatus
+- BatchId
+
+The four control CSVs must exactly follow the existing Gate 2, Gate 4, Gate 5,
+and Gate 6 required schemas.  Do not rename their existing fields.
+
+Manifest required fields:
+
+- program_name and version;
+- contract_version;
+- profile_id;
+- processing_mode = AUTO_DISCOVERY;
+- catalog SHA-256 and physical row count;
+- configured frame-key identity;
+- batch_size;
+- catalog_row_count;
+- eligible_signal_count;
+- excluded_signal_count;
+- candidate_signal_count;
+- batch_count;
+- fallback_value_kind_count;
+- fallback_signal_role_count;
+- fallback_update_mode_count;
+- output filename, SHA-256, physical row count for every output CSV;
+- warning list;
+- completion code.
+
+The manifest must not store an absolute company path.  Store input basename and
+hash only.
+
+======================================================================
+9. RETURN CAPSULE
+======================================================================
+
+Write one line:
+
+UDP001G10A1 N-C{catalog_rows}-E{eligible}-X{excluded}-V{candidates}-B{batches}-F{fallback_total}-H{hash_failures} C-{code}
+
+Success requires:
+
+- code 0;
+- one exact FrameCount row;
+- eligible > 1;
+- candidates = eligible - 1;
+- batches = ceil(candidates / batch_size);
+- hash_failures = 0;
+- all eight required outputs exist.
+
+======================================================================
+10. NON-GOALS
+======================================================================
+
+G10A must not:
+
+- decode Raw CAN;
+- calculate correlation, NMI, lag, gain, residual, or anomaly scores;
+- decide whether a signal affects discrepancy;
+- create one 700-signal wide human-review table;
+- guess invalid default values;
+- apply cross-frame hold;
+- overwrite the approved six-signal profile;
+- modify G8A, GUI, portable host, or package builder.
+
