@@ -319,7 +319,39 @@ Success requires:
 - all eight required outputs exist.
 
 ======================================================================
-10. NON-GOALS
+10. U002 MACHINE-HANDOFF PREPARATION
+======================================================================
+
+G10A outputs are machine-facing contract artifacts, not only files for a human
+to inspect.
+
+U002 shall later consume only documented U001 artifacts:
+
+- u001_discovery_signal_inventory.csv;
+- u001_discovery_batch_map.csv;
+- u001_discovery_profile_manifest.json;
+- G10B discovery data shards referenced by the manifest.
+
+The inventory, batch map, and manifest must therefore be deterministic,
+complete, and parseable without GUI automation or filename guessing.
+
+Interface rules:
+
+- ProfileId and CanonicalName are stable machine identities;
+- BatchId is stable for the same catalog/profile/batch-size inputs;
+- manifest paths are package-relative, never absolute company paths;
+- every excluded signal has an explicit reason;
+- every candidate maps to exactly one batch;
+- hashes and row counts allow U002 to reject stale or mixed artifacts;
+- completion C-0 means contract-complete output, not statistical relevance;
+- G10A never invokes U002 and never writes U002 results.
+
+G10C will later add a headless U001 request/response command so a thin pipeline
+coordinator or U002 workflow can request AUTO_DISCOVERY without operating the
+U001 GUI.  U002 must not import private U001 modules or modify U001 policies.
+
+======================================================================
+11. NON-GOALS
 ======================================================================
 
 G10A must not:
@@ -332,4 +364,3 @@ G10A must not:
 - apply cross-frame hold;
 - overwrite the approved six-signal profile;
 - modify G8A, GUI, portable host, or package builder.
-
