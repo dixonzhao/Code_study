@@ -1,0 +1,114 @@
+UDP001 G8F1 — INSTALL AND PREFLIGHT G8A2 v0.5
+Date: 2026-07-27
+Status: CONTROLLED FORMAL-WIRING UPDATE
+
+======================================================================
+1. PURPOSE
+======================================================================
+
+Install the accepted dynamic Gate 7 v0.3 and the narrow G8A2 v0.5 dependency
+update, then verify program discovery and frozen-input preflight.
+
+No company data algorithm changed in G8A2 v0.5.
+
+Changes from v0.4 are limited to:
+
+- ProgramVersion 0.5;
+- config schema V0_5;
+- Gate 7 dependency u001_output_package_assembler_v0_3.py;
+- Gate 7 required self-test UDP001-G7V03-SELFTEST-PASS-24;
+- G8A2 v0.5 self-test token.
+
+Do not rerun a data pipeline in this checkpoint.
+
+======================================================================
+2. DOWNLOAD
+======================================================================
+
+Download:
+
+u001_g8a_thin_orchestrator_v0_5.py.txt
+
+Place it in:
+
+C-CODE\UDP001\04_TEMP\
+
+Rename it to:
+
+u001_g8a_thin_orchestrator_v0_5.py
+
+======================================================================
+3. SELF-TEST BEFORE INSTALL
+======================================================================
+
+From C-CODE, run:
+
+python .\UDP001\04_TEMP\u001_g8a_thin_orchestrator_v0_5.py --self-test
+
+Required exact result:
+
+UDP001-G8A2V05-SELFTEST-PASS-16
+
+Stop if it fails.
+
+======================================================================
+4. INSTALL ACCEPTED CANDIDATES
+======================================================================
+
+Close the U001 GUI.
+
+Run from C-CODE:
+
+Move-Item .\UDP001\04_TEMP\u001_output_package_assembler_v0_3.py .\UDP001\01_PROGRAMS\
+
+Move-Item .\UDP001\04_TEMP\u001_g8a_thin_orchestrator_v0_5.py .\UDP001\01_PROGRAMS\
+
+Keep v0.2 and v0.4 in 01_PROGRAMS temporarily. Do not delete or archive them
+until v0.5 preflight is accepted.
+
+======================================================================
+5. CREATE A v0.5 BOUNDED INTEGRATION CONFIG
+======================================================================
+
+The config path below must not exist before execution:
+
+.\UDP001\03_CASES\TC001_20260422\01_CONFIG\u001_g8a2_v05_integration_config.json
+
+Run:
+
+python .\UDP001\01_PROGRAMS\u001_g8a_thin_orchestrator_v0_5.py --make-config --udp001-root .\UDP001 --case-root .\UDP001\03_CASES\TC001_20260422 --out .\UDP001\03_CASES\TC001_20260422\01_CONFIG\u001_g8a2_v05_integration_config.json --max-source-rows 100000
+
+======================================================================
+6. PREFLIGHT ONLY
+======================================================================
+
+The output folder below must not exist before execution:
+
+.\UDP001\03_CASES\TC001_20260422\05_RETURN\G8A2_V05_PREFLIGHT_01
+
+Run:
+
+python .\UDP001\01_PROGRAMS\u001_g8a_thin_orchestrator_v0_5.py --preflight --config .\UDP001\03_CASES\TC001_20260422\01_CONFIG\u001_g8a2_v05_integration_config.json --out .\UDP001\03_CASES\TC001_20260422\05_RETURN\G8A2_V05_PREFLIGHT_01
+
+Required capsule:
+
+UDP001G8A2P1
+N-M7-C4-I3-X0
+C-0
+
+======================================================================
+7. RETURN AND STOP
+======================================================================
+
+Return only:
+
+G8F1
+ST-<exact self-test token>
+PF-<preflight N line>
+C-<preflight code>
+
+Stop after preflight. Do not run the bounded integration Case yet. The next
+checkpoint updates the GUI dependency/label and performs one controlled GUI
+integration Run.
+
+END
