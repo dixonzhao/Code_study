@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import importlib.util
 import json
@@ -17,9 +18,9 @@ from pathlib import Path
 from typing import Sequence
 
 
-PROGRAM_NAME = "u001_package_builder_v0_1.py"
-PROGRAM_VERSION = "0.1"
-SELFTEST_TOKEN = "U001-PACKAGE-BUILDER-SELFTEST-PASS-12"
+PROGRAM_NAME = "u001_package_builder_v0_2.py"
+PROGRAM_VERSION = "0.2"
+SELFTEST_TOKEN = "U001-PACKAGE-BUILDER-V02-SELFTEST-PASS-15"
 REPORT_SCHEMA = "UDP001_PACKAGING_PREFLIGHT_V0_1"
 LAUNCHER_PYTHON_TOKEN = "__U001_DEFAULT_PYTHON__"
 LAUNCHER_ROOT_TOKEN = "__U001_DEFAULT_ROOT__"
@@ -96,6 +97,19 @@ def render_launcher(source: Path, python_exe: Path, udp001_root: Path, destinati
     text = text.replace(LAUNCHER_PYTHON_TOKEN, str(python_exe).replace("\\", "\\\\"))
     text = text.replace(LAUNCHER_ROOT_TOKEN, str(udp001_root).replace("\\", "\\\\"))
     atomic_write(destination, text.encode("utf-8"))
+
+
+def assigned_string_constant(source_text: str, variable_name: str) -> str | None:
+    tree = ast.parse(source_text)
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Constant):
+            continue
+        if not isinstance(node.value.value, str):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == variable_name:
+                return node.value.value
+    return None
 
 
 def pyinstaller_available() -> bool:
@@ -268,7 +282,15 @@ def run_self_test() -> None:
         text = rendered.read_text(encoding="utf-8")
         passed += int(LAUNCHER_PYTHON_TOKEN not in text)
         passed += int(LAUNCHER_ROOT_TOKEN not in text)
-        passed += int(str(root) in text)
+        passed += int(assigned_string_constant(text, "P") == str(Path(sys.executable)))
+        passed += int(assigned_string_constant(text, "R") == str(root))
+        windows_python_text = r"C:\Users\Test\venv\Scripts\pythonw.exe"
+        windows_root_text = r"C:\C-CODE\UDP001"
+        rendered_windows = root / "rendered_windows.py"
+        render_launcher(source, Path(windows_python_text), Path(windows_root_text), rendered_windows)
+        windows_text = rendered_windows.read_text(encoding="utf-8")
+        passed += int(assigned_string_constant(windows_text, "P") == windows_python_text)
+        passed += int(assigned_string_constant(windows_text, "R") == windows_root_text)
         passed += int(len(sha256_file(rendered)) == 64)
         payload = {"a": 1}
         atomic_json(root / "x.json", payload)
@@ -281,9 +303,9 @@ def run_self_test() -> None:
         except BuildError:
             passed += 1
         passed += int(importlib.util.find_spec("json") is not None)
-        passed += int(PROGRAM_NAME.endswith("v0_1.py"))
-        passed += int(PROGRAM_VERSION == "0.1")
-    if passed != 12:
+        passed += int(PROGRAM_NAME.endswith("v0_2.py"))
+        passed += int(PROGRAM_VERSION == "0.2")
+    if passed != 15:
         raise AssertionError(f"SELFTEST_COUNT:{passed}")
     print(SELFTEST_TOKEN)
 

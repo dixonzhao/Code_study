@@ -3,6 +3,11 @@ Date: 2026-07-27
 Execution environment: Windows CMD
 Status: CONTROLLED SAME-MACHINE PACKAGE BUILD
 
+Correction: package builder v0.1 used a source-text assertion that was not
+Windows-backslash safe and could report SELFTEST_COUNT:11.  Use builder v0.2.
+The package-build algorithm is unchanged; only the cross-platform self-test and
+its source-path verification were corrected.
+
 ======================================================================
 1. OUTPUT AND SCOPE
 ======================================================================
@@ -30,14 +35,14 @@ No Data Contract or Gate algorithm is modified.
 Download these files to C-CODE\UDP001\04_TEMP:
 
 1. u001_workbench_launcher_v0_1.py.txt
-2. u001_package_builder_v0_1.py.txt
+2. u001_package_builder_v0_2.py.txt
 3. this instruction file
 
 From C-CODE CMD rename the two programs:
 
 ren .\UDP001\04_TEMP\u001_workbench_launcher_v0_1.py.txt u001_workbench_launcher_v0_1.py
 
-ren .\UDP001\04_TEMP\u001_package_builder_v0_1.py.txt u001_package_builder_v0_1.py
+ren .\UDP001\04_TEMP\u001_package_builder_v0_2.py.txt u001_package_builder_v0_2.py
 
 Do not ask Copilot to regenerate or modify either program.
 
@@ -73,11 +78,11 @@ U001-LAUNCHER-SELFTEST-PASS-10
 
 Run:
 
-python .\UDP001\04_TEMP\u001_package_builder_v0_1.py --self-test
+python .\UDP001\04_TEMP\u001_package_builder_v0_2.py --self-test
 
 Required:
 
-U001-PACKAGE-BUILDER-SELFTEST-PASS-12
+U001-PACKAGE-BUILDER-V02-SELFTEST-PASS-15
 
 Stop on any other result.
 
@@ -89,7 +94,7 @@ Confirm that UDP001\00_LAUNCHER does not exist or is empty.
 
 Run the following as one CMD line from C-CODE:
 
-python .\UDP001\04_TEMP\u001_package_builder_v0_1.py --build --udp001-root .\UDP001 --preflight-report .\UDP001\03_CASES\TC001_20260422\03_RETURN\PK01_PREFLIGHT_01\u001_packaging_preflight_report.json --launcher-source .\UDP001\04_TEMP\u001_workbench_launcher_v0_1.py --out .\UDP001\00_LAUNCHER
+python .\UDP001\04_TEMP\u001_package_builder_v0_2.py --build --udp001-root .\UDP001 --preflight-report .\UDP001\03_CASES\TC001_20260422\03_RETURN\PK01_PREFLIGHT_01\u001_packaging_preflight_report.json --launcher-source .\UDP001\04_TEMP\u001_workbench_launcher_v0_1.py --out .\UDP001\00_LAUNCHER
 
 The builder automatically:
 
