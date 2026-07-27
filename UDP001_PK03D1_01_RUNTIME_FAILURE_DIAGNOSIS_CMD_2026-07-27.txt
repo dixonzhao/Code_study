@@ -1,0 +1,43 @@
+UDP001 PK03D1 - COPIED RUNTIME FAILURE DIAGNOSIS
+Date: 2026-07-27
+Environment: Windows CMD, started from C-CODE
+Mode: READ ONLY
+
+Do not modify the PK03 builder or any accepted U001 program.
+The failed PK03 build directory is intentionally retained as evidence.
+
+1. Download:
+
+u001_pk03_runtime_failure_probe_v0_1.py.txt
+
+Place it in:
+
+C-CODE\UDP001\04_TEMP
+
+2. Rename from C-CODE CMD:
+
+ren .\UDP001\04_TEMP\u001_pk03_runtime_failure_probe_v0_1.py.txt u001_pk03_runtime_failure_probe_v0_1.py
+
+3. Self-test:
+
+python .\UDP001\04_TEMP\u001_pk03_runtime_failure_probe_v0_1.py --self-test
+
+Required:
+
+U001-PK03-RUNTIME-FAILURE-PROBE-SELFTEST-PASS-14
+
+4. Run diagnosis as one CMD line:
+
+python .\UDP001\04_TEMP\u001_pk03_runtime_failure_probe_v0_1.py --probe --udp001-root .\UDP001 --out .\UDP001\03_CASES\TC001_20260422\03_RETURN\PK03_RUNTIME_DIAG_01
+
+The probe automatically selects the newest retained PK03_BUILD_WORK folder.
+It reads existing validation evidence and independently tests:
+
+- copied Python core and prefix;
+- tkinter import and origin;
+- pandas import and origin;
+- the exact combined validation expression.
+
+5. Return only the five lines beginning with U001PK03D1.
+
+The M line is already limited to one short diagnostic memo.
