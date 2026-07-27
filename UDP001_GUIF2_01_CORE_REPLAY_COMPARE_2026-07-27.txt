@@ -1,0 +1,68 @@
+UDP001 GUIF2 — CORE REPLAY COMPARISON
+Date: 2026-07-27
+Status: AUTHORIZED AFTER GUI v0.2 INTEGRATION C-0
+
+======================================================================
+1. PURPOSE
+======================================================================
+
+Compare the accepted bounded reference Run with the new GUI v0.2 / G8A2 v0.5
+/ Gate 7 v0.3 bounded integration Run.
+
+This is read-only with respect to both Runs.
+
+The comparison verifies that version and control-plane corrections did not
+change the core data products:
+
+- D1 decoded Updates: exact equality;
+- D2 Frame View: exact equality;
+- D3 Signal Catalog: semantic equality;
+- D4 Quality Report: semantic equality;
+- D5 Run Manifest: intentionally identity/runtime-dependent;
+- D6 Review View: exact equality.
+
+======================================================================
+2. SELF-TEST
+======================================================================
+
+From C-CODE, run:
+
+python .\UDP001\01_PROGRAMS\u001_core_replay_comparator_v0_1.py --self-test
+
+Required:
+
+U001-REPLAY-COMPARATOR-SELFTEST-PASS-16
+
+Stop if it fails.
+
+======================================================================
+3. COMPARE
+======================================================================
+
+The output folder below must not exist before execution:
+
+.\UDP001\03_CASES\TC001_20260422\05_RETURN\U001_GUI_V02_CORE_COMPARE_01
+
+Run:
+
+python .\UDP001\01_PROGRAMS\u001_core_replay_comparator_v0_1.py --compare --reference-run .\UDP001\03_CASES\TC001_20260422\02_RUN_A_REFERENCE --candidate-run .\UDP001\03_CASES\TC001_20260422\04_VALIDATION_PENDING\U001_GUI_V02_INTEGRATION_01 --out .\UDP001\03_CASES\TC001_20260422\05_RETURN\U001_GUI_V02_CORE_COMPARE_01
+
+======================================================================
+4. RETURN
+======================================================================
+
+Return the complete contents of this generated file without adding a task
+prefix or recombining fields:
+
+.\UDP001\03_CASES\TC001_20260422\05_RETURN\U001_GUI_V02_CORE_COMPARE_01\u001_core_replay_comparison_capsule.txt
+
+Expected:
+
+U001RV1
+N-D1E1-D2E1-D3S1-D4S1-D5I1-D6E1-X0
+R-U599970-F20617-K5
+C-0
+
+Stop after returning the generated capsule.
+
+END
