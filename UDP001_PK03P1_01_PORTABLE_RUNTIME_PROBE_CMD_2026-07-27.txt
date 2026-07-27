@@ -1,0 +1,45 @@
+UDP001 PK03P1 — PORTABLE RUNTIME PROBE
+Date: 2026-07-27
+Execution environment: Windows CMD
+Status: READ-ONLY CROSS-PC PACKAGING INPUT
+
+1. PURPOSE
+
+Inspect the active venv and its Base Python before copying a portable runtime.
+The probe reads environment metadata and file sizes only.  It does not read CAN
+or DBC data, modify Python, or build a package.
+
+2. DOWNLOAD
+
+Download u001_portable_runtime_probe_v0_1.py.txt to:
+
+C-CODE\UDP001\04_TEMP
+
+From C-CODE CMD rename it:
+
+ren .\UDP001\04_TEMP\u001_portable_runtime_probe_v0_1.py.txt u001_portable_runtime_probe_v0_1.py
+
+3. SELF-TEST
+
+python .\UDP001\04_TEMP\u001_portable_runtime_probe_v0_1.py --self-test
+
+Required exact output:
+
+U001-PORTABLE-RUNTIME-PROBE-SELFTEST-PASS-16
+
+4. INSPECT
+
+Run as one CMD line from C-CODE:
+
+python .\UDP001\04_TEMP\u001_portable_runtime_probe_v0_1.py --inspect --preflight-report .\UDP001\03_CASES\TC001_20260422\03_RETURN\PK01_PREFLIGHT_01\u001_packaging_preflight_report.json --out .\UDP001\03_CASES\TC001_20260422\03_RETURN\PK03_RUNTIME_PROBE_01
+
+The directory scan may take several minutes.  It is read-only.
+
+5. RETURN
+
+Return only the five generated lines beginning with U001PK03P1.
+
+The D line already includes the dependency name.  Do not inspect or summarize
+the JSON manually.  On C-7 add at most one short Memo.
+
+END
