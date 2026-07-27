@@ -1,0 +1,103 @@
+U001 CORE REPLAY COMPARATOR v0.1 — SPECIFICATION
+Date: 2026-07-27
+
+======================================================================
+1. CORRECTED COMPARISON POLICY
+======================================================================
+
+D1 u001_decoded_updates.csv
+Policy: exact byte size and SHA-256 equality.
+
+D2 u001_frame_values.csv
+Policy: exact byte size and SHA-256 equality, plus independent strictly
+increasing FrameCount and signal-group count checks.
+
+D3 u001_signal_catalog.csv
+Policy: semantic keyed equality by CanonicalName. Row/column order and UTF-8
+BOM do not create false differences. Every keyed cell remains equal after
+trimming outer whitespace and canonicalizing valid JSON cells.
+
+D4 u001_quality_report.csv
+Policy: semantic keyed equality by (Scope, CanonicalName, Metric), with the
+same cell normalization as D3.
+
+D5 u001_run_manifest.json
+Policy: validate each Manifest independently rather than compare whole files.
+Each must:
+
+- be valid JSON object;
+- contain SUCCESS status;
+- contain no company absolute path;
+- contain all five non-Manifest output basenames;
+- contain the actual SHA-256 for each of those five files;
+- preserve DatasetId, SegmentId, SourceId, and any available stable contract,
+  profile, and processing-mode identity across the two Runs;
+- contain one valid RunId per Run.
+
+Explicitly allowed D5 differences include RunId, timestamps, execution
+duration, configuration fingerprint, identity warning, warnings, and hashes of
+regenerated intermediate quality JSON files.
+
+D6 u001_review_view.csv
+Policy: exact byte size and SHA-256 equality.
+
+======================================================================
+2. WHY THIS REPLACES THE OLD G8B/G8R LINE
+======================================================================
+
+The archived validator mixed core-output determinism with volatile Manifest
+identity and generated symmetric structural failures even when the same file
+was supplied as both sides.
+
+This comparator:
+
+- has no Gate execution or output generation responsibility;
+- compares each artifact exactly once under one explicit policy;
+- never requires whole-Manifest equality;
+- never edits SourceId or completed packages;
+- never modifies a validator in response to company-data results;
+- reports one row per D1–D6 decision.
+
+======================================================================
+3. BOUNDARIES
+======================================================================
+
+The comparator may recursively locate exactly one six-file package under each
+Run root, read and hash files, write one report CSV and one capsule.
+
+It must not decode, sort, fill, aggregate, classify, hold, fuse, normalize a
+completed Manifest, modify a Run, or judge physical-signal correctness.
+
+======================================================================
+4. RETURN CAPSULE
+======================================================================
+
+U001RV1
+N-D1Ee-D2Ee-D3Ss-D4Ss-D5Ii-D6Ee-Xx
+R-Uu-Ff-Kk
+C-n
+
+E = exact equality
+S = semantic keyed equality
+I = independent Manifest integrity and stable-identity agreement
+X = blocking comparison failures
+U = reference Update rows
+F = reference Frame rows
+K = reference Frame View signal groups
+
+PASS:
+
+D1E1 D2E1 D3S1 D4S1 D5I1 D6E1 X0 C-0
+
+======================================================================
+5. DECISION AFTER PASS
+======================================================================
+
+PASS closes the old G8 replay question for the bounded reference scope and
+accepts the current backend plus thin GUI as a reproducible product candidate.
+
+It does not yet prove full-source/new-case behavior. The remaining U001 work
+is New Case GUI workflow, one full-source controlled execution, and Windows
+packaging.
+
+END

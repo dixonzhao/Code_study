@@ -1,0 +1,68 @@
+U001 CORE REPLAY COMPARATOR v0.1 — START HERE
+Date: 2026-07-27
+Status: READ-ONLY REPLAY ACCEPTANCE
+
+======================================================================
+1. PURPOSE
+======================================================================
+
+Compare the frozen Run A package with the successful GUI Replay package using
+the corrected minimal policy. This program never modifies either Run.
+
+======================================================================
+2. THREE DOWNLOADED FILES
+======================================================================
+
+1. u001_core_replay_comparator_v0_1.py.txt
+2. UDP001_RV01_01_START_HERE_2026-07-27.txt
+3. UDP001_RV01_02_SPEC_AND_RETURN_2026-07-27.txt
+
+Put all three in:
+
+C-CODE\UDP001\04_TEMP\
+
+Rename only the program from .py.txt to .py.
+
+Run commands from C-CODE.
+
+======================================================================
+3. SELF-TEST
+======================================================================
+
+python .\UDP001\04_TEMP\u001_core_replay_comparator_v0_1.py --self-test
+
+Required exact result:
+
+U001-REPLAY-COMPARATOR-SELFTEST-PASS-16
+
+Stop if it fails. Do not ask Copilot to modify it.
+
+======================================================================
+4. READ-ONLY COMPARISON
+======================================================================
+
+The output folder must be absent or empty.
+
+python .\UDP001\04_TEMP\u001_core_replay_comparator_v0_1.py --compare --reference-run .\UDP001\03_CASES\TC001_20260422\02_RUN_A_REFERENCE --candidate-run .\UDP001\03_CASES\TC001_20260422\03_RUN_B_REPLAY --out .\UDP001\03_CASES\TC001_20260422\05_RETURN\U001_REPLAY_VALIDATION_01
+
+Return only:
+
+.\UDP001\03_CASES\TC001_20260422\05_RETURN\U001_REPLAY_VALIDATION_01\u001_core_replay_comparison_capsule.txt
+
+Expected shape:
+
+U001RV1
+N-D1E1-D2E1-D3S1-D4S1-D5I1-D6E1-X0
+R-U<runtime>-F<runtime>-K<runtime>
+C-0
+
+Do not manually transcribe the comparison CSV.
+
+======================================================================
+5. AFTER PASS
+======================================================================
+
+Keep both Run folders unchanged. Do not move the comparator to 01_PROGRAMS
+until Codex accepts the capsule.
+
+END
