@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+"""One-click launcher for the accepted U001 GUI on the validated company PC."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Sequence
+
+
+PROGRAM_NAME = "u001_workbench_launcher_v0_1.py"
+PROGRAM_VERSION = "0.1"
+SELFTEST_TOKEN = "U001-LAUNCHER-SELFTEST-PASS-10"
+GUI_NAME = "u001_data_preparation_workbench_gui_v0_3.py"
+ORCHESTRATOR_NAME = "u001_g8a_thin_orchestrator_v0_5.py"
+DEFAULT_PYTHON = "__U001_DEFAULT_PYTHON__"
+DEFAULT_UDP001_ROOT = "__U001_DEFAULT_ROOT__"
+
+
+class LauncherError(RuntimeError):
+    pass
+
+
+def executable_folder() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def valid_udp001_root(path: Path) -> bool:
+    programs = path / "01_PROGRAMS"
+    return (
+        path.name == "UDP001"
+        and (programs / GUI_NAME).is_file()
+        and (programs / ORCHESTRATOR_NAME).is_file()
+    )
+
+
+def resolve_udp001_root(explicit: str | None = None) -> Path:
+    candidates: list[Path] = []
+    if explicit:
+        candidates.append(Path(explicit))
+    folder = executable_folder()
+    candidates.extend((folder, folder.parent, folder.parent.parent))
+    if DEFAULT_UDP001_ROOT and not DEFAULT_UDP001_ROOT.startswith("__U001_"):
+        candidates.append(Path(DEFAULT_UDP001_ROOT))
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if valid_udp001_root(resolved):
+            return resolved
+    raise LauncherError("UDP001_ROOT_NOT_FOUND")
+
+
+def python_candidates() -> list[Path]:
+    values: list[str] = []
+    environment = os.environ.get("U001_PYTHON", "").strip()
+    if environment:
+        values.append(environment)
+    if DEFAULT_PYTHON and not DEFAULT_PYTHON.startswith("__U001_"):
+        values.append(DEFAULT_PYTHON)
+    for name in ("pythonw.exe", "python.exe"):
+        found = shutil.which(name)
+        if found:
+            values.append(found)
+    result: list[Path] = []
+    seen: set[str] = set()
+    for value in values:
+        path = Path(value)
+        key = os.path.normcase(str(path))
+        if key not in seen:
+            seen.add(key)
+            result.append(path)
+    return result
+
+
+def validate_python(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    command = [
+        str(path),
+        "-c",
+        "import sys,tkinter;raise SystemExit(0 if sys.version_info[:2]>=(3,9) else 7)",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
+            shell=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def resolve_python() -> Path:
+    for candidate in python_candidates():
+        if validate_python(candidate):
+            return candidate.resolve()
+    raise LauncherError("PYTHON_WITH_TKINTER_NOT_FOUND")
+
+
+def atomic_write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_bytes(text.encode("utf-8"))
+    temporary.replace(path)
+
+
+def build_probe_capsule(root_ok: bool, python_ok: bool, gui_ok: bool, orchestrator_ok: bool) -> str:
+    errors = sum(not value for value in (root_ok, python_ok, gui_ok, orchestrator_ok))
+    return (
+        "U001LAUNCH1\n"
+        f"N-R{int(root_ok)}-P{int(python_ok)}-G{int(gui_ok)}-O{int(orchestrator_ok)}-X{errors}\n"
+        f"C-{0 if errors == 0 else 7}\n"
+    )
+
+
+def run_probe(explicit_root: str | None, output: Path) -> int:
+    root_ok = python_ok = gui_ok = orchestrator_ok = False
+    try:
+        root = resolve_udp001_root(explicit_root)
+        root_ok = True
+        gui_ok = (root / "01_PROGRAMS" / GUI_NAME).is_file()
+        orchestrator_ok = (root / "01_PROGRAMS" / ORCHESTRATOR_NAME).is_file()
+        resolve_python()
+        python_ok = True
+    except LauncherError:
+        pass
+    capsule = build_probe_capsule(root_ok, python_ok, gui_ok, orchestrator_ok)
+    atomic_write(output, capsule)
+    return 0 if capsule.rstrip().endswith("C-0") else 7
+
+
+def show_error(message: str) -> None:
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(0, message, "U001 Workbench", 0x10)
+            return
+        except Exception:
+            pass
+    print(message, file=sys.stderr)
+
+
+def launch_gui(explicit_root: str | None) -> int:
+    root = resolve_udp001_root(explicit_root)
+    python_exe = resolve_python()
+    gui = root / "01_PROGRAMS" / GUI_NAME
+    subprocess.Popen(
+        [str(python_exe), str(gui)],
+        cwd=str(root.parent),
+        close_fds=True,
+        shell=False,
+    )
+    return 0
+
+
+def run_self_test() -> None:
+    passed = 0
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "UDP001"
+        programs = root / "01_PROGRAMS"
+        programs.mkdir(parents=True)
+        (programs / GUI_NAME).write_text("x", encoding="utf-8")
+        (programs / ORCHESTRATOR_NAME).write_text("x", encoding="utf-8")
+        passed += int(valid_udp001_root(root))
+        passed += int(not valid_udp001_root(root.parent))
+        capsule = build_probe_capsule(True, True, True, True)
+        passed += int(capsule.startswith("U001LAUNCH1\n"))
+        passed += int("N-R1-P1-G1-O1-X0" in capsule)
+        passed += int(capsule.endswith("C-0\n"))
+        failed = build_probe_capsule(True, False, True, True)
+        passed += int("X1" in failed)
+        passed += int(failed.endswith("C-7\n"))
+        output = root / "test.txt"
+        atomic_write(output, capsule)
+        passed += int(output.read_text(encoding="utf-8") == capsule)
+        passed += int(GUI_NAME.endswith("v0_3.py"))
+        passed += int(ORCHESTRATOR_NAME.endswith("v0_5.py"))
+    if passed != 10:
+        raise AssertionError(f"SELFTEST_COUNT:{passed}")
+    print(SELFTEST_TOKEN)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="U001 Workbench one-click launcher")
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--probe", action="store_true")
+    parser.add_argument("--udp001-root")
+    parser.add_argument("--probe-out")
+    args = parser.parse_args(argv)
+    if args.self_test:
+        run_self_test()
+        return 0
+    if args.probe:
+        if not args.probe_out:
+            parser.error("--probe requires --probe-out")
+        return run_probe(args.udp001_root, Path(args.probe_out))
+    try:
+        return launch_gui(args.udp001_root)
+    except Exception as exc:
+        show_error(str(exc))
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

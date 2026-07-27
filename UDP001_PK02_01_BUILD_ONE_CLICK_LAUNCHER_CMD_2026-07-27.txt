@@ -1,0 +1,128 @@
+UDP001 PK02 — BUILD ONE-CLICK U001 LAUNCHER
+Date: 2026-07-27
+Execution environment: Windows CMD
+Status: CONTROLLED SAME-MACHINE PACKAGE BUILD
+
+======================================================================
+1. OUTPUT AND SCOPE
+======================================================================
+
+This task creates:
+
+UDP001\00_LAUNCHER\
+  U001_Workbench.exe
+  _evidence\
+
+The user opens U001 through U001_Workbench.exe.  Config, Preflight, and Run
+outputs continue to be controlled by GUI v0.3 below each Case/Run folder.
+
+This first release is bound to the validated company PC Python environment.
+The launcher EXE contains its own launcher runtime, but the independent Gate
+programs intentionally continue to run through the existing validated Python.
+This avoids changing the accepted G8A2 subprocess architecture.
+
+No Data Contract or Gate algorithm is modified.
+
+======================================================================
+2. DOWNLOAD THREE FILES
+======================================================================
+
+Download these files to C-CODE\UDP001\04_TEMP:
+
+1. u001_workbench_launcher_v0_1.py.txt
+2. u001_package_builder_v0_1.py.txt
+3. this instruction file
+
+From C-CODE CMD rename the two programs:
+
+ren .\UDP001\04_TEMP\u001_workbench_launcher_v0_1.py.txt u001_workbench_launcher_v0_1.py
+
+ren .\UDP001\04_TEMP\u001_package_builder_v0_1.py.txt u001_package_builder_v0_1.py
+
+Do not ask Copilot to regenerate or modify either program.
+
+======================================================================
+3. INSTALL THE MISSING PACKAGER
+======================================================================
+
+PK01 reported P0, so run from C-CODE CMD:
+
+python -m pip install --user pyinstaller
+
+Then verify:
+
+python -m PyInstaller --version
+
+If either command fails, stop and return only its final error line.  Do not ask
+Copilot to replace PyInstaller or rewrite the launcher.
+
+======================================================================
+4. SOURCE SELF-TESTS
+======================================================================
+
+Run:
+
+python .\UDP001\04_TEMP\u001_workbench_launcher_v0_1.py --self-test
+
+Required:
+
+U001-LAUNCHER-SELFTEST-PASS-10
+
+Run:
+
+python .\UDP001\04_TEMP\u001_package_builder_v0_1.py --self-test
+
+Required:
+
+U001-PACKAGE-BUILDER-SELFTEST-PASS-12
+
+Stop on any other result.
+
+======================================================================
+5. BUILD AND MACHINE-PROBE THE EXE
+======================================================================
+
+Confirm that UDP001\00_LAUNCHER does not exist or is empty.
+
+Run the following as one CMD line from C-CODE:
+
+python .\UDP001\04_TEMP\u001_package_builder_v0_1.py --build --udp001-root .\UDP001 --preflight-report .\UDP001\03_CASES\TC001_20260422\03_RETURN\PK01_PREFLIGHT_01\u001_packaging_preflight_report.json --launcher-source .\UDP001\04_TEMP\u001_workbench_launcher_v0_1.py --out .\UDP001\00_LAUNCHER
+
+The builder automatically:
+
+- reads the accepted PK01 JSON and its D1 dependency name;
+- verifies that dependency in the current Python;
+- embeds the validated Python and UDP001 paths in the launcher;
+- builds one windowed U001_Workbench.exe;
+- runs an EXE-level launcher probe;
+- writes hashes, dependency names, limitations, and build evidence;
+- removes successful temporary build files;
+- refuses to overwrite a non-empty launcher folder.
+
+Required generated output:
+
+U001PK02
+N-R1-D1-I1-B1-E1-L1-M1-X0
+C-0
+
+======================================================================
+6. HUMAN ONE-CLICK CHECK
+======================================================================
+
+In File Explorer, double-click:
+
+C-CODE\UDP001\00_LAUNCHER\U001_Workbench.exe
+
+Confirm that GUI v0.3 opens.  Do not run a CAN job in this step.
+
+======================================================================
+7. RETURN
+======================================================================
+
+Return the three generated U001PK02 lines and one short human token:
+
+PK02-GUI-OPEN-OK
+
+If C-7 occurs, return the two error lines exactly and at most one short Memo.
+
+END
