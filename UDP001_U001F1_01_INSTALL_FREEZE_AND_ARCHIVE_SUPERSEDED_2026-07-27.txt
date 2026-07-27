@@ -1,0 +1,76 @@
+UDP001 U001F1 — INSTALL FREEZE AND ARCHIVE SUPERSEDED PROGRAMS
+Date: 2026-07-27
+Status: FINAL CURRENT-CASE U001 INSTALLATION CLEANUP
+
+======================================================================
+1. PURPOSE
+======================================================================
+
+Install accepted GUI v0.2, move superseded program versions out of the active
+01_PROGRAMS folder, and freeze U001 feature development before U002 begins.
+
+Do not delete any program or Case evidence.
+
+Close the U001 GUI before executing.
+
+======================================================================
+2. RUN FROM C-CODE POWERSHELL
+======================================================================
+
+$archive = ".\UDP001\ARCH\SUPERSEDED_20260727"
+New-Item -ItemType Directory -Force $archive
+
+if (Test-Path ".\UDP001\04_TEMP\u001_data_preparation_workbench_gui_v0_2.py") {
+    Move-Item ".\UDP001\04_TEMP\u001_data_preparation_workbench_gui_v0_2.py" ".\UDP001\01_PROGRAMS\"
+}
+
+$superseded = @(
+    ".\UDP001\01_PROGRAMS\u001_output_package_assembler_v0_2.py",
+    ".\UDP001\01_PROGRAMS\u001_g8a_thin_orchestrator_v0_4.py",
+    ".\UDP001\01_PROGRAMS\u001_data_preparation_workbench_gui_v0_1.py"
+)
+
+foreach ($file in $superseded) {
+    if (Test-Path $file) {
+        Move-Item $file $archive
+    }
+}
+
+======================================================================
+3. REQUIRED ACTIVE FILE CHECK
+======================================================================
+
+Run:
+
+$required = @(
+    ".\UDP001\01_PROGRAMS\u001_output_package_assembler_v0_3.py",
+    ".\UDP001\01_PROGRAMS\u001_g8a_thin_orchestrator_v0_5.py",
+    ".\UDP001\01_PROGRAMS\u001_data_preparation_workbench_gui_v0_2.py",
+    ".\UDP001\01_PROGRAMS\u001_package_handoff_probe_v0_1.py",
+    ".\UDP001\01_PROGRAMS\u001_core_replay_comparator_v0_1.py"
+)
+
+$missing = @($required | Where-Object { -not (Test-Path $_) })
+
+if ($missing.Count -eq 0) {
+    Write-Output "U001F1-PASS-C-0"
+} else {
+    Write-Output "U001F1-FAIL-C-7"
+    $missing
+}
+
+======================================================================
+4. RETURN
+======================================================================
+
+Return only the existing output line:
+
+U001F1-PASS-C-0
+
+or, on failure, return the FAIL line and missing basenames.
+
+Do not manually construct any additional capsule.
+
+After C-0, U001 is frozen for the current vertical MVP and U002 begins.
+
+END
