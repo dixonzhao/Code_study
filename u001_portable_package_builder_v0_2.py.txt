@@ -1,0 +1,600 @@
+#!/usr/bin/env python3
+"""Build and isolate-validate the U001 cross-PC portable folder and ZIP."""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import datetime
+from pathlib import Path, PureWindowsPath
+from typing import Callable, Sequence
+
+
+PROGRAM_NAME = "u001_portable_package_builder_v0_2.py"
+PROGRAM_VERSION = "0.2"
+SELFTEST_TOKEN = "U001-PORTABLE-PACKAGE-BUILDER-V02-SELFTEST-PASS-25"
+PREFLIGHT_SCHEMA = "UDP001_PACKAGING_PREFLIGHT_V0_1"
+RUNTIME_SCHEMA = "UDP001_PORTABLE_RUNTIME_PROBE_V0_1"
+RUNTIME_TOKEN = "__U001_PORTABLE_RUNTIME_RELATIVE__"
+STRICT_TOKEN = "__U001_STRICT_PORTABLE__"
+PACKAGE_NAME = "U001_Portable_v0_1"
+EXPECTED_PROGRAMS = (
+    "u001_foundation_core_v0_1.py",
+    "u001_selected_update_decoder_v0_1.py",
+    "u001_framecount_assignment_v0_1.py",
+    "u001_semantic_validity_classifier_v0_1.py",
+    "u001_framecount_view_builder_v0_1.py",
+    "u001_signal_cadence_bounded_hold_v0_1.py",
+    "u001_output_package_assembler_v0_3.py",
+    "u001_g8a_thin_orchestrator_v0_5.py",
+    "u001_data_preparation_workbench_gui_v0_3.py",
+)
+
+
+class PortableBuildError(RuntimeError):
+    pass
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def atomic_write(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_bytes(data)
+    temporary.replace(path)
+
+
+def atomic_json(path: Path, value: dict) -> None:
+    atomic_write(
+        path,
+        (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8"),
+    )
+
+
+def load_json(path: Path, schema: str) -> dict:
+    if not path.is_file():
+        raise PortableBuildError(f"REPORT_NOT_FOUND:{path.name}")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PortableBuildError(f"REPORT_INVALID:{path.name}") from exc
+    if value.get("Schema") != schema:
+        raise PortableBuildError(f"REPORT_SCHEMA_MISMATCH:{path.name}")
+    return value
+
+
+def validate_reports(preflight: dict, runtime: dict) -> list[str]:
+    if int(preflight.get("Summary", {}).get("BlockingErrorCount", 1)) != 0:
+        raise PortableBuildError("PK01_PREFLIGHT_NOT_ACCEPTED")
+    if int(runtime.get("BlockingErrorCount", 1)) != 0:
+        raise PortableBuildError("PK03_RUNTIME_PROBE_NOT_ACCEPTED")
+    dependencies = sorted(set(preflight.get("Summary", {}).get("ExternalImports", [])))
+    if dependencies != sorted(set(runtime.get("ExternalImports", []))):
+        raise PortableBuildError("DEPENDENCY_LIST_DISAGREEMENT")
+    if not all(isinstance(name, str) and name for name in dependencies):
+        raise PortableBuildError("DEPENDENCY_LIST_INVALID")
+    return dependencies
+
+
+def default_ignore(directory: str, names: list[str]) -> set[str]:
+    ignored = {name for name in names if name in {"__pycache__", ".git"} or name.endswith((".pyc", ".pyo"))}
+    return ignored
+
+
+def base_ignore_factory(base: Path) -> Callable[[str, list[str]], set[str]]:
+    base_lib = (base / "Lib").resolve()
+
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        ignored = default_ignore(directory, names)
+        try:
+            if Path(directory).resolve() == base_lib and "site-packages" in names:
+                ignored.add("site-packages")
+        except OSError:
+            pass
+        return ignored
+
+    return ignore
+
+
+def copy_runtime(runtime_report: dict, destination: Path) -> dict:
+    environment = runtime_report.get("Environment", {})
+    base = Path(environment.get("BasePrefix", ""))
+    site_packages = Path(environment.get("SitePackages", ""))
+    if not base.is_dir() or not site_packages.is_dir():
+        raise PortableBuildError("RUNTIME_SOURCE_PATH_MISSING")
+    shutil.copytree(base, destination, ignore=base_ignore_factory(base))
+    target_site = destination / "Lib" / "site-packages"
+    target_site.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(
+        site_packages,
+        target_site,
+        dirs_exist_ok=True,
+        ignore=default_ignore,
+    )
+    return {
+        "BaseSourceFiles": int(runtime_report.get("BaseTree", {}).get("Files", 0)),
+        "SiteSourceFiles": int(runtime_report.get("SitePackagesTree", {}).get("Files", 0)),
+        "SanitizedPth": sanitize_pth_files(target_site, site_packages),
+    }
+
+
+def windows_absolute_text(value: str) -> bool:
+    return bool(re.match(r"^(?:[A-Za-z]:[\\/]|\\\\)", value.strip()))
+
+
+def internal_windows_relative(value: str, source_root: str) -> str | None:
+    """Return a portable relative path when value is inside source_root."""
+    target = PureWindowsPath(value.strip())
+    root = PureWindowsPath(source_root.strip())
+    target_parts = target.parts
+    root_parts = root.parts
+    if not target_parts or len(target_parts) < len(root_parts):
+        return None
+    if tuple(part.casefold() for part in target_parts[: len(root_parts)]) != tuple(
+        part.casefold() for part in root_parts
+    ):
+        return None
+    remainder = target_parts[len(root_parts) :]
+    return str(PureWindowsPath(*remainder)) if remainder else "."
+
+
+def sanitize_pth_files(site_packages: Path, source_site_packages: Path) -> dict:
+    files_changed = 0
+    internal_lines_rebased = 0
+    external_lines_removed = 0
+    for path in sorted(site_packages.glob("*.pth")):
+        try:
+            original = path.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeDecodeError):
+            continue
+        kept: list[str] = []
+        changed = False
+        for line in original.splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith(("#", "import ")) and windows_absolute_text(stripped):
+                relative = internal_windows_relative(stripped, str(source_site_packages))
+                if relative is None:
+                    changed = True
+                    external_lines_removed += 1
+                    continue
+                kept.append(relative)
+                changed = True
+                internal_lines_rebased += 1
+                continue
+            kept.append(line)
+        if changed:
+            atomic_write(path, (("\n".join(kept)).rstrip() + "\n").encode("utf-8"))
+            files_changed += 1
+    return {
+        "FilesChanged": files_changed,
+        "InternalAbsoluteLinesRebased": internal_lines_rebased,
+        "ExternalAbsoluteLinesRemoved": external_lines_removed,
+    }
+
+
+def program_records(preflight: dict) -> dict[str, dict]:
+    records = preflight.get("Programs")
+    if not isinstance(records, list):
+        raise PortableBuildError("PROGRAM_RECORDS_INVALID")
+    result: dict[str, dict] = {}
+    for record in records:
+        if not isinstance(record, dict) or not isinstance(record.get("Filename"), str):
+            raise PortableBuildError("PROGRAM_RECORD_INVALID")
+        filename = record["Filename"]
+        if filename in result:
+            raise PortableBuildError(f"DUPLICATE_PROGRAM_RECORD:{filename}")
+        result[filename] = record
+    if set(result) != set(EXPECTED_PROGRAMS):
+        raise PortableBuildError("PROGRAM_INVENTORY_MISMATCH")
+    return result
+
+
+def copy_programs(udp001_root: Path, preflight: dict, destination: Path) -> list[dict]:
+    records = program_records(preflight)
+    source_root = udp001_root / "01_PROGRAMS"
+    destination.mkdir(parents=True)
+    copied: list[dict] = []
+    for filename in EXPECTED_PROGRAMS:
+        source = source_root / filename
+        if not source.is_file():
+            raise PortableBuildError(f"PROGRAM_NOT_FOUND:{filename}")
+        digest = sha256_file(source)
+        if digest != records[filename].get("SHA256"):
+            raise PortableBuildError(f"PROGRAM_HASH_CHANGED:{filename}")
+        target = destination / filename
+        shutil.copy2(source, target)
+        copied.append({"Filename": filename, "Bytes": target.stat().st_size, "SHA256": digest})
+    return copied
+
+
+def portable_environment(runtime: Path) -> dict[str, str]:
+    environment = os.environ.copy()
+    environment.pop("VIRTUAL_ENV", None)
+    environment.pop("PYTHONPATH", None)
+    environment["PYTHONHOME"] = str(runtime.resolve())
+    environment["PYTHONNOUSERSITE"] = "1"
+    system_root = environment.get("SystemRoot", r"C:\Windows")
+    environment["PATH"] = os.pathsep.join(
+        (str(runtime.resolve()), str((runtime / "DLLs").resolve()), str(Path(system_root) / "System32"), system_root)
+    )
+    return environment
+
+
+def run_portable_runtime_validation(runtime: Path, dependencies: list[str], evidence: Path) -> dict:
+    python = runtime / "python.exe"
+    pythonw = runtime / "pythonw.exe"
+    if not python.is_file() or not pythonw.is_file():
+        raise PortableBuildError("COPIED_RUNTIME_EXECUTABLE_MISSING")
+    roots = ["tkinter", *dependencies]
+    script = (
+        "import importlib,json,os,sys;from pathlib import Path;"
+        "r=Path(sys.prefix).resolve();o={};"
+        f"mods={roots!r};"
+        "[(o.__setitem__(n,str(Path(importlib.import_module(n).__file__).resolve()))) for n in mods];"
+        "ok=all(os.path.normcase(os.path.commonpath([str(r),p]))==os.path.normcase(str(r)) for p in o.values());"
+        "print(json.dumps({'Prefix':str(r),'Origins':o,'InsideRuntime':ok,'Executable':sys.executable}));"
+        "raise SystemExit(0 if ok else 7)"
+    )
+    result = subprocess.run(
+        [str(python), "-I", "-c", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=180,
+        shell=False,
+        env=portable_environment(runtime),
+    )
+    atomic_write(evidence / "runtime_validation_stdout.txt", result.stdout.encode("utf-8"))
+    atomic_write(evidence / "runtime_validation_stderr.txt", result.stderr.encode("utf-8"))
+    if result.returncode != 0:
+        raise PortableBuildError("COPIED_RUNTIME_IMPORT_VALIDATION_FAILED")
+    try:
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError) as exc:
+        raise PortableBuildError("COPIED_RUNTIME_VALIDATION_OUTPUT_INVALID") from exc
+    if Path(payload.get("Prefix", "")).resolve() != runtime.resolve() or not payload.get("InsideRuntime"):
+        raise PortableBuildError("COPIED_RUNTIME_NOT_ISOLATED")
+    return payload
+
+
+def run_program_selftests(runtime: Path, programs: Path, evidence: Path) -> list[dict]:
+    results: list[dict] = []
+    python = runtime / "python.exe"
+    for filename in EXPECTED_PROGRAMS:
+        result = subprocess.run(
+            [str(python), str(programs / filename), "--self-test"],
+            cwd=str(programs),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=300,
+            shell=False,
+            env=portable_environment(runtime),
+        )
+        record = {
+            "Filename": filename,
+            "ReturnCode": result.returncode,
+            "PassTokenObserved": "PASS" in result.stdout.upper(),
+        }
+        results.append(record)
+        safe_name = Path(filename).stem
+        atomic_write(evidence / f"selftest_{safe_name}_stdout.txt", result.stdout.encode("utf-8"))
+        atomic_write(evidence / f"selftest_{safe_name}_stderr.txt", result.stderr.encode("utf-8"))
+        if result.returncode != 0 or not record["PassTokenObserved"]:
+            raise PortableBuildError(f"PORTABLE_PROGRAM_SELFTEST_FAILED:{filename}")
+    return results
+
+
+def assigned_string_constant(source_text: str, variable_name: str) -> str | None:
+    tree = ast.parse(source_text)
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Constant):
+            continue
+        if not isinstance(node.value.value, str):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == variable_name:
+                return node.value.value
+    return None
+
+
+def render_launcher(source: Path, destination: Path) -> None:
+    if not source.is_file():
+        raise PortableBuildError("PORTABLE_LAUNCHER_SOURCE_NOT_FOUND")
+    text = source.read_text(encoding="utf-8-sig")
+    if text.count(RUNTIME_TOKEN) != 1 or text.count(STRICT_TOKEN) != 1:
+        raise PortableBuildError("PORTABLE_LAUNCHER_TOKEN_MISMATCH")
+    text = text.replace(RUNTIME_TOKEN, "../../_internal/runtime/pythonw.exe")
+    text = text.replace(STRICT_TOKEN, "1")
+    if assigned_string_constant(text, "PORTABLE_RUNTIME_RELATIVE") != "../../_internal/runtime/pythonw.exe":
+        raise PortableBuildError("PORTABLE_LAUNCHER_RUNTIME_RENDER_FAILED")
+    if assigned_string_constant(text, "STRICT_PORTABLE_TEXT") != "1":
+        raise PortableBuildError("PORTABLE_LAUNCHER_STRICT_RENDER_FAILED")
+    atomic_write(destination, text.encode("utf-8"))
+
+
+def build_launcher(generated_source: Path, launcher_out: Path, build_root: Path, evidence: Path) -> None:
+    source_test = subprocess.run(
+        [sys.executable, str(generated_source), "--self-test"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        shell=False,
+    )
+    if source_test.returncode != 0 or "U001-PORTABLE-LAUNCHER-SELFTEST-PASS-14" not in source_test.stdout:
+        raise PortableBuildError("GENERATED_PORTABLE_LAUNCHER_SELFTEST_FAILED")
+    dist = build_root / "launcher_dist"
+    work = build_root / "launcher_work"
+    spec = build_root / "launcher_spec"
+    for path in (dist, work, spec):
+        path.mkdir()
+    command = [
+        sys.executable,
+        "-m",
+        "PyInstaller",
+        "--noconfirm",
+        "--clean",
+        "--onefile",
+        "--windowed",
+        "--name",
+        "U001_Workbench",
+        "--distpath",
+        str(dist),
+        "--workpath",
+        str(work),
+        "--specpath",
+        str(spec),
+        str(generated_source),
+    ]
+    build = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=900,
+        shell=False,
+    )
+    atomic_write(evidence / "pyinstaller_stdout.txt", build.stdout.encode("utf-8"))
+    atomic_write(evidence / "pyinstaller_stderr.txt", build.stderr.encode("utf-8"))
+    built = dist / "U001_Workbench.exe"
+    if build.returncode != 0 or not built.is_file() or built.stat().st_size <= 0:
+        raise PortableBuildError("PORTABLE_LAUNCHER_BUILD_FAILED")
+    launcher_out.parent.mkdir(parents=True)
+    shutil.copy2(built, launcher_out)
+
+
+def probe_launcher(launcher: Path, probe_out: Path) -> str:
+    result = subprocess.run(
+        [str(launcher), "--probe", "--probe-out", str(probe_out.resolve())],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=180,
+        shell=False,
+    )
+    text = probe_out.read_text(encoding="utf-8-sig") if probe_out.is_file() else ""
+    if result.returncode != 0 or "N-R1-P1-E1-G1-O1-X0" not in text or not text.rstrip().endswith("C-0"):
+        raise PortableBuildError("PORTABLE_LAUNCHER_PROBE_FAILED")
+    return text
+
+
+def run_build(
+    udp001_root: Path,
+    preflight_path: Path,
+    runtime_path: Path,
+    launcher_source: Path,
+    out: Path,
+) -> int:
+    if os.name != "nt" or udp001_root.name != "UDP001" or not udp001_root.is_dir():
+        raise PortableBuildError("WINDOWS_UDP001_ROOT_REQUIRED")
+    if out.exists() and (not out.is_dir() or any(out.iterdir())):
+        raise PortableBuildError("RELEASE_OUTPUT_MUST_BE_ABSENT_OR_EMPTY")
+    if not importlib.util.find_spec("PyInstaller"):
+        raise PortableBuildError("PYINSTALLER_NOT_INSTALLED")
+    preflight = load_json(preflight_path, PREFLIGHT_SCHEMA)
+    runtime_report = load_json(runtime_path, RUNTIME_SCHEMA)
+    dependencies = validate_reports(preflight, runtime_report)
+    build_root = udp001_root / "04_TEMP" / f"PK03_BUILD_WORK_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    if build_root.exists():
+        raise PortableBuildError("PK03_BUILD_WORK_ALREADY_EXISTS")
+    build_root.mkdir(parents=True)
+    release_stage = build_root / "release_stage"
+    release_stage.mkdir()
+    package = release_stage / PACKAGE_NAME
+    portable_udp001 = package / "UDP001"
+    programs = portable_udp001 / "01_PROGRAMS"
+    cases = portable_udp001 / "03_CASES"
+    launcher_folder = portable_udp001 / "00_LAUNCHER"
+    runtime = package / "_internal" / "runtime"
+    evidence = package / "_internal" / "evidence"
+    evidence.mkdir(parents=True)
+    cases.mkdir(parents=True)
+    runtime_copy = copy_runtime(runtime_report, runtime)
+    copied_programs = copy_programs(udp001_root, preflight, programs)
+    runtime_validation = run_portable_runtime_validation(runtime, dependencies, evidence)
+    program_tests = run_program_selftests(runtime, programs, evidence)
+    generated_launcher = build_root / "u001_portable_launcher_generated.py"
+    render_launcher(launcher_source, generated_launcher)
+    launcher = launcher_folder / "U001_Workbench.exe"
+    build_launcher(generated_launcher, launcher, build_root, evidence)
+    launcher_probe_path = evidence / "u001_portable_launcher_probe.txt"
+    launcher_probe = probe_launcher(launcher, launcher_probe_path)
+    readme = (
+        "U001 PORTABLE WORKBENCH\n\n"
+        "1. Keep this entire folder together.\n"
+        "2. Open UDP001\\00_LAUNCHER\\U001_Workbench.exe.\n"
+        "3. Create a new Case from Raw CAN CSV, DBC1, and DBC2.\n"
+        "4. No system Python installation is required.\n"
+        "5. Company CAN, DBC, Case, and output data are not included in this package.\n"
+    )
+    atomic_write(package / "README_FIRST.txt", readme.encode("utf-8"))
+    manifest = {
+        "Schema": "UDP001_PORTABLE_PACKAGE_V0_1",
+        "CreatedLocal": datetime.now().isoformat(timespec="seconds"),
+        "PackageName": PACKAGE_NAME,
+        "PortableRuntimeIncluded": True,
+        "CompanyDataIncluded": False,
+        "ExternalImports": dependencies,
+        "RuntimeCopy": runtime_copy,
+        "RuntimeValidation": runtime_validation,
+        "Programs": copied_programs,
+        "ProgramSelftests": program_tests,
+        "Launcher": {
+            "Filename": "U001_Workbench.exe",
+            "Bytes": launcher.stat().st_size,
+            "SHA256": sha256_file(launcher),
+            "Probe": launcher_probe.strip().splitlines(),
+        },
+        "InputEvidence": {
+            "PK01SHA256": sha256_file(preflight_path),
+            "PK03P1SHA256": sha256_file(runtime_path),
+            "LauncherTemplateSHA256": sha256_file(launcher_source),
+        },
+        "AcceptanceBoundary": [
+            "Isolation was proven on the build PC using the copied runtime.",
+            "Final cross-PC acceptance still requires one launch on a second compatible Windows PC.",
+        ],
+    }
+    atomic_json(evidence / "u001_portable_package_manifest.json", manifest)
+    capsule = (
+        "U001PK03\n"
+        f"N-R1-D{len(dependencies)}-C1-P9-S9-I1-B1-L1-Z1-M1-X0\n"
+        "C-0\n"
+    )
+    atomic_write(evidence / "u001_portable_package_capsule.txt", capsule.encode("utf-8"))
+    archive_base = release_stage / PACKAGE_NAME
+    zip_path = Path(shutil.make_archive(str(archive_base), "zip", root_dir=release_stage, base_dir=PACKAGE_NAME))
+    if not zip_path.is_file() or zip_path.stat().st_size <= 0:
+        raise PortableBuildError("PORTABLE_ZIP_BUILD_FAILED")
+    if out.exists():
+        out.rmdir()
+    release_stage.replace(out)
+    shutil.rmtree(build_root, ignore_errors=True)
+    print(capsule, end="")
+    return 0
+
+
+def run_self_test() -> None:
+    passed = 0
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        preflight = {
+            "Schema": PREFLIGHT_SCHEMA,
+            "Summary": {"BlockingErrorCount": 0, "ExternalImports": ["json"]},
+            "Programs": [],
+        }
+        runtime = {
+            "Schema": RUNTIME_SCHEMA,
+            "BlockingErrorCount": 0,
+            "ExternalImports": ["json"],
+        }
+        passed += int(validate_reports(preflight, runtime) == ["json"])
+        preflight_path = root / "preflight.json"
+        runtime_path = root / "runtime.json"
+        atomic_json(preflight_path, preflight)
+        atomic_json(runtime_path, runtime)
+        passed += int(load_json(preflight_path, PREFLIGHT_SCHEMA)["Schema"] == PREFLIGHT_SCHEMA)
+        passed += int(load_json(runtime_path, RUNTIME_SCHEMA)["Schema"] == RUNTIME_SCHEMA)
+        passed += int(windows_absolute_text(r"C:\x"))
+        passed += int(windows_absolute_text(r"\\server\x"))
+        passed += int(not windows_absolute_text("relative/path"))
+        site_root = root / "site-packages"
+        site_root.mkdir()
+        pth = site_root / "test.pth"
+        pth.write_text("C:\\old\\path\nimport site\nrelative\n", encoding="utf-8")
+        sanitization = sanitize_pth_files(site_root, Path(r"C:\source\site-packages"))
+        passed += int(sanitization["FilesChanged"] == 1)
+        passed += int(sanitization["InternalAbsoluteLinesRebased"] == 0)
+        passed += int(sanitization["ExternalAbsoluteLinesRemoved"] == 1)
+        passed += int("C:\\old" not in pth.read_text(encoding="utf-8"))
+        internal = site_root / "internal.pth"
+        internal.write_text("C:\\source\\site-packages\\nested\\packages\n", encoding="utf-8")
+        internal_sanitization = sanitize_pth_files(site_root, Path(r"C:\source\site-packages"))
+        passed += int(internal_sanitization["InternalAbsoluteLinesRebased"] == 1)
+        passed += int(internal.read_text(encoding="utf-8").strip() == r"nested\packages")
+        passed += int(internal_windows_relative(r"C:\SOURCE\site-packages\pandas_root", r"c:\source\site-packages") == "pandas_root")
+        passed += int(internal_windows_relative(r"D:\external", r"C:\source\site-packages") is None)
+        launcher_source = root / "launcher.py"
+        launcher_source.write_text(
+            f'PORTABLE_RUNTIME_RELATIVE="{RUNTIME_TOKEN}"\nSTRICT_PORTABLE_TEXT="{STRICT_TOKEN}"\n',
+            encoding="utf-8",
+        )
+        rendered = root / "rendered.py"
+        render_launcher(launcher_source, rendered)
+        rendered_text = rendered.read_text(encoding="utf-8")
+        passed += int(assigned_string_constant(rendered_text, "PORTABLE_RUNTIME_RELATIVE") == "../../_internal/runtime/pythonw.exe")
+        passed += int(assigned_string_constant(rendered_text, "STRICT_PORTABLE_TEXT") == "1")
+        file = root / "hash.txt"
+        file.write_text("x", encoding="utf-8")
+        passed += int(len(sha256_file(file)) == 64)
+        passed += int(default_ignore(str(root), ["a.pyc", "b", "__pycache__"]) == {"a.pyc", "__pycache__"})
+        environment = portable_environment(root)
+        passed += int(environment["PYTHONHOME"] == str(root.resolve()))
+        passed += int(environment["PYTHONNOUSERSITE"] == "1")
+        passed += int(PROGRAM_NAME.endswith("v0_2.py"))
+        passed += int(PROGRAM_VERSION == "0.2")
+        passed += int(len(EXPECTED_PROGRAMS) == 9)
+        passed += int(PACKAGE_NAME == "U001_Portable_v0_1")
+        passed += int(PREFLIGHT_SCHEMA != RUNTIME_SCHEMA)
+    if passed != 25:
+        raise AssertionError(f"SELFTEST_COUNT:{passed}")
+    print(SELFTEST_TOKEN)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="U001 cross-PC portable package builder")
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--build", action="store_true")
+    parser.add_argument("--udp001-root")
+    parser.add_argument("--preflight-report")
+    parser.add_argument("--runtime-report")
+    parser.add_argument("--launcher-source")
+    parser.add_argument("--out")
+    args = parser.parse_args(argv)
+    if args.self_test:
+        run_self_test()
+        return 0
+    if args.build:
+        if not all((args.udp001_root, args.preflight_report, args.runtime_report, args.launcher_source, args.out)):
+            parser.error("--build requires --udp001-root --preflight-report --runtime-report --launcher-source --out")
+        try:
+            return run_build(
+                Path(args.udp001_root),
+                Path(args.preflight_report),
+                Path(args.runtime_report),
+                Path(args.launcher_source),
+                Path(args.out),
+            )
+        except PortableBuildError as exc:
+            print(f"U001PK03-ERROR:{exc}")
+            print("C-7")
+            return 7
+    parser.error("select --self-test or --build")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
