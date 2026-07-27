@@ -1,0 +1,119 @@
+UDP001 CASEF1 — GUI v0.3 NEW CASE WORKSPACE ACCEPTANCE
+Date: 2026-07-27
+Status: CONTROLLED ACCEPTANCE BEFORE PACKAGING
+
+======================================================================
+1. PURPOSE
+======================================================================
+
+Validate the user-facing Case creation and automatic Run-path workflow before
+U001 is packaged.  No decoding algorithm, Gate rule, Data Contract, or accepted
+Case evidence is changed by this task.
+
+GUI v0.3 adds:
+
+- selection of one Raw CAN CSV, DBC Channel 1, and DBC Channel 2;
+- creation of a new Case workspace under UDP001/03_CASES;
+- source copies with fixed aliases CANDump.csv, DBC1.dbc, and DBC2.dbc;
+- SHA-256 and physical-row evidence in u001_case_manifest.json;
+- a safe positive full-source Maximum Raw rows recommendation;
+- one unique Run folder containing Config, Preflight, and Output locations.
+
+The selected original files are copied.  They are never moved or modified.
+An existing Case folder is never overwritten.
+
+======================================================================
+2. NEW FOLDER CONTRACT
+======================================================================
+
+UDP001/03_CASES/<CaseID>/
+  00_SOURCE-READONLY/
+    CANDump.csv
+    DBC1.dbc
+    DBC2.dbc
+  01_CONFIG/
+  02_RUNS/
+    <CaseID>_RUN_<timestamp>/
+      00_CONFIG/u001_g8a2_config.json
+      01_PREFLIGHT/
+      02_OUTPUT/
+  03_RETURN/
+  04_EXPORT/
+  u001_case_manifest.json
+
+Config, Preflight, and Output shown by the GUI must share the same unique Run
+folder.  A later Run receives a new timestamp and does not overwrite evidence.
+
+======================================================================
+3. INSTALL IN TEMP
+======================================================================
+
+Download:
+
+u001_data_preparation_workbench_gui_v0_3.py.txt
+
+Place it in:
+
+C-CODE/UDP001/04_TEMP/
+
+Rename only the final suffix:
+
+u001_data_preparation_workbench_gui_v0_3.py
+
+Do not replace GUI v0.2 in 01_PROGRAMS yet.
+
+======================================================================
+4. MACHINE SELF-TEST
+======================================================================
+
+Run from C-CODE:
+
+python .\UDP001\04_TEMP\u001_data_preparation_workbench_gui_v0_3.py --self-test
+
+Required exact output:
+
+U001-GUIV03-SELFTEST-PASS-22
+
+The self-test creates and removes a tiny synthetic Case.  It does not read or
+copy TC001_20260422 and does not run the U001 backend.
+
+Stop on any other output.
+
+======================================================================
+5. GUI VISUAL ACCEPTANCE — NO DATA RUN
+======================================================================
+
+Start from C-CODE:
+
+python .\UDP001\04_TEMP\u001_data_preparation_workbench_gui_v0_3.py
+
+Confirm all of the following:
+
+1. The top section is "New Case setup" and contains Case ID, Raw CAN CSV,
+   DBC Channel 1, DBC Channel 2, and Create New Case Workspace.
+2. The existing TC001_20260422 Case can be auto-detected.
+3. Click "Prepare new Run paths" once.
+4. Config JSON, Preflight output, and Run output all contain the same new
+   TC001_20260422_RUN_<timestamp> folder.
+5. The GUI remains responsive and no existing Run folder is changed.
+
+Do not select the 800 MB source and do not create a duplicate production Case
+for this acceptance.  New Case file-copy behavior is already covered by the
+22-item machine self-test.
+
+======================================================================
+6. RETURN
+======================================================================
+
+On success return only these two short tokens:
+
+U001-GUIV03-SELFTEST-PASS-22
+GUIV03-OPEN-OK
+
+On failure return the self-test output plus at most one short Memo describing
+the visible UI problem.  Do not manually compose a technical capsule.
+
+After PASS, v0.3 will replace v0.2 and the portable one-click folder package
+will be built once against the accepted interface.
+
+END
