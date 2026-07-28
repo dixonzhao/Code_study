@@ -1,0 +1,588 @@
+UDP001 G10C1 - HEADLESS DISCOVERY CONTROLLER
+COMPLETE IMPLEMENTATION SPECIFICATION v0.1
+Date: 2026-07-29
+Status: AUTHORITATIVE IMPLEMENTATION SPECIFICATION
+
+======================================================================
+1. PROGRAM IDENTITY AND DESIGN PRINCIPLE
+======================================================================
+
+Filename:
+
+u001_discovery_controller_v0_1.py
+
+ProgramVersion:
+
+0.1
+
+Public responsibility:
+
+- create a versioned U001 discovery request;
+- validate the request and Case/program identities;
+- execute accepted G1 -> G10A2 -> G10B1 child programs in order;
+- stop on the first failure;
+- publish one machine-readable response manifest only after every child gate
+  and the final read-only validation pass;
+- support exact-hash reuse without selecting files by timestamp or "latest".
+
+The controller is control-plane code only.  It does not reimplement child
+algorithms.
+
+Import safety:
+
+- importing performs no I/O, process launch, GUI action or logging;
+- CLI execution exists only under if __name__ == "__main__";
+- no global environment, cwd or pandas option is changed;
+- every subprocess uses an explicit argument list, sys.executable,
+  shell=False and an explicit cwd equal to UDP001\01_PROGRAMS;
+- no command string is executed through a shell.
+
+======================================================================
+2. PUBLIC CLI MODES
+======================================================================
+
+Exactly one mode is required per invocation:
+
+--self-test
+
+--make-request
+  --case-root PATH
+  --out FILE
+  --request-id TEXT
+  --run-id TEXT
+  --requested-output-root RELATIVE_PATH
+  [options below]
+
+--preflight
+  --udp001-root PATH
+  --case-root PATH
+  --request FILE
+  --out PATH
+
+--run-request
+  --udp001-root PATH
+  --case-root PATH
+  --request FILE
+
+--validate-response
+  --udp001-root PATH
+  --case-root PATH
+  --response-root PATH
+
+Make-request options and defaults:
+
+- --dataset-id defaults to Case folder basename;
+- --source-id defaults SOURCE_001;
+- --segment-id defaults FULL_SOURCE;
+- --contract-version defaults U001_UNIFIED_DATA_CONTRACT_V0_1;
+- --frame-key-channel defaults 2;
+- --frame-key-can-id defaults 0x620;
+- --frame-key-signal defaults FrameCount;
+- --batch-size defaults 32, allowed 8..64;
+- --reuse-policy defaults FORCE_NEW_RUN and accepts only
+  FORCE_NEW_RUN or REUSE_EXACT_HASH_ONLY;
+- --chunksize defaults 10000 and must be positive;
+- --max-source-rows defaults 0, where 0 means the full source and is omitted
+  from the G10B child command;
+- --max-assignment-age-rows defaults 200;
+- --max-rss-mb defaults 2048;
+- --update-buffer-rows defaults 256;
+- --frame-buffer-rows defaults 32;
+- --memory-check-every-rows defaults 1000;
+- --minimum-free-gib defaults 25.
+
+Invalid mode/option combinations exit nonzero.
+
+======================================================================
+3. CASE AND PROGRAM RESOLUTION
+======================================================================
+
+The Case is valid only when these exact files exist:
+
+<CaseRoot>\00_SOURCE-READONLY\CANDump.csv
+<CaseRoot>\00_SOURCE-READONLY\DBC1.dbc
+<CaseRoot>\00_SOURCE-READONLY\DBC2.dbc
+
+The program root is exactly:
+
+<UDP001Root>\01_PROGRAMS
+
+Required exact children:
+
+- u001_foundation_core_v0_1.py
+- u001_auto_discovery_profile_builder_v0_2.py
+- u001_g10b_single_pass_discovery_engine_v0_5a.py
+
+Reject symlink/path traversal that resolves outside CaseRoot for requested
+output and outside UDP001Root for the program root.  Input files are read-only.
+
+======================================================================
+4. DISCOVERY REQUEST SCHEMA
+======================================================================
+
+Logical filename:
+
+u001_discovery_request.json
+
+Required JSON fields:
+
+- RequestSchemaVersion = U001_DISCOVERY_REQUEST_V0_1
+- RequestId
+- DatasetId
+- RunId
+- SegmentId
+- SourceId
+- RequestedU001ContractVersion = U001_UNIFIED_DATA_CONTRACT_V0_1
+- ProcessingMode = AUTO_DISCOVERY
+- SignalScope = ALL_TECHNICALLY_ELIGIBLE
+- FrameKeyChannel
+- FrameKeyCANID, normalized uppercase 0x form
+- FrameKeySignalName
+- BatchSize
+- ReusePolicy
+- RequestedOutputRoot
+- ExecutionPolicy object
+- SourceFingerprintExpected object
+
+ExecutionPolicy contains:
+
+- ChunkSize
+- MaxSourceRows, integer >=0, zero meaning full source;
+- MaxAssignmentAgeRows;
+- MaxRssMiB;
+- UpdateBufferRows;
+- FrameBufferRows;
+- MemoryCheckEveryRows;
+- MinimumFreeGiB.
+
+SourceFingerprintExpected contains one record for each fixed alias:
+
+- CANDump.csv;
+- DBC1.dbc;
+- DBC2.dbc.
+
+Each record contains Basename, SizeBytes and SHA256.  --make-request computes
+these values by streaming the physical files.  It never copies or modifies the
+source.
+
+RequestedOutputRoot rules:
+
+- relative to CaseRoot;
+- `/` is the canonical separator stored in JSON;
+- must begin `02_RUNS/`;
+- no drive, UNC path, empty component, `.` or `..` component;
+- final component must equal RunId;
+- generated request itself contains no absolute path.
+
+Request JSON is deterministic: UTF-8, sorted keys, stable indentation, newline
+termination, no wall-clock time, hostname, user name or absolute path.
+
+RequestFingerprint is SHA-256 over canonical JSON excluding the
+RequestFingerprint field and is stored in the request.
+
+Request and output files are never overwritten.  --make-request requires an
+absent output file.
+
+======================================================================
+5. PREFLIGHT
+======================================================================
+
+Preflight is read-only except for its explicit new output folder.
+
+Checks:
+
+1. exact request schema and vocabulary;
+2. RequestFingerprint recomputation;
+3. Case folder basename equals DatasetId;
+4. the three fixed source aliases exist and are nonempty;
+5. source size/hash exactly matches SourceFingerprintExpected;
+6. all three accepted child programs exist by exact basename;
+7. record child program SHA-256 values;
+8. requested output resolves below CaseRoot and follows path rules;
+9. batch/buffer/memory/row values are within specification;
+10. free disk at output parent is at least MinimumFreeGiB;
+11. FORCE_NEW_RUN requires final and temporary output roots to be absent;
+12. REUSE_EXACT_HASH_ONLY may accept an existing final response only through
+    the exact reuse rules in section 10;
+13. run each child `--self-test` once and require process exit 0 plus these
+    exact tokens in stdout:
+    - UDP001-G1-SELFTEST-PASS-16
+    - UDP001-G10A2-SELFTEST-PASS-20
+    - the exact self-test token physically produced by accepted v0.5a,
+      provided it matches
+      `UDP001-G10B1<optional uppercase/digit revision>-SELFTEST-PASS-<positive integer>`.
+      Record the exact accepted token.
+
+The flexible numeric suffix for G10B1 is deliberate because v0.5a extended
+tests during defect correction.  Exit 0 plus the strict token grammar are both
+required; generic text containing PASS is insufficient.
+
+Preflight output:
+
+- u001_g10c1_preflight_manifest.json
+- udp001_g10c1_preflight_capsule.txt
+
+No absolute path is stored.  Store basenames, hashes, policy values, checks and
+completion code.
+
+Success terminal line:
+
+G10C1-PREFLIGHT-PASS C-0
+
+Failure:
+
+G10C1-ERROR:PREFLIGHT:<CATEGORY> C-7
+
+======================================================================
+6. RUN DIRECTORY AND ATOMIC COMPLETION
+======================================================================
+
+Requested final structure:
+
+<RequestedOutputRoot>/
+  00_REQUEST/u001_discovery_request.json
+  01_G1_CATALOG/
+  02_PROFILE_CONFIG/
+  03_DISCOVERY_DATA/
+  04_RESPONSE/
+    u001_discovery_response_manifest.json
+    u001_discovery_completion_capsule.txt
+
+Build first in a sibling temporary folder:
+
+.<RunId>.g10c1_incomplete
+
+The final RequestedOutputRoot must not exist during a new run.  On success,
+atomically rename the temporary folder to the final folder.  Write the
+completion capsule last before atomic rename.
+
+On failure:
+
+- never create or rename to the final output root;
+- preserve the temporary folder only as failed evidence;
+- write 04_RESPONSE/ABORTED_RUN.txt with stage/category only;
+- do not claim a completed response;
+- print one short C-7 line.
+
+No timestamp-based or `latest` path selection is permitted.
+
+======================================================================
+7. CHILD EXECUTION ORDER AND EXACT COMMANDS
+======================================================================
+
+All subprocess commands use sys.executable, exact accepted child path,
+shell=False and cwd=<UDP001Root>\01_PROGRAMS.
+
+Stage C1 - Gate 1 catalog
+
+python u001_foundation_core_v0_1.py --probe
+  --source <CaseRoot>\00_SOURCE-READONLY\CANDump.csv
+  --dbc-ch1 <CaseRoot>\00_SOURCE-READONLY\DBC1.dbc
+  --dbc-ch2 <CaseRoot>\00_SOURCE-READONLY\DBC2.dbc
+  --out <TempRoot>\01_G1_CATALOG
+
+Require exit 0, exactly these files and one C-0 capsule:
+
+- udp001_g1_signal_catalog.csv
+- udp001_g1_probe_summary.json
+- udp001_g1_return_capsule.txt
+
+Stage C2 - G10A2 profile build
+
+python u001_auto_discovery_profile_builder_v0_2.py --build
+  --catalog <TempRoot>\01_G1_CATALOG\udp001_g1_signal_catalog.csv
+  --out <TempRoot>\02_PROFILE_CONFIG
+  --profile-id AUTO_DISCOVERY_ALL_V0_2
+  --frame-key-channel <request value>
+  --frame-key-can-id <request value>
+  --frame-key-signal <request value>
+  --batch-size <request value>
+
+Require exit 0 and the exact eight-file G10A2 set.
+
+Stage C3 - G10A2 read-only validation
+
+python u001_auto_discovery_profile_builder_v0_2.py --validate-output
+  --out <TempRoot>\02_PROFILE_CONFIG
+
+Require exit 0 and stdout containing:
+
+UDP001-G10A2-VALIDATE-PASS
+
+Stage C4 - G10B1 discovery run
+
+python u001_g10b_single_pass_discovery_engine_v0_5a.py --run
+  --source <CaseRoot>\00_SOURCE-READONLY\CANDump.csv
+  --dbc-ch1 <CaseRoot>\00_SOURCE-READONLY\DBC1.dbc
+  --dbc-ch2 <CaseRoot>\00_SOURCE-READONLY\DBC2.dbc
+  --config-folder <TempRoot>\02_PROFILE_CONFIG
+  --program-root <UDP001Root>\01_PROGRAMS
+  --out <TempRoot>\03_DISCOVERY_DATA
+  --source-id <SourceId>
+  --dataset-id <DatasetId>
+  --run-id <RunId>
+  --segment-id <SegmentId>
+  --max-assignment-age-rows <ExecutionPolicy value>
+  --chunksize <ExecutionPolicy value>
+  --max-rss-mb <ExecutionPolicy value>
+  --update-buffer-rows <ExecutionPolicy value>
+  --frame-buffer-rows <ExecutionPolicy value>
+  --memory-check-every-rows <ExecutionPolicy value>
+
+Append `--max-source-rows N` only when N>0.  Zero means full source and the
+argument is omitted.
+
+Require exit 0 and one C-0 child capsule.
+
+Stage C5 - G10B1 read-only validation
+
+python u001_g10b_single_pass_discovery_engine_v0_5a.py --validate-output
+  --out <TempRoot>\03_DISCOVERY_DATA
+  --config-folder <TempRoot>\02_PROFILE_CONFIG
+
+Require exit 0 and stdout containing both:
+
+UDP001-G10B1
+VALIDATE-PASS
+
+Stage C6 - response construction and controller validation
+
+Construct the response manifest, then run the same read-only validation logic
+used by --validate-response against the still-temporary root.  Only a complete
+pass authorizes the success capsule and atomic rename.
+
+No later stage runs after a failure.
+
+======================================================================
+8. SUBPROCESS EVIDENCE
+======================================================================
+
+For every child stage record in the response manifest:
+
+- StageId C1..C5;
+- ChildBasename;
+- ChildSHA256;
+- argument-role list without absolute path values;
+- ExitCode;
+- RequiredToken;
+- TokenObserved;
+- StageStatus;
+- relative stdout/stderr log paths.
+
+Save complete child stdout/stderr below:
+
+04_RESPONSE/LOGS/C1.stdout.txt ... C5.stderr.txt
+
+Logs may contain child-generated text but the response manifest must not copy
+absolute paths from logs.  A child process exit 0 without required evidence is
+a blocking failure.
+
+======================================================================
+9. DISCOVERY RESPONSE MANIFEST
+======================================================================
+
+Logical filename:
+
+u001_discovery_response_manifest.json
+
+Required identity:
+
+- ResponseSchemaVersion = U001_DISCOVERY_RESPONSE_V0_1;
+- RequestSchemaVersion;
+- RequestId;
+- RequestFingerprint;
+- DatasetId;
+- RunId;
+- SegmentId;
+- SourceId;
+- U001ContractVersion;
+- ProcessingMode;
+- SignalScope;
+- ProfileId;
+- ReuseStatus = NEW_RUN or EXACT_HASH_REUSE;
+- source/DBC hashes;
+- child program basenames/hashes;
+- FrameCount Channel/CAN ID/Signal name and observed range;
+- catalog/eligible/excluded/candidate/batch counts;
+- source/update/frame counts;
+- quality-gate status;
+- warning/error arrays;
+- CompletionCode.
+
+Artifact declarations:
+
+- request;
+- G1 catalog, summary and capsule;
+- all eight G10A2 files;
+- every G10B1 root file;
+- every G10B1 update shard;
+- every G10B1 frame shard;
+- child logs, excluding the response manifest/capsule themselves.
+
+Each declaration contains:
+
+- Role;
+- RelativePath using `/`;
+- SizeBytes;
+- SHA256;
+- DataRowCount for CSV or blank for non-CSV;
+- ColumnCount for CSV or blank for non-CSV.
+- EvidenceSource = CONTROLLER_SCAN or G10B_CHILD_MANIFEST.
+
+For request, G1, G10A2 and controller-log artifacts, hashing and CSV shape
+counting are streaming/bounded-memory and EvidenceSource=CONTROLLER_SCAN.
+
+For G10B1 root files and shards, copy relative path, SHA-256, row and column
+evidence from the already validated u001_g10b_run_manifest.json and set
+EvidenceSource=G10B_CHILD_MANIFEST.  Do not rescan 8-10 GB merely to construct
+the parent response.  Response validation invokes the accepted G10B1 child
+validator, then cross-checks every copied declaration against the child
+manifest.  This preserves the evidence chain without a redundant third full
+artifact scan.
+
+Never load an entire shard.  Do not self-hash the response manifest or
+completion capsule.
+
+Manifest JSON is deterministic and contains no absolute path, wall-clock time,
+host name, user name or modification time.
+
+ReadyForU002 = 1 only when:
+
+- child C1..C5 passed;
+- response validation passed;
+- all declared artifacts exist and hashes/counts match;
+- CompletionCode=0;
+- no blocking quality status exists.
+
+======================================================================
+10. EXACT-HASH REUSE
+======================================================================
+
+FORCE_NEW_RUN:
+
+- block when requested final or temporary output exists;
+- never overwrite or repair.
+
+REUSE_EXACT_HASH_ONLY:
+
+- allowed only when final output already exists and temporary output does not;
+- run complete --validate-response logic;
+- request fingerprint, source/DBC hashes, child program hashes, contract,
+  frame-key identity, batch size and all ExecutionPolicy values must match;
+- every declared artifact hash/count must match;
+- CompletionCode=0 and ReadyForU002=1 required;
+- no file is modified;
+- return reuse success.
+
+If any identity differs, return C-7.  Do not run into the existing folder and
+do not select another folder automatically.
+
+======================================================================
+11. READ-ONLY RESPONSE VALIDATION
+======================================================================
+
+--validate-response must:
+
+- read only the requested response root;
+- require the exact top-level folder structure;
+- recompute RequestFingerprint;
+- verify Case source hashes against request and response;
+- verify current accepted child hashes against response;
+- invoke G10A2 --validate-output on 02_PROFILE_CONFIG;
+- invoke G10B1 --validate-output on 03_DISCOVERY_DATA;
+- stream-verify controller-owned request/G1/G10A2/log artifacts;
+- invoke G10B1 validation to stream-verify G10B1 outputs once, then require
+  every G10B response declaration to exactly match the validated G10B child
+  manifest;
+- verify all identities and counts agree across request, G1, G10A2, G10B1 and
+  response;
+- reject undeclared data artifacts except the response manifest/capsule;
+- reject absolute paths or path traversal in manifest artifact records;
+- require CompletionCode=0 and ReadyForU002=1;
+- never repair, rewrite or normalize the response.
+
+Success terminal line:
+
+G10C1-VALIDATE-PASS C-0
+
+Failure terminal line:
+
+G10C1-ERROR:VALIDATE:<CATEGORY> C-7
+
+======================================================================
+12. SHORT OUTPUT CONTRACT
+======================================================================
+
+Normal success terminal lines are intentionally short:
+
+- U001-G10C1-SELFTEST-PASS-24
+- G10C1-REQUEST-CREATED C-0
+- G10C1-PREFLIGHT-PASS C-0
+- G10C1-RUN-PASS C-0
+- G10C1-REUSE-PASS C-0
+- G10C1-VALIDATE-PASS C-0
+
+Errors:
+
+G10C1-ERROR:<MODE_OR_STAGE>:<SHORT_CATEGORY> C-7
+
+Detailed counters remain in JSON/CSV evidence and are not printed for manual
+transcription.
+
+======================================================================
+13. SELF-TESTS
+======================================================================
+
+Implement at least 24 deterministic standard-library tests covering:
+
+1. import safety by structure;
+2. request schema rejection;
+3. canonical request fingerprint;
+4. source streaming hash;
+5. output relative-path acceptance;
+6. absolute-path rejection;
+7. parent-traversal rejection;
+8. RunId/final-component mismatch rejection;
+9. Case/DatasetId mismatch rejection;
+10. missing fixed source alias rejection;
+11. child exact-basename resolution;
+12. program-hash recording;
+13. FORCE_NEW_RUN existing-output rejection;
+14. temporary-output collision rejection;
+15. exact-reuse identity pass;
+16. exact-reuse changed-source rejection;
+17. first child failure stops all later children;
+18. exit-zero-without-token rejection;
+19. G1 -> G10A build -> G10A validate -> G10B run -> G10B validate order;
+20. max-source-rows zero omits the child flag;
+21. positive max-source-rows includes the child flag;
+22. streaming artifact hash and CSV shape;
+23. manifest absolute-path rejection;
+24. synthetic fake-child end-to-end run, response validation and atomic rename.
+
+Synthetic fake child programs must be created under a temporary directory,
+must not need company data and must clean up automatically.  The self-test
+must not call real accepted children.
+
+======================================================================
+14. NON-GOALS AND FORBIDDEN CHANGES
+======================================================================
+
+G10C1 must not:
+
+- alter G1, G10A2 or G10B1 source;
+- import private child functions;
+- implement a GUI;
+- edit GUI v0.3;
+- build an EXE or portable runtime;
+- define controlled-profile promotion;
+- infer signal relevance or business roles beyond accepted G10A2 output;
+- create one 705-variable human-facing table;
+- concatenate all shards;
+- duplicate G10B decode logic;
+- zero-fill, forward-fill or infer invalid sentinel values;
+- run U002 or U003;
+- use timestamp/latest-file discovery;
+- expose company absolute paths in machine-readable outputs.
+
+END OF COMPLETE SPECIFICATION
