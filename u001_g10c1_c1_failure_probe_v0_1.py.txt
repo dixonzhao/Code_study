@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""Read-only diagnostic probe for a failed UDP001 G10C1 Stage C1 run.
+
+Transfer filename intentionally ends in .py.txt.  On the company PC rename it
+to u001_g10c1_c1_failure_probe_v0_1.py before execution.
+
+This probe never edits, deletes, renames, repairs, or re-runs project files.
+It prints a compact but evidence-rich capsule suitable for manual return.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import sys
+from pathlib import Path
+
+
+VERSION = "0.1"
+DEFAULT_CASE_ID = "TC001_20260422"
+DEFAULT_RUN_ID = "G10C1_SMOKE_10000_V0_1"
+EXPECTED_G1 = (
+    "udp001_g1_signal_catalog.csv",
+    "udp001_g1_probe_summary.json",
+    "udp001_g1_return_capsule.txt",
+)
+
+
+def clean(value: object, limit: int = 180) -> str:
+    text = str(value).strip()
+    text = re.sub(r"[\r\n\t]+", " ", text)
+    text = re.sub(r"\s+", "_", text)
+    text = text.replace("-", "_")
+    text = re.sub(r"[^A-Za-z0-9_.:@+\\/]", "?", text)
+    return text[:limit] if text else "EMPTY"
+
+
+def last_nonempty(path: Path, count: int = 1) -> list[str]:
+    if not path.is_file():
+        return []
+    try:
+        lines = [line.strip() for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
+    except OSError:
+        return []
+    return lines[-count:]
+
+
+def text_stats(path: Path) -> tuple[int, int]:
+    if not path.is_file():
+        return 0, 0
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return 0, 0
+    return len(data), len(data.splitlines())
+
+
+def find_one(root: Path, basename: str) -> Path | None:
+    if not root.exists():
+        return None
+    matches = sorted(p for p in root.rglob(basename) if p.is_file())
+    return matches[0] if matches else None
+
+
+def scalar_evidence(obj: object, prefix: str = "") -> list[tuple[str, object]]:
+    wanted = ("completion", "status", "code", "error", "warning", "message", "row", "signal", "can", "channel")
+    found: list[tuple[str, object]] = []
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            name = f"{prefix}.{key}" if prefix else str(key)
+            if isinstance(value, (dict, list)):
+                found.extend(scalar_evidence(value, name))
+            elif any(term in str(key).lower() for term in wanted):
+                found.append((name, value))
+    elif isinstance(obj, list):
+        for index, value in enumerate(obj[:20]):
+            found.extend(scalar_evidence(value, f"{prefix}[{index}]"))
+    return found
+
+
+def short_json_evidence(path: Path | None) -> str:
+    if path is None or not path.is_file():
+        return "NA"
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:  # diagnostic output only
+        return "JSONERR:" + clean(type(exc).__name__, 40)
+    pairs = scalar_evidence(obj)
+    if not pairs:
+        return "NO_MATCHING_SCALARS"
+    encoded = [f"{clean(k, 45)}={clean(v, 50)}" for k, v in pairs[:8]]
+    return ",".join(encoded)[:360]
+
+
+def name_digest(paths: list[Path]) -> str:
+    names = "\n".join(sorted(path.name for path in paths)).encode("utf-8")
+    return hashlib.sha256(names).hexdigest()[:8].upper()
+
+
+def resolve_udp001_root(explicit: str | None) -> Path:
+    if explicit:
+        return Path(explicit).resolve()
+    # Installed location is expected to be UDP001/04_TEMP/<this file>.
+    return Path(__file__).resolve().parent.parent
+
+
+def run_probe(udp001_root: Path, case_id: str, run_id: str) -> int:
+    case_root = udp001_root / "03_CASES" / case_id
+    runs_root = case_root / "02_RUNS"
+    temp_root = runs_root / f".{run_id}.g10c1_incomplete"
+    final_root = runs_root / run_id
+    g1_root = temp_root / "01_G1_CATALOG"
+    response_root = temp_root / "04_RESPONSE"
+
+    stdout_path = find_one(response_root, "C1.stdout.txt") or find_one(temp_root, "C1.stdout.txt")
+    stderr_path = find_one(response_root, "C1.stderr.txt") or find_one(temp_root, "C1.stderr.txt")
+    aborted_path = find_one(response_root, "ABORTED_RUN.txt") or find_one(temp_root, "ABORTED_RUN.txt")
+
+    g1_files = sorted(p for p in g1_root.rglob("*") if p.is_file()) if g1_root.exists() else []
+    expected_bits = "".join("1" if (g1_root / name).is_file() else "0" for name in EXPECTED_G1)
+    stdout_bytes, stdout_lines = text_stats(stdout_path) if stdout_path else (0, 0)
+    stderr_bytes, stderr_lines = text_stats(stderr_path) if stderr_path else (0, 0)
+
+    unexpected = [p.name for p in g1_files if p.name not in EXPECTED_G1]
+    capsule_path = g1_root / EXPECTED_G1[2]
+    summary_path = g1_root / EXPECTED_G1[1]
+
+    print(
+        "G10C1D1 "
+        f"N-T{int(temp_root.exists())}-F{int(final_root.exists())}-G{int(g1_root.exists())}"
+        f"-R{int(response_root.exists())}-O{len(g1_files)}-E{expected_bits}"
+        f"-SO{int(stdout_path is not None)}-SE{int(stderr_path is not None)}"
+        f"-AB{int(aborted_path is not None)}-X0 C-0"
+    )
+    print(f"FILES-N{len(g1_files)}-H{name_digest(g1_files)}-U{len(unexpected)}")
+    print(f"STDOUT-B{stdout_bytes}-L{stdout_lines}-T{clean(' | '.join(last_nonempty(stdout_path, 3)) if stdout_path else 'MISSING')}")
+    print(f"STDERR-B{stderr_bytes}-L{stderr_lines}-T{clean(' | '.join(last_nonempty(stderr_path, 3)) if stderr_path else 'MISSING')}")
+    print(f"CAP-T{clean(' | '.join(last_nonempty(capsule_path, 3)) if capsule_path.is_file() else 'MISSING')}")
+    print(f"JSON-{short_json_evidence(summary_path if summary_path.is_file() else None)}")
+    print(f"ABORT-T{clean(' | '.join(last_nonempty(aborted_path, 3)) if aborted_path else 'MISSING')}")
+    if unexpected:
+        print("MEMO1-UF-" + clean(",".join(unexpected), 240))
+    return 0
+
+
+def self_test() -> int:
+    assert clean("A B-C") == "A_B_C"
+    assert last_nonempty(Path("__definitely_missing__")) == []
+    assert len(name_digest([])) == 8
+    print("UDP001-G10C1D1-SELFTEST-PASS-3")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--udp001-root")
+    parser.add_argument("--case-id", default=DEFAULT_CASE_ID)
+    parser.add_argument("--run-id", default=DEFAULT_RUN_ID)
+    args = parser.parse_args()
+    if args.self_test:
+        return self_test()
+    return run_probe(resolve_udp001_root(args.udp001_root), args.case_id, args.run_id)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print(f"G10C1D1-ERROR:{clean(type(exc).__name__, 40)}:{clean(exc, 120)} C-7")
+        raise SystemExit(7)
