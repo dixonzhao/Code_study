@@ -1,0 +1,268 @@
+UDP001 G10B1R1 - FRAME-KEY RUNTIME AND VALIDATOR CORRECTION
+Date: 2026-07-28
+Status: AUTHORITATIVE NARROW CORRECTION AND EXECUTION SPECIFICATION
+
+======================================================================
+1. COPILOT TASK
+======================================================================
+
+Create one new downloadable Python file:
+
+u001_g10b_single_pass_discovery_engine_v0_2.py
+
+Attach exactly:
+
+1. rejected u001_g10b_single_pass_discovery_engine_v0_1.py;
+2. accepted u001_foundation_core_v0_1.py;
+3. this correction specification.
+
+Use v0.1 as the implementation base.  Do not edit it in place.  Do not modify
+Foundation or any accepted G1-G10A2 artifact.  Do not rewrite unrelated engine
+logic.
+
+Generate a downloadable .py file, not only inline code or prose.
+
+======================================================================
+2. OBSERVED FAILURE
+======================================================================
+
+Run:
+
+UDP001G10B1R N-V705-B23-M69-S10000-U2162713-F0-Q23-H0-X0 C-0
+
+Validation:
+
+UDP001-G10B1-VALIDATE-PASS V705-B23-S10000-U2162713-F0-H0-X0
+
+Both are false successes.
+
+The engine decoded 2,162,713 candidate updates but emitted zero FrameCount
+rows.  Preflight K1 proves only that the configured FrameCount identity can be
+resolved.  FrameCount is intentionally excluded from
+u001_discovery_batch_map.csv, so a runtime router built only from candidate
+batch rows silently omits the required Frame-key signal.
+
+The validator then accepted 23 mutually consistent but empty frame shards.
+
+======================================================================
+3. REQUIRED RUNTIME FRAME-KEY ROUTE
+======================================================================
+
+Construct two explicit runtime routes:
+
+A. required_frame_key_route
+
+- source: the one Required=1 row in u001_g2_selected_signals.csv;
+- confirm exact agreement with the configured FrameCount identity in the
+  G10A2 manifest/inventory;
+- resolve its source message group and DBC signal independently of the batch
+  map;
+- include its required Raw byte columns in source usecols;
+- BatchId remains blank;
+- output every real decoded FrameCount update to
+  u001_g10b_frame_key_updates.csv.
+
+B. candidate_batch_routes
+
+- source: u001_discovery_batch_map.csv;
+- unchanged from v0.1;
+- every candidate retains exactly one BatchId.
+
+The two routes must be disjoint by CanonicalName and both must participate in
+the one Raw-source scan.
+
+For each SourceRowIndex:
+
+1. decode/process the required Frame-key route first;
+2. validate any FrameCount observation;
+3. open/change/finalize frame state as required;
+4. decode/process candidate routes;
+5. assign same-row candidates FRAME_EXACT with age 0.
+
+Candidate updates from later source rows use the accepted bounded Gate 3
+assignment rule.
+
+Do not infer a frame from candidate data, source-row number, DateTime or
+Time[us].
+
+======================================================================
+4. FRAME OPEN/FINALIZE INVARIANTS
+======================================================================
+
+For a valid FrameCount observation:
+
+- value is finite, numeric and exactly integer-valued;
+- multiple observations at one SourceRowIndex must agree;
+- repeated equal values do not finalize a frame;
+- a larger value finalizes the prior open frame once and opens the new frame;
+- any decrease/reset/wrap is blocking;
+- EOF finalizes the last open frame exactly once.
+
+For every finalized frame:
+
+- write exactly one row to every one of the 23 batch frame shards;
+- all frame shards receive the same FrameCount and same four leading values;
+- a batch with no update still receives a NO_UPDATE frame row;
+- frame rows are strictly increasing and duplicate-free.
+
+SourceRowFirst, SourceRowLast and SourceUpdateCount include the Frame-key
+update and all configured candidate updates assigned to the frame.
+
+======================================================================
+5. REQUIRED SUCCESS CONDITIONS
+======================================================================
+
+For a successful --run where scanned source rows S > 0:
+
+- decoded_frame_key_update_count > 0;
+- distinct_frame_observation_count > 0;
+- finalized_frame_count F > 0;
+- every batch frame shard row count equals F;
+- every batch frame shard has the exact same FrameCount sequence;
+- frame-key update file data-row count > 0;
+- Q equals B;
+- raw_source_scan_count equals 1;
+- H=0 and X=0.
+
+If S>0 and any of the first five conditions fails:
+
+- do not emit C-0;
+- do not write a success capsule;
+- exit nonzero with category FRAME_DOMAIN_EMPTY_OR_INCONSISTENT.
+
+An empty or header-only source also cannot emit C-0.
+
+======================================================================
+6. VALIDATOR CORRECTION
+======================================================================
+
+--validate-output must independently recompute and require:
+
+- source_row_count S > 0;
+- candidate decoded-update count U > 0 for this accepted smoke profile;
+- frame-key update file data-row count > 0;
+- every FrameCount value in that file is valid integer-valued;
+- at least one distinct FrameCount observation;
+- F > 0;
+- every batch frame shard contains exactly F rows;
+- every batch frame shard shares the exact same nonempty FrameCount sequence;
+- manifest, quality, batch index and capsule F values equal recomputed F;
+- no frame-key CanonicalName appears in a candidate shard;
+- one Frame-key identity is declared.
+
+Validation of the preserved v0.1 failure folder must now exit nonzero.  It must
+never return PASS with F0.
+
+The validator remains read-only and must not repair an output folder.
+
+======================================================================
+7. REGRESSION SELF-TESTS
+======================================================================
+
+Preserve the original 24 tests and add at least these six:
+
+25. FrameCount absent from batch map is still decoded through the required
+    Frame-key route;
+26. repeated equal FrameCount observations produce one frame and a later
+    larger observation finalizes it exactly once;
+27. a candidate update at the FrameCount SourceRowIndex is FRAME_EXACT age 0;
+28. nonempty source plus candidate updates plus zero Frame-key updates causes
+    run failure, never C-0;
+29. validator rejects a structurally consistent 23-shard package with F0;
+30. frame-key update rows and all batch frame sequences agree in a valid
+    multi-batch synthetic run.
+
+New self-test token:
+
+UDP001-G10B1R1-SELFTEST-PASS-30
+
+======================================================================
+8. VERSION AND NON-CHANGES
+======================================================================
+
+Set program version to 0.2.
+
+Do not change:
+
+- G10A2 V705/B23 membership;
+- 69-message/552-byte preflight plan unless the corrected runtime check finds
+  an actual inconsistency;
+- candidate decode semantics;
+- types, validity or within-frame policies;
+- HoldPolicy NONE;
+- shard schemas or directory structure;
+- return-capsule field order;
+- single-pass/no-multiprocessing rule;
+- U001/U002 responsibility boundary.
+
+Do not add statistical analysis or business rules.
+
+======================================================================
+9. COMPANY-PC EXECUTION
+======================================================================
+
+Save the generated file as:
+
+C-CODE\UDP001\04_TEMP\u001_g10b_single_pass_discovery_engine_v0_2.py
+
+Preserve:
+
+- v0.1 program;
+- G10B1_SMOKE_10000_V0_1 rejected output folder.
+
+Run from Windows CMD with current directory C-CODE.
+
+9.1 Self-test
+
+python .\UDP001\04_TEMP\u001_g10b_single_pass_discovery_engine_v0_2.py --self-test
+
+Expected:
+
+UDP001-G10B1R1-SELFTEST-PASS-30
+
+9.2 Corrected smoke output folder
+
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_2
+
+Confirm it is absent or empty.  Do not use --overwrite.
+
+9.3 Corrected smoke command
+
+python .\UDP001\04_TEMP\u001_g10b_single_pass_discovery_engine_v0_2.py --run --source ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\CANDump.csv" --dbc-ch1 ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\DBC1.dbc" --dbc-ch2 ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\DBC2.dbc" --config-folder ".\UDP001\03_CASES\TC001_20260422\01_CONFIG\AUTO_DISCOVERY_ALL_V0_2" --program-root ".\UDP001\01_PROGRAMS" --out ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_2" --source-id "SOURCE_001" --dataset-id "TC001_20260422" --run-id "G10B1_SMOKE_10000_V0_2" --segment-id "SOURCE_ROWS_0_9999" --max-assignment-age-rows 200 --chunksize 10000 --max-source-rows 10000
+
+Expected run evidence path:
+
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_2\udp001_g10b1_return_capsule.txt
+
+Success must contain:
+
+N-V705-B23-M69-S10000-U{positive}-F{positive}-Q23-H0-X0 C-0
+
+Stop immediately if F0 appears again.
+
+9.4 Corrected output validation
+
+python .\UDP001\04_TEMP\u001_g10b_single_pass_discovery_engine_v0_2.py --validate-output --out ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_2" --config-folder ".\UDP001\03_CASES\TC001_20260422\01_CONFIG\AUTO_DISCOVERY_ALL_V0_2"
+
+Success must contain:
+
+UDP001-G10B1-VALIDATE-PASS V705-B23-S10000-U{positive}-F{positive}-H0-X0
+
+======================================================================
+10. RETURN TO CODEX
+======================================================================
+
+Return exactly three lines:
+
+G10B1R1ST-<exact self-test final line>
+G10B1S2R-<exact corrected run capsule>
+G10B1S2V-<exact corrected validation final line>
+
+On any failure return only:
+
+G10B1R1E-<exact final error line>
+
+Do not let Copilot repair a runtime failure without a new Codex decision.
+Do not run the full source after this test.
+
+END OF CORRECTION
