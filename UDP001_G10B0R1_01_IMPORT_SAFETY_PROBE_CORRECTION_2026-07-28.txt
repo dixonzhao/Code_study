@@ -1,0 +1,184 @@
+UDP001 G10B0R1 - IMPORT-SAFETY PROBE CORRECTION
+Date: 2026-07-28
+Status: PROBE-METHOD CORRECTION ONLY; ACCEPTED U001 PROGRAMS UNCHANGED
+
+======================================================================
+1. OBSERVED RESULT
+======================================================================
+
+UDP001G10B0 N-M6-I0-B23-V705-F0-D0-A0-S0-W0-H0-P3-R23-G3-X0 C-0
+
+Interpretation:
+
+- the probe completed successfully;
+- all six inspected modules were classified import-unsafe/blocked;
+- this forced EvidenceClass P3;
+- six simultaneous import failures are suspicious and do not by themselves
+  prove that the accepted Gate programs are unusable.
+
+The v0.1 specification did not define the isolated import command precisely
+enough.  A probe may incorrectly execute each file as a no-argument CLI, or
+omit the approved sibling-program import root while cwd is a temporary folder.
+
+======================================================================
+2. INPUTS TO COPILOT
+======================================================================
+
+Give Copilot:
+
+1. current generated u001_g10b_architecture_capacity_probe_v0_1.py;
+2. this correction file.
+
+Do not give or modify the six accepted U001 programs.
+
+Required downloadable output:
+
+u001_g10b_architecture_capacity_probe_v0_2.py
+
+Initial location:
+
+C-CODE\UDP001\04_TEMP\u001_g10b_architecture_capacity_probe_v0_2.py
+
+======================================================================
+3. SINGLE APPROVED CHANGE
+======================================================================
+
+Replace the module import-safety child check with the exact semantic method
+below.  Preserve all other v0.1 AST, configuration, topology, frame-shard,
+manifest and capsule logic.
+
+For each inspected module, launch an isolated child Python process that:
+
+1. receives the absolute resolved ProgramRoot and ProgramPath;
+2. sets cwd to a new empty temporary directory;
+3. removes inherited PYTHONPATH from the child environment;
+4. explicitly inserts only the resolved ProgramRoot at sys.path index 0;
+5. creates a unique non-`__main__` module name;
+6. uses importlib.util.spec_from_file_location;
+7. uses importlib.util.module_from_spec;
+8. inserts that module object into sys.modules under the unique name before
+   exec_module, so dataclass/type resolution is valid;
+9. calls spec.loader.exec_module(module);
+10. prints IMPORT_OK and exits 0 only when import completes;
+11. never calls module.main(), argparse, self-test or any CLI mode;
+12. uses a finite timeout;
+13. captures a categorized exception without storing absolute paths.
+
+Running:
+
+python accepted_program.py
+
+with no arguments is a CLI execution test, not an import-safety test, and is
+forbidden here.
+
+The temporary cwd is intentional.  Sibling imports are allowed only through
+the one explicit ProgramRoot entry.  Do not add C-CODE, Downloads, TEMP or any
+other broad path.
+
+======================================================================
+4. CLASSIFICATION CORRECTION
+======================================================================
+
+InterfaceCode 0 may be assigned for import safety only when the exact corrected
+import process:
+
+- times out;
+- raises an import-time exception;
+- performs a detected forbidden import-time side effect;
+- cannot create/execute a valid module spec.
+
+A program that imports successfully but requires files for its CLI remains
+eligible for InterfaceCode 1 FILE_CLI_ONLY.  Do not classify it 0 merely
+because no-argument CLI execution would fail.
+
+After corrected import checks, rerun the existing deterministic InterfaceCode
+and P1/P2/P3 rules without changing their meanings.
+
+======================================================================
+5. EVIDENCE ADDITIONS
+======================================================================
+
+For every module, add these fields to the architecture evidence JSON and API
+inventory CSV:
+
+- ImportMethod = SPEC_FROM_FILE_WITH_EXPLICIT_PROGRAM_ROOT;
+- ImportChildReturnCode;
+- ImportTimeout;
+- ImportExceptionCategory;
+- ImportStdoutToken;
+- ExplicitProgramRootInserted = 1;
+- MainCalled = 0;
+- CLIExecuted = 0.
+
+Do not store child command absolute paths or full exception tracebacks in the
+compact CSV.  A sanitized exception category is sufficient.
+
+======================================================================
+6. SELF-TEST
+======================================================================
+
+Retain the original 14 tests and add:
+
+T15 a module with argparse/main guard imports successfully even though direct
+    no-argument script execution would fail;
+T16 a module importing a sibling from ProgramRoot succeeds only with the
+    explicit approved root, while an unapproved sibling path remains blocked.
+
+Required exact final line:
+
+UDP001-G10B0R1-SELFTEST-PASS-16
+
+======================================================================
+7. NEW OUTPUT FOLDER AND RUN
+======================================================================
+
+Do not overwrite the v0.1 evidence folder.
+
+Run from C-CODE using Windows CMD.
+
+Self-test command:
+
+python .\UDP001\04_TEMP\u001_g10b_architecture_capacity_probe_v0_2.py --self-test
+
+New output folder:
+
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B0_ARCHITECTURE_PROBE_V0_2
+
+Probe command as one line:
+
+python .\UDP001\04_TEMP\u001_g10b_architecture_capacity_probe_v0_2.py --probe --program-root ".\UDP001\01_PROGRAMS" --discovery-config ".\UDP001\03_CASES\TC001_20260422\01_CONFIG\AUTO_DISCOVERY_ALL_V0_2" --out ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B0_ARCHITECTURE_PROBE_V0_2"
+
+Expected terminal position:
+
+- self-test token is the final line of the first CMD run;
+- corrected capsule is the final line of the second CMD run;
+- identical corrected capsule is saved at:
+
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B0_ARCHITECTURE_PROBE_V0_2\udp001_g10b0_return_capsule.txt
+
+======================================================================
+8. RETURN TO CODEX
+======================================================================
+
+Return exactly:
+
+G10B0R1ST-UDP001-G10B0R1-SELFTEST-PASS-16
+G10B0R1R1-<exact corrected terminal/capsule line>
+
+On C-7, add at most three short memos with the first module/category failure.
+
+======================================================================
+9. FORBIDDEN
+======================================================================
+
+Do not:
+
+- modify any accepted U001 source program;
+- weaken ProgramRoot scope;
+- execute real Gate processing;
+- read Raw CAN or DBC;
+- change InterfaceCode/P1/P2/P3 definitions;
+- delete v0.1 evidence;
+- begin G10B implementation.
+
+END OF CORRECTION
