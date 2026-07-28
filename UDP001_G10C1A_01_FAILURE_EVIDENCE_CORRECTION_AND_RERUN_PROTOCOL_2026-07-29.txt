@@ -1,0 +1,256 @@
+UDP001 G10C1A - FAILURE EVIDENCE CORRECTION AND CONTROLLED RERUN
+Date: 2026-07-29
+Status: CORRECTION AUTHORIZED
+Environment: Windows CMD, current directory C-CODE
+
+======================================================================
+1. CONFIRMED DEFECT
+======================================================================
+
+The accepted v0.1 controller returned:
+
+G10C1-ERROR:C1:CHILD_EVIDENCE C-7
+
+The independent read-only probe then returned:
+
+G10C1D1 N-T0-F0-G0-R0-O0-E000-SO0-SE0-AB0-X0 C-0
+
+Therefore neither the final Run root nor the required sibling incomplete root,
+G1 outputs, C1 logs or ABORTED_RUN evidence remained.  The underlying C1
+evidence mismatch is not recoverable.  The correction must fix evidence
+preservation before another Run is attempted.
+
+This is a control-plane defect.  It is not evidence of a Raw CAN, DBC,
+FrameCount or signal-data failure.
+
+======================================================================
+2. COPILOT INPUT AND DELIVERABLE
+======================================================================
+
+Open a fresh Company Copilot chat and attach exactly:
+
+1. the current company file u001_discovery_controller_v0_1.py;
+2. this correction specification.
+
+Instruction:
+
+Read the existing controller and this correction specification completely.
+Apply only the authorized correction.  Preserve all accepted request schema,
+public modes, path rules, child commands, response schema and architecture.
+Return one directly downloadable Python file named exactly:
+
+u001_discovery_controller_v0_1a.py.txt
+
+Do not add Chinese words, spaces, parentheses, `download` or `下载` to the
+filename.  Return the actual file, not only a code block.
+
+After download, save the original v0.1 unchanged and rename the new transfer
+file by removing only the final `.txt`:
+
+C-CODE\UDP001\04_TEMP\u001_discovery_controller_v0_1a.py
+
+Do not overwrite v0.1 and do not move v0.1a to 01_PROGRAMS yet.
+
+======================================================================
+3. REQUIRED FAILURE-EVIDENCE LIFECYCLE
+======================================================================
+
+For FORCE_NEW_RUN, before Stage C1 begins:
+
+1. verify final and incomplete roots are both absent;
+2. create the sibling incomplete root;
+3. create all five top-level folders;
+4. copy the request into 00_REQUEST;
+5. create 04_RESPONSE/LOGS;
+6. only then launch C1.
+
+For every child C1-C5:
+
+- capture stdout and stderr separately;
+- write the complete stage stdout/stderr log files immediately after the
+  subprocess returns and before checking exit code, tokens or artifacts;
+- flush and close both logs before evidence validation;
+- never rely only on terminal output as retained evidence.
+
+On every failure after the incomplete root exists:
+
+- do not call shutil.rmtree, TemporaryDirectory cleanup, unlink, replace or
+  any recursive cleanup on the incomplete root;
+- do not rename the incomplete root to the final root;
+- preserve already created outputs and logs exactly as observed;
+- write 04_RESPONSE/ABORTED_RUN.txt atomically as the last failure artifact;
+- return C-7.
+
+If ABORTED_RUN writing itself fails, preserve all earlier evidence and include
+ABORT_WRITE=0 in the terminal line.  Do not hide the original failure.
+
+Successful execution behavior remains unchanged: only a complete internal
+validation pass permits success capsule creation and atomic rename to the final
+root.
+
+======================================================================
+4. STAGE C1 EVIDENCE RULE
+======================================================================
+
+The C1 child is the accepted u001_foundation_core_v0_1.py invoked in --probe
+mode.  Do not require a hard-coded verbose stdout sentence that the accepted
+child does not promise.
+
+C1 passes only when all are true:
+
+- subprocess exit code is 0;
+- these three exact nonempty files exist directly in 01_G1_CATALOG:
+  1. udp001_g1_signal_catalog.csv
+  2. udp001_g1_probe_summary.json
+  3. udp001_g1_return_capsule.txt
+- the final nonempty line of udp001_g1_return_capsule.txt contains `C-0` as a
+  standalone whitespace-delimited token;
+- the summary JSON is parseable;
+- summary completion/status evidence, when present, does not declare failure;
+- no unexpected C-7 appears in the capsule.
+
+Do not reject C1 merely because stdout has no separate approved token.  The
+retained capsule is the authoritative short completion evidence for this
+accepted child.
+
+If C1 fails evidence validation, compute and retain:
+
+- process exit code;
+- expected-file presence bits in the order catalog/summary/capsule;
+- stdout byte count and nonempty-line count;
+- stderr byte count and nonempty-line count;
+- sanitized final nonempty stdout line;
+- sanitized final nonempty stderr line;
+- sanitized final nonempty child-capsule line when present;
+- count of unexpected files directly under 01_G1_CATALOG.
+
+No absolute path may be printed or stored in the abort capsule.
+
+======================================================================
+5. ABORTED_RUN CONTENT
+======================================================================
+
+ABORTED_RUN.txt is UTF-8, newline terminated and contains bounded key-value
+evidence.  For a child-evidence failure include at least:
+
+StageId
+Category
+ChildBasename
+ChildExitCode
+ExpectedArtifactBits
+StdoutBytes
+StdoutNonemptyLines
+StderrBytes
+StderrNonemptyLines
+StdoutTail
+StderrTail
+ChildCapsuleTail
+UnexpectedArtifactCount
+AbortWrite
+CompletionCode=7
+
+Each tail is one sanitized line truncated to 180 characters.  Do not include
+full logs, company absolute paths, Raw CAN values or DBC contents.
+
+======================================================================
+6. TERMINAL FAILURE CAPSULE
+======================================================================
+
+Success output remains short.
+
+Failure output is deliberately more informative.  For C1 CHILD_EVIDENCE use:
+
+G10C1-ERROR:C1:CHILD_EVIDENCE E<n>-F<bbb>-SO<b>.<l>-SE<b>.<l>-CP<p>-UF<n>-AB<a> C-7
+
+where:
+
+- E = child exit code;
+- F = three presence bits catalog/summary/capsule;
+- SO = stdout bytes.nonempty-lines;
+- SE = stderr bytes.nonempty-lines;
+- CP = 1 when the capsule final line contains standalone C-0, otherwise 0;
+- UF = unexpected G1 artifact count;
+- AB = 1 when ABORTED_RUN was written, otherwise 0.
+
+For other child stages use the same bounded principle with stage-appropriate
+artifact presence bits.  Do not print hashes, absolute paths or all counters.
+
+======================================================================
+7. SELF-TEST CORRECTION
+======================================================================
+
+Retain all existing self-tests and add deterministic tests for at least:
+
+1. logs written before child-evidence validation;
+2. exit-zero child with missing artifact preserves incomplete root;
+3. missing-token child preserves stdout/stderr;
+4. C1 accepted when exact three files are nonempty, summary JSON parses and
+   child capsule ends with standalone C-0 even without a stdout PASS token;
+5. C1 rejected for embedded text such as XC-0Y;
+6. ABORTED_RUN contains no absolute path;
+7. terminal failure capsule follows the bounded grammar;
+8. successful fake-child flow still atomically renames and leaves no
+   incomplete root.
+
+Required final self-test token:
+
+U001-G10C1A-SELFTEST-PASS-32
+
+A larger count is acceptable.
+
+======================================================================
+8. COMPANY EXECUTION AFTER GENERATION
+======================================================================
+
+Step 1 - Self-test:
+
+python .\UDP001\04_TEMP\u001_discovery_controller_v0_1a.py --self-test
+
+Require exit 0 and:
+
+U001-G10C1A-SELFTEST-PASS-32
+
+Step 2 - Confirm before rerun:
+
+The following two folders must still both be absent:
+
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\G10C1_SMOKE_10000_V0_1
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\.G10C1_SMOKE_10000_V0_1.g10c1_incomplete
+
+Step 3 - Controlled rerun with the already accepted request:
+
+python .\UDP001\04_TEMP\u001_discovery_controller_v0_1a.py --run-request --udp001-root ".\UDP001" --case-root ".\UDP001\03_CASES\TC001_20260422" --request ".\UDP001\03_CASES\TC001_20260422\01_CONFIG\G10C1_SMOKE_10000_V0_1\u001_discovery_request.json"
+
+If successful, require:
+
+G10C1-RUN-PASS C-0
+
+Then run read-only validation:
+
+python .\UDP001\04_TEMP\u001_discovery_controller_v0_1a.py --validate-response --udp001-root ".\UDP001" --case-root ".\UDP001\03_CASES\TC001_20260422" --response-root ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10C1_SMOKE_10000_V0_1"
+
+Require:
+
+G10C1-VALIDATE-PASS C-0
+
+======================================================================
+9. MANUAL RETURN AND STOP
+======================================================================
+
+If Run and validation pass, return:
+
+G10C1A1-PASS
+
+If either fails, return the complete new G10C1-ERROR line.  If AB=1, also
+return at most these three sanitized ABORTED_RUN fields:
+
+M1-StdoutTail-...
+M2-StderrTail-...
+M3-ChildCapsuleTail-...
+
+Do not delete or repair the incomplete folder after failure.
+
+After the return, stop.  Do not promote v0.1a, start G10C2, package U001 or run
+the full source.
+
+END OF CORRECTION PROTOCOL
