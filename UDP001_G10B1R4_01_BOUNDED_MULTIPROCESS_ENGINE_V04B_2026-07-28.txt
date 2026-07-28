@@ -1,0 +1,393 @@
+UDP001 G10B1R4 - BOUNDED MULTIPROCESS ENGINE v0.4B
+Date: 2026-07-28
+Status: IMPLEMENTATION SPECIFICATION
+
+======================================================================
+1. PURPOSE
+======================================================================
+
+Add bounded process-based parallel decoding of changed candidate payloads to
+the accepted v0.4A engine while preserving v0.4A frame data exactly.
+
+This is a performance implementation change only.  It does not change source
+semantics, FrameCount authority, signal selection, batch assignment, validity,
+hold policy, output schemas or mathematical meaning.
+
+Use ProcessPoolExecutor, not ThreadPoolExecutor.  The candidate DBC decode path
+is Python CPU-bound and ordinary threads are not expected to bypass the GIL.
+
+======================================================================
+2. ACCEPTED REFERENCE
+======================================================================
+
+Input/reference program:
+
+u001_g10b_single_pass_discovery_engine_v0_4a.py
+
+Reference 10,000-row output:
+
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_4A
+
+Accepted reference result:
+
+UDP001G10B1R N-V705-B23-M69-S10000-U1578619-F2062-Q23-H0-P189341-Z500511-T65-W1-X0 C-0
+
+Accepted validator:
+
+UDP001-G10B1-VALIDATE-PASS V705-B23-S10000-U1578619-F2062-H0-X0
+
+Output program to create:
+
+u001_g10b_single_pass_discovery_engine_v0_4b.py
+
+Do not overwrite v0.4A.
+Do not start from v0.3a.
+Do not rewrite the program from zero.
+
+======================================================================
+3. COPILOT DELIVERY
+======================================================================
+
+Give Copilot exactly two files:
+
+1. u001_g10b_single_pass_discovery_engine_v0_4a.py
+2. this specification
+
+Copilot must return one complete downloadable file:
+
+u001_g10b_single_pass_discovery_engine_v0_4b.py
+
+Do not return a patch only.
+Do not return explanation only.
+Do not modify unrelated behavior.
+
+======================================================================
+4. CLI AND WORKER POLICY
+======================================================================
+
+Add:
+
+--workers INTEGER
+
+Rules:
+
+- default = 4;
+- minimum = 1;
+- maximum = 8;
+- values outside 1..8 fail before reading the source;
+- workers=1 executes the accepted v0.4A decode semantics without creating a
+  process pool;
+- quality JSON, manifest and capsule record the effective worker count;
+- GUI integration is deferred until v0.4B is accepted.
+
+Use:
+
+from concurrent.futures import ProcessPoolExecutor
+
+Ensure Windows spawn and later PyInstaller compatibility:
+
+- every worker function is module-level;
+- no lambda, nested worker, closure or bound GUI method is submitted;
+- call multiprocessing.freeze_support() under the normal main guard;
+- protect program launch with if __name__ == "__main__";
+- worker arguments and return values are explicitly pickleable;
+- do not pickle dynamically imported Foundation module objects;
+- do not create a process pool during module import or self-test discovery.
+
+======================================================================
+5. OWNERSHIP BOUNDARY
+======================================================================
+
+MAIN PROCESS OWNS EXCLUSIVELY:
+
+- opening and reading CANDump.csv;
+- exact encoding/delimiter/header handling;
+- globally monotonic SourceRowIndex;
+- Raw source scan count = 1;
+- hexadecimal payload normalization;
+- first/change/reuse detection and cross-chunk payload cache;
+- exact Channel-2 / 0x620 / FrameCount decode;
+- authoritative FrameCount state machine;
+- frame assignment;
+- frame finalization;
+- deterministic merge ordering;
+- all final CSV/JSON/manifest/capsule writes;
+- output validator;
+- failure cleanup and final exit code.
+
+WORKER PROCESSES MAY ONLY:
+
+- receive changed candidate payload records selected by the main process;
+- decode configured non-Frame-key candidate signals for assigned message-plan
+  partitions;
+- return compact decoded records plus bounded worker counters/errors.
+
+WORKERS MUST NOT:
+
+- open or reread CANDump.csv;
+- open DBC files per task;
+- write final output files;
+- decode or modify FrameCount;
+- own frame state;
+- decide signal eligibility, BatchId or validity policy;
+- perform forward fill or hold;
+- create nested process pools;
+- swallow exceptions;
+- return C-0 independently.
+
+======================================================================
+6. WORKER INITIALIZATION
+======================================================================
+
+Create one persistent ProcessPoolExecutor outside the pandas source-chunk loop.
+
+Use a module-level worker initializer to load once per worker:
+
+- accepted Foundation path/module;
+- plain serializable candidate message plans;
+- plain serializable DBC signal definitions required by that worker;
+- exact canonical hexadecimal byte semantics;
+- immutable BatchId/signal ordinals.
+
+Do not pass dynamically imported Python module objects through pickle.
+
+Convert every worker plan to plain built-in structures or a module-level
+pickleable dataclass containing only strings, integers, floats, booleans,
+tuples and lists.
+
+The Frame-key plan is excluded from every worker registry.
+
+======================================================================
+7. DETERMINISTIC PARTITIONING
+======================================================================
+
+Before source reading, partition the 69 candidate message plans into exactly W
+deterministic worker partitions, where W is the effective worker count.
+
+Recommended deterministic balancing weight:
+
+configured signal count per message plan.
+
+Algorithm:
+
+1. sort message plans by descending signal count, then MessagePlanOrdinal;
+2. assign each plan to the currently lowest total-weight partition;
+3. break ties by lower partition ordinal;
+4. within each partition, restore MessagePlanOrdinal order.
+
+Record only counts/ordinals, not Raw values, in quality metadata.
+
+The same input, config and W must always produce the same partition plan.
+
+======================================================================
+8. BOUNDED CHUNK EXECUTION
+======================================================================
+
+For each pandas source chunk:
+
+1. main process reads the chunk once;
+2. main process normalizes payloads and detects first/change/reuse exactly as
+   v0.4A;
+3. main process handles the Frame-key route serially;
+4. main process builds at most one compact task per worker partition containing
+   changed candidate payload records only;
+5. submit at most W tasks for that chunk;
+6. do not read the next source chunk while more than one chunk is in flight;
+7. wait for all W partition tasks;
+8. propagate any worker exception as a blocking run failure;
+9. merge results and stable-sort by:
+   SourceRowIndex,
+   MessagePlanOrdinal,
+   SignalOrdinal,
+   CanonicalName;
+10. replay the accepted v0.4A serial cache/frame logic in the main process;
+11. finalize/write frames only in the main process;
+12. then release the chunk buffers and continue.
+
+Do not submit one Future per signal.
+Do not submit one Future per source row.
+Do not queue all source chunks at once.
+
+Worker return data should be compact tuples/arrays, not nested dictionaries per
+scalar when a compact deterministic representation is possible.
+
+======================================================================
+9. SEMANTIC EQUIVALENCE
+======================================================================
+
+For identical source/config/chunksize, v0.4B workers=4 must preserve v0.4A:
+
+- V=705;
+- B=23;
+- M=69;
+- S=10000;
+- U=1578619;
+- F=2062;
+- Q=23;
+- H0/X0;
+- P=189341;
+- Z=500511;
+- identical frame sequence in every batch;
+- identical candidate RawCode/PhysicalValue/current validity per frame;
+- identical deterministic batch frame-shard CSV bytes.
+
+Only runtime/parallel metadata may differ:
+
+- program version;
+- worker count;
+- elapsed time;
+- worker partition statistics;
+- file hashes of metadata files containing those approved differences.
+
+Do not weaken or normalize differences in frame data.
+
+======================================================================
+10. REFERENCE COMPARISON IN VALIDATOR
+======================================================================
+
+Extend --validate-output with optional:
+
+--reference-out PATH
+
+When supplied, the independent validator must additionally:
+
+- validate candidate output normally first;
+- validate that reference-out exists and represents the accepted same source,
+  config, segment and frame domain;
+- compare every one of the 23 frame-shard CSV files byte-for-byte;
+- compare batch index ordering and FrameCount sequence exactly;
+- require identical V/B/M/S/U/F/Q/H/P/Z/X semantic counts;
+- permit only the approved runtime/parallel metadata differences listed above;
+- never modify either folder;
+- fail if a frame shard is missing, reordered or differs by one byte.
+
+On successful equivalence, append:
+
+E1
+
+to the validator capsule.
+
+Required validator success shape:
+
+UDP001-G10B1-VALIDATE-PASS V705-B23-S10000-U1578619-F2062-H0-X0-E1
+
+E0 or a missing E field is not sufficient for v0.4B acceptance.
+
+======================================================================
+11. QUALITY AND CAPSULE
+======================================================================
+
+Preserve all v0.4A quality fields and add:
+
+- execution_mode = SINGLE_PROCESS or MULTIPROCESS;
+- effective_worker_count;
+- worker_partition_count;
+- per-partition message-plan count;
+- per-partition configured-signal count;
+- submitted_task_count;
+- completed_task_count;
+- worker_failure_count;
+- maximum_inflight_chunk_count = 1;
+- elapsed_seconds.
+
+No Raw payload values enter metadata.
+
+Run capsule keeps v0.4A shape with W set to the effective worker count:
+
+UDP001G10B1R N-V{V}-B{B}-M{M}-S{S}-U{U}-F{F}-Q{Q}-H{H}-P{P}-Z{Z}-T{T}-W{W}-X{X} C-0
+
+======================================================================
+12. FAILURE RULES
+======================================================================
+
+Any worker exception:
+
+- cancels outstanding tasks where possible;
+- shuts down the executor;
+- prevents C-0;
+- prevents validator PASS;
+- writes the accepted bounded error/traceback artifact;
+- exits nonzero.
+
+Do not silently retry a failed partition in the main process.
+Do not fall back from workers=4 to workers=1 without explicit user command.
+Do not emit partial success.
+
+Preserve --debug-traceback.
+
+======================================================================
+13. SELF-TESTS
+======================================================================
+
+Preserve all 50 accepted tests and add exactly ten:
+
+T51 workers=1 follows the reference single-process path without creating a
+    ProcessPoolExecutor;
+T52 workers=4 and workers=1 produce byte-identical synthetic frame shards;
+T53 deterministic weighted partitioning is repeatable and complete;
+T54 no Frame-key plan is present in worker partitions;
+T55 one Raw source reader is used regardless of worker count;
+T56 worker functions/arguments are pickleable under Windows spawn;
+T57 a worker exception blocks success and propagates one deterministic error;
+T58 maximum in-flight chunk count remains one;
+T59 results returned out of Future completion order merge into accepted stable
+    source/message/signal order;
+T60 reference comparison detects a one-byte frame-shard mutation.
+
+Success token:
+
+UDP001-G10B1R4-SELFTEST-PASS-60
+
+Successful self-test output does not need to be manually returned.  If the
+self-test fails, return the exact failure line and stop.
+
+======================================================================
+14. 10,000-ROW PARALLEL SMOKE
+======================================================================
+
+Run from C-CODE in Windows CMD.
+
+Self-test:
+
+python .\UDP001\04_TEMP\u001_g10b_single_pass_discovery_engine_v0_4b.py --self-test
+
+New empty output folder:
+
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_4B_W4
+
+Run with four workers:
+
+python .\UDP001\04_TEMP\u001_g10b_single_pass_discovery_engine_v0_4b.py --run --source ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\CANDump.csv" --dbc-ch1 ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\DBC1.dbc" --dbc-ch2 ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\DBC2.dbc" --config-folder ".\UDP001\03_CASES\TC001_20260422\01_CONFIG\AUTO_DISCOVERY_ALL_V0_2" --program-root ".\UDP001\01_PROGRAMS" --out ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_4B_W4" --source-id "SOURCE_001" --dataset-id "TC001_20260422" --run-id "G10B1_SMOKE_10000_V0_4B_W4" --segment-id "SOURCE_ROWS_0_9999" --max-assignment-age-rows 200 --chunksize 10000 --max-source-rows 10000 --workers 4
+
+Validate and compare with v0.4A:
+
+python .\UDP001\04_TEMP\u001_g10b_single_pass_discovery_engine_v0_4b.py --validate-output --out ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_4B_W4" --config-folder ".\UDP001\03_CASES\TC001_20260422\01_CONFIG\AUTO_DISCOVERY_ALL_V0_2" --reference-out ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_4A"
+
+Acceptance requires:
+
+- run C-0;
+- W4;
+- exact V705/B23/M69/S10000/U1578619/F2062/Q23/H0/P189341/Z500511/X0;
+- T < 65 seconds;
+- validator PASS with E1;
+- no frame-shard difference.
+
+If correct but T is not below 65 seconds, do not reject semantics.  Report the
+result and wait for worker/chunksize tuning.  Do not start the full source.
+
+======================================================================
+15. RETURN PROTOCOL
+======================================================================
+
+If self-test passes, do not return its PASS line.
+
+Return only these two lines:
+
+G10B1S5R-<exact run capsule line>
+G10B1S5V-<exact validator final line including E1>
+
+If self-test or run fails, return only:
+
+G10B1R4E-<exact final error line>
+
+END OF SPECIFICATION
