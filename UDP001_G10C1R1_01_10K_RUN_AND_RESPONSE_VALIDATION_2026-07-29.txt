@@ -1,0 +1,105 @@
+UDP001 G10C1R1 - 10K CONTROLLER RUN AND RESPONSE VALIDATION
+Date: 2026-07-29
+Status: EXECUTION AUTHORIZED
+Environment: Windows CMD, current directory C-CODE
+
+======================================================================
+1. ACCEPTED INPUT STATE
+======================================================================
+
+Accepted evidence:
+
+G10C1P-PASS
+
+Use the existing files without modification:
+
+- .\UDP001\04_TEMP\u001_discovery_controller_v0_1.py
+- .\UDP001\03_CASES\TC001_20260422\01_CONFIG\G10C1_SMOKE_10000_V0_1\u001_discovery_request.json
+
+The accepted child programs remain under .\UDP001\01_PROGRAMS.
+
+Do not regenerate the request.  Do not rerun preflight.  Do not give this task
+to Copilot.  Do not edit any Python or JSON file.
+
+======================================================================
+2. OUTPUT SAFETY CHECK
+======================================================================
+
+The following final and temporary folders must both be absent:
+
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\G10C1_SMOKE_10000_V0_1
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\.G10C1_SMOKE_10000_V0_1.g10c1_incomplete
+
+If either exists unexpectedly, stop.  Do not delete or reuse it and do not add
+an overwrite option.
+
+======================================================================
+3. RUN REQUEST
+======================================================================
+
+From C-CODE in Windows CMD, run this one-line command:
+
+python .\UDP001\04_TEMP\u001_discovery_controller_v0_1.py --run-request --udp001-root ".\UDP001" --case-root ".\UDP001\03_CASES\TC001_20260422" --request ".\UDP001\03_CASES\TC001_20260422\01_CONFIG\G10C1_SMOKE_10000_V0_1\u001_discovery_request.json"
+
+Require final line:
+
+G10C1-RUN-PASS C-0
+
+If the Run returns C-7, do not validate and do not repair the temporary folder.
+Return the exact short error line to Codex.
+
+======================================================================
+4. READ-ONLY RESPONSE VALIDATION
+======================================================================
+
+Only after Run C-0, run:
+
+python .\UDP001\04_TEMP\u001_discovery_controller_v0_1.py --validate-response --udp001-root ".\UDP001" --case-root ".\UDP001\03_CASES\TC001_20260422" --response-root ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10C1_SMOKE_10000_V0_1"
+
+Require final line:
+
+G10C1-VALIDATE-PASS C-0
+
+Validation is read-only.  If it returns C-7, do not modify the response.
+
+======================================================================
+5. MINIMUM STRUCTURAL CHECK
+======================================================================
+
+After both commands pass, confirm these five folders exist below the final Run:
+
+- 00_REQUEST
+- 01_G1_CATALOG
+- 02_PROFILE_CONFIG
+- 03_DISCOVERY_DATA
+- 04_RESPONSE
+
+Confirm these two response files exist:
+
+- 04_RESPONSE\u001_discovery_response_manifest.json
+- 04_RESPONSE\u001_discovery_completion_capsule.txt
+
+Do not open or manually inspect the large shard CSV files.
+
+======================================================================
+6. SHORT MANUAL RETURN
+======================================================================
+
+If Run, validator and the minimum structural check pass, return only:
+
+G10C1R1-PASS
+
+Do not type counters, hashes, paths or child capsules.
+
+On failure, return only the exact G10C1 short error line and at most one short
+Memo if the category is insufficient.
+
+======================================================================
+7. STOP
+======================================================================
+
+After returning the result, stop.  Do not move the controller into 01_PROGRAMS,
+do not begin G10C2, do not modify GUI v0.3, do not package U001 and do not run
+the full source through G10C1.
+
+END OF EXECUTION
