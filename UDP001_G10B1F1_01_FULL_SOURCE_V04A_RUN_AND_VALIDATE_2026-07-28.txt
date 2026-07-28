@@ -1,0 +1,106 @@
+UDP001 G10B1F1 - FULL-SOURCE v0.4A RUN AND VALIDATION
+Date: 2026-07-28
+Status: APPROVED CONTROLLED FULL-SOURCE EXECUTION
+
+PURPOSE
+
+Run the accepted single-process change-driven BUFFER_SNAPSHOT_WIDE engine on
+the complete TC001_20260422 Raw source and independently validate all outputs.
+
+APPROVED PROGRAM
+
+u001_g10b_single_pass_discovery_engine_v0_4a.py
+
+Do not use v0.4B or v0.4C for the full source.
+
+WHY v0.4A
+
+- self-test PASS-50;
+- 10,000-row run C-0;
+- validator PASS;
+- F2062 and 23 batches accepted;
+- T65, faster than actual four-worker v0.4C T73;
+- no multiprocessing/IPC variability.
+
+RUN ENVIRONMENT
+
+- Windows CMD;
+- current directory C-CODE;
+- keep the computer connected to AC power;
+- prevent sleep during execution;
+- avoid opening the output CSV shards in Excel while the run is active;
+- keep at least 30 GB free disk space before starting.
+
+OUTPUT FOLDER
+
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_FULL_SOURCE_V0_4A_W1
+
+The folder must be absent or empty.  Do not reuse a partial folder.
+
+FULL RUN
+
+The `--max-source-rows` option is intentionally omitted.  Its absence means all
+source data rows.
+
+python .\UDP001\04_TEMP\u001_g10b_single_pass_discovery_engine_v0_4a.py --run --source ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\CANDump.csv" --dbc-ch1 ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\DBC1.dbc" --dbc-ch2 ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\DBC2.dbc" --config-folder ".\UDP001\03_CASES\TC001_20260422\01_CONFIG\AUTO_DISCOVERY_ALL_V0_2" --program-root ".\UDP001\01_PROGRAMS" --out ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_FULL_SOURCE_V0_4A_W1" --source-id "SOURCE_001" --dataset-id "TC001_20260422" --run-id "G10B1_FULL_SOURCE_V0_4A_W1" --segment-id "FULL_SOURCE" --max-assignment-age-rows 200 --chunksize 10000
+
+Do not interrupt the process merely because total CPU remains near one logical
+core.  v0.4A is intentionally the accepted single-process reference.
+
+Expected order of magnitude based on the accepted smoke run:
+
+- source rows S approximately 599,970;
+- finalized frames F approximately 56,596;
+- elapsed time approximately 65 to 120 minutes;
+- exact U/P/Z values are not predeclared and must come from the run.
+
+RUN ACCEPTANCE
+
+Require:
+
+- V705;
+- B23;
+- M69;
+- S599970 unless the program reports a concrete source-row discrepancy;
+- U>0;
+- F>0 and expected approximately 56596;
+- Q23;
+- H0;
+- P>0;
+- Z>0;
+- W1;
+- X0;
+- C-0.
+
+VALIDATE
+
+After the run finishes successfully:
+
+python .\UDP001\04_TEMP\u001_g10b_single_pass_discovery_engine_v0_4a.py --validate-output --out ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_FULL_SOURCE_V0_4A_W1" --config-folder ".\UDP001\03_CASES\TC001_20260422\01_CONFIG\AUTO_DISCOVERY_ALL_V0_2"
+
+VALIDATOR ACCEPTANCE
+
+- validator PASS;
+- V705/B23/S599970;
+- validator U and F equal the run capsule;
+- F>0;
+- H0/X0;
+- every batch shard has the same complete FrameCount sequence;
+- no missing/duplicate batch shard;
+- no partial success.
+
+RETURN PROTOCOL
+
+Return only:
+
+G10B1F1R-<exact full-run capsule>
+G10B1F1V-<exact validator line>
+
+If the run fails, do not run the validator.  Return only:
+
+G10B1F1E-<exact final error line>
+
+Do not manually open or inspect the 23 shard files before Codex reviews the
+capsules.
+
+END OF EXECUTION
