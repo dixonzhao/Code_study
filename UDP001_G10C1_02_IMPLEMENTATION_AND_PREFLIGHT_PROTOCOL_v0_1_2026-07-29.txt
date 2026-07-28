@@ -1,0 +1,104 @@
+UDP001 G10C1 - IMPLEMENTATION AND FIRST PREFLIGHT PROTOCOL v0.1
+Date: 2026-07-29
+Status: COMPANY EXECUTION AUTHORIZED THROUGH PREFLIGHT ONLY
+Environment: Windows CMD, current directory C-CODE
+
+======================================================================
+1. COPILOT IMPLEMENTATION
+======================================================================
+
+In a fresh Company Copilot chat, attach the three G10C1 design files listed in
+the START HERE document.
+
+Instruction to Copilot:
+
+Read all three attached files completely.  Implement exactly the specified
+G10C1 headless controller.  Do not redesign the architecture and do not modify
+accepted child programs.  Generate and return one directly downloadable file
+named u001_discovery_controller_v0_1.py, not only a code block or explanation.
+
+Save the returned file as:
+
+C-CODE\UDP001\04_TEMP\u001_discovery_controller_v0_1.py
+
+======================================================================
+2. SELF-TEST
+======================================================================
+
+From C-CODE in Windows CMD:
+
+python .\UDP001\04_TEMP\u001_discovery_controller_v0_1.py --self-test
+
+Require process exit 0 and final line:
+
+U001-G10C1-SELFTEST-PASS-24
+
+If the count is greater than 24, that is acceptable.  Any failure stops the
+task.  Successful self-test does not need to be manually returned.
+
+======================================================================
+3. FIRST SMOKE REQUEST
+======================================================================
+
+The request file must not already exist:
+
+.\UDP001\03_CASES\TC001_20260422\01_CONFIG\G10C1_SMOKE_10000_V0_1\u001_discovery_request.json
+
+The requested Run folder must not already exist:
+
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\G10C1_SMOKE_10000_V0_1
+
+Run this one-line CMD command:
+
+python .\UDP001\04_TEMP\u001_discovery_controller_v0_1.py --make-request --case-root ".\UDP001\03_CASES\TC001_20260422" --out ".\UDP001\03_CASES\TC001_20260422\01_CONFIG\G10C1_SMOKE_10000_V0_1\u001_discovery_request.json" --request-id "G10C1_SMOKE_10000_V0_1" --run-id "G10C1_SMOKE_10000_V0_1" --dataset-id "TC001_20260422" --source-id "SOURCE_001" --segment-id "SOURCE_ROWS_0_9999" --requested-output-root "02_RUNS/G10C1_SMOKE_10000_V0_1" --reuse-policy FORCE_NEW_RUN --max-source-rows 10000 --chunksize 10000 --max-assignment-age-rows 200 --max-rss-mb 2048 --update-buffer-rows 256 --frame-buffer-rows 32 --memory-check-every-rows 1000 --minimum-free-gib 25
+
+Require:
+
+G10C1-REQUEST-CREATED C-0
+
+======================================================================
+4. PREFLIGHT
+======================================================================
+
+Use a new, absent preflight output folder:
+
+.\UDP001\03_CASES\TC001_20260422\03_RETURN\G10C1_SMOKE_10000_V0_1_PREFLIGHT
+
+Run:
+
+python .\UDP001\04_TEMP\u001_discovery_controller_v0_1.py --preflight --udp001-root ".\UDP001" --case-root ".\UDP001\03_CASES\TC001_20260422" --request ".\UDP001\03_CASES\TC001_20260422\01_CONFIG\G10C1_SMOKE_10000_V0_1\u001_discovery_request.json" --out ".\UDP001\03_CASES\TC001_20260422\03_RETURN\G10C1_SMOKE_10000_V0_1_PREFLIGHT"
+
+Require final line:
+
+G10C1-PREFLIGHT-PASS C-0
+
+Required output files:
+
+- u001_g10c1_preflight_manifest.json
+- udp001_g10c1_preflight_capsule.txt
+
+======================================================================
+5. MANUAL RETURN
+======================================================================
+
+If request creation and preflight pass, return only:
+
+G10C1P-PASS
+
+Do not manually type hashes, counts, paths or child self-test tokens.
+
+If blocked, return only the exact final short error line printed by G10C1 and
+at most one short Memo when the category is insufficient.
+
+======================================================================
+6. STOP
+======================================================================
+
+After preflight, stop.  Do not run --run-request, do not modify the generated
+controller, do not move it to 01_PROGRAMS, do not edit GUI v0.3 and do not
+start G10C2.
+
+Codex will inspect the short result and authorize the first 10K controller-run
+response separately.
+
+END OF PROTOCOL
