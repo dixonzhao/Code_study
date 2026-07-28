@@ -1,0 +1,342 @@
+from __future__ import annotations
+
+import argparse
+import csv
+import importlib.util
+from pathlib import Path
+import sys
+import tempfile
+from typing import Any
+
+import pandas as pd
+
+
+PROGRAM_NAME = "u001_g10b1_frame_key_byte_occupancy_probe"
+PROGRAM_VERSION = "0.1"
+FOUNDATION_BASENAME = "u001_foundation_core_v0_1.py"
+
+
+def load_foundation(program_root: Path) -> Any:
+    target = program_root.resolve() / FOUNDATION_BASENAME
+    if not target.is_file():
+        raise FileNotFoundError("FOUNDATION_NOT_FOUND")
+    spec = importlib.util.spec_from_file_location("_u001_g10b1d2_foundation", target)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("INVALID_FOUNDATION_SPEC")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    for name in ("detect_text_format", "discover_source_message_groups", "parse_dbc"):
+        if not callable(getattr(module, name, None)):
+            raise RuntimeError(f"FOUNDATION_CALLABLE_MISSING_{name}")
+    return module
+
+
+def signal_byte_indices(signal: Any) -> list[int]:
+    start_bit = int(signal.start_bit)
+    bit_length = int(signal.bit_length)
+    if bit_length < 1:
+        raise ValueError("INVALID_SIGNAL_BIT_LENGTH")
+    order = str(signal.byte_order).strip().lower()
+    positions: list[int] = []
+    if "little" in order or order in {"intel", "1"}:
+        positions = list(range(start_bit, start_bit + bit_length))
+    elif "big" in order or order in {"motorola", "0"}:
+        position = start_bit
+        for _ in range(bit_length):
+            if position < 0:
+                raise ValueError("INVALID_MOTOROLA_BIT_POSITION")
+            positions.append(position)
+            position = position + 15 if position % 8 == 0 else position - 1
+    else:
+        raise ValueError(f"UNKNOWN_BYTE_ORDER_{order}")
+    return sorted({position // 8 for position in positions})
+
+
+def is_present(series: pd.Series) -> pd.Series:
+    text = series.astype("string").fillna("").str.strip()
+    return text.ne("")
+
+
+def is_valid_byte(series: pd.Series, present: pd.Series) -> pd.Series:
+    numeric = pd.to_numeric(series.where(present), errors="coerce")
+    return present & numeric.notna() & numeric.between(0, 255) & numeric.mod(1).eq(0)
+
+
+def analyze(
+    source: Path,
+    dbc: Path,
+    program_root: Path,
+    out: Path,
+    target_channel: int,
+    target_can_id: int,
+    signal_name: str,
+    max_source_rows: int,
+    chunksize: int,
+) -> str:
+    if max_source_rows < 1 or max_source_rows > 100000:
+        raise ValueError("MAX_SOURCE_ROWS_OUT_OF_RANGE")
+    if chunksize < 1:
+        raise ValueError("INVALID_CHUNKSIZE")
+    output = out.resolve()
+    if output.exists() and any(output.iterdir()):
+        raise ValueError("OUTPUT_FOLDER_NOT_EMPTY")
+    output.mkdir(parents=True, exist_ok=True)
+
+    foundation = load_foundation(program_root)
+    info = foundation.detect_text_format(source.resolve())
+    groups = list(foundation.discover_source_message_groups(list(info.columns)))
+    matching = sorted(
+        [group for group in groups if int(group.can_id) == target_can_id],
+        key=lambda group: (int(group.channel), int(group.dlc)),
+    )
+    if not matching:
+        raise ValueError("TARGET_CAN_ID_GROUP_NOT_FOUND")
+    targets = [group for group in matching if int(group.channel) == target_channel]
+    if len(targets) != 1:
+        raise ValueError(f"TARGET_CHANNEL_GROUP_COUNT_{len(targets)}")
+
+    dbc_messages = list(foundation.parse_dbc(dbc.resolve(), target_channel))
+    signal_matches: list[tuple[Any, Any]] = []
+    for message in dbc_messages:
+        if int(message.can_id) != target_can_id:
+            continue
+        for signal in message.signals:
+            if str(signal.signal_name).strip() == signal_name:
+                signal_matches.append((message, signal))
+    if len(signal_matches) != 1:
+        raise ValueError(f"TARGET_SIGNAL_COUNT_{len(signal_matches)}")
+    dbc_message, target_signal = signal_matches[0]
+    required_signal_bytes = signal_byte_indices(target_signal)
+    if any(index < 0 or index >= int(dbc_message.dlc) for index in required_signal_bytes):
+        raise ValueError("TARGET_SIGNAL_BYTE_OUTSIDE_DLC")
+
+    usecols: list[str] = []
+    for group in matching:
+        for index in range(int(group.dlc)):
+            name = group.byte_columns_by_index.get(index)
+            if name is not None and name not in usecols:
+                usecols.append(name)
+    if not usecols:
+        raise ValueError("NO_RAW_BYTE_COLUMNS")
+
+    states: dict[tuple[int, int], dict[str, Any]] = {}
+    for group in matching:
+        key = (int(group.channel), int(group.dlc))
+        dlc = int(group.dlc)
+        states[key] = {
+            "group": group,
+            "nonblank": [0] * dlc,
+            "valid": [0] * dlc,
+            "any": 0,
+            "complete": 0,
+            "valid_complete": 0,
+            "max_present": 0,
+            "rows": 0,
+            "signal_required_complete": 0,
+            "signal_required_valid": 0,
+        }
+
+    read_rows = 0
+    reader = pd.read_csv(
+        source,
+        encoding=str(info.encoding),
+        sep=str(info.delimiter),
+        header=int(info.header_row_index),
+        usecols=usecols,
+        dtype="string",
+        keep_default_na=False,
+        na_filter=False,
+        chunksize=min(chunksize, max_source_rows),
+        low_memory=False,
+    )
+    for chunk in reader:
+        remaining = max_source_rows - read_rows
+        if remaining <= 0:
+            break
+        if len(chunk) > remaining:
+            chunk = chunk.iloc[:remaining].copy()
+        row_count = len(chunk)
+        if row_count == 0:
+            continue
+        for key, state in states.items():
+            group = state["group"]
+            dlc = int(group.dlc)
+            present_masks: list[pd.Series] = []
+            valid_masks: list[pd.Series] = []
+            for index in range(dlc):
+                name = group.byte_columns_by_index.get(index)
+                if name is None:
+                    present = pd.Series(False, index=chunk.index)
+                    valid = pd.Series(False, index=chunk.index)
+                else:
+                    present = is_present(chunk[name])
+                    valid = is_valid_byte(chunk[name], present)
+                state["nonblank"][index] += int(present.sum())
+                state["valid"][index] += int(valid.sum())
+                present_masks.append(present)
+                valid_masks.append(valid)
+            present_count = sum(mask.astype("int16") for mask in present_masks)
+            any_mask = present_count.gt(0)
+            complete_mask = present_count.eq(dlc)
+            valid_count = sum(mask.astype("int16") for mask in valid_masks)
+            valid_complete_mask = valid_count.eq(dlc)
+            state["any"] += int(any_mask.sum())
+            state["complete"] += int(complete_mask.sum())
+            state["valid_complete"] += int(valid_complete_mask.sum())
+            state["max_present"] = max(state["max_present"], int(present_count.max()))
+            state["rows"] += row_count
+            if int(group.channel) == target_channel:
+                required_present = pd.Series(True, index=chunk.index)
+                required_valid = pd.Series(True, index=chunk.index)
+                for index in required_signal_bytes:
+                    required_present &= present_masks[index]
+                    required_valid &= valid_masks[index]
+                state["signal_required_complete"] += int(required_present.sum())
+                state["signal_required_valid"] += int(required_valid.sum())
+        read_rows += row_count
+        if read_rows >= max_source_rows:
+            break
+
+    if read_rows == 0:
+        raise ValueError("NO_SOURCE_ROWS_READ")
+
+    csv_path = output / "u001_g10b1d2_byte_occupancy.csv"
+    columns = [
+        "GroupOrdinal", "Channel", "CAN_ID_Hex", "DLC", "HeaderComplete",
+        "ByteIndex", "ColumnPresent", "NonblankCount", "ValidByteCount",
+        "AnyPresentRowCount", "CompleteRowCount", "ValidCompleteRowCount",
+        "MaxPresentBytes", "ScannedSourceRows", "IsTarget", "SignalName",
+        "SignalRequiredByte", "SignalRequiredCompleteRowCount",
+        "SignalRequiredValidRowCount", "Status",
+    ]
+    with csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns, lineterminator="\n")
+        writer.writeheader()
+        for ordinal, group in enumerate(matching, start=1):
+            key = (int(group.channel), int(group.dlc))
+            state = states[key]
+            for index in range(int(group.dlc)):
+                writer.writerow({
+                    "GroupOrdinal": ordinal,
+                    "Channel": int(group.channel),
+                    "CAN_ID_Hex": str(group.can_id_hex),
+                    "DLC": int(group.dlc),
+                    "HeaderComplete": int(bool(group.complete)),
+                    "ByteIndex": index,
+                    "ColumnPresent": int(index in group.byte_columns_by_index),
+                    "NonblankCount": state["nonblank"][index],
+                    "ValidByteCount": state["valid"][index],
+                    "AnyPresentRowCount": state["any"],
+                    "CompleteRowCount": state["complete"],
+                    "ValidCompleteRowCount": state["valid_complete"],
+                    "MaxPresentBytes": state["max_present"],
+                    "ScannedSourceRows": state["rows"],
+                    "IsTarget": int(int(group.channel) == target_channel),
+                    "SignalName": signal_name if int(group.channel) == target_channel else "",
+                    "SignalRequiredByte": int(index in required_signal_bytes) if int(group.channel) == target_channel else "",
+                    "SignalRequiredCompleteRowCount": state["signal_required_complete"] if int(group.channel) == target_channel else "",
+                    "SignalRequiredValidRowCount": state["signal_required_valid"] if int(group.channel) == target_channel else "",
+                    "Status": "OBSERVED",
+                })
+
+    target = targets[0]
+    target_state = states[(int(target.channel), int(target.dlc))]
+    best = max(
+        matching,
+        key=lambda group: (
+            states[(int(group.channel), int(group.dlc))]["valid_complete"],
+            states[(int(group.channel), int(group.dlc))]["complete"],
+            states[(int(group.channel), int(group.dlc))]["any"],
+        ),
+    )
+    best_state = states[(int(best.channel), int(best.dlc))]
+    nonblank_code = ".".join(str(value) for value in target_state["nonblank"])
+    valid_code = ".".join(str(value) for value in target_state["valid"])
+    capsule = (
+        "UDP001G10B1D2 "
+        f"N-G{len(matching)}-C{int(target.channel)}-D{int(target.dlc)}-"
+        f"H{int(bool(target.complete))}-A{target_state['any']}-"
+        f"P{target_state['complete']}-V{target_state['valid_complete']}-"
+        f"M{target_state['max_present']}-S1-K{len(required_signal_bytes)}-"
+        f"Q{target_state['signal_required_complete']}-L{target_state['signal_required_valid']}-"
+        f"N{nonblank_code}-W{valid_code}-"
+        f"Y{int(best.channel)}.{int(best.dlc)}.{best_state['valid_complete']}-X0 C-0"
+    )
+    (output / "udp001_g10b1d2_return_capsule.txt").write_text(
+        capsule + "\n", encoding="utf-8", newline="\n"
+    )
+    print(capsule)
+    return capsule
+
+
+def self_test() -> None:
+    with tempfile.TemporaryDirectory(prefix="u001_g10b1d2_selftest_") as temp:
+        root = Path(temp)
+        frame = pd.DataFrame({
+            **{f"b{i}": [i, i + 1] for i in range(6)},
+            "b6": ["", ""],
+            "b7": ["", ""],
+        })
+        present = [is_present(frame[f"b{i}"]) for i in range(8)]
+        count = sum(mask.astype("int16") for mask in present)
+        assert int(count.max()) == 6
+        assert int(count.eq(8).sum()) == 0
+        valid = [is_valid_byte(frame[f"b{i}"], present[i]) for i in range(8)]
+        valid_count = sum(mask.astype("int16") for mask in valid)
+        assert int(valid_count.max()) == 6
+        assert int(valid_count.eq(8).sum()) == 0
+        assert int(is_present(pd.Series([0, "0", ""])).sum()) == 2
+        assert int(is_valid_byte(pd.Series([0, 255, 256, -1, 1.5]), pd.Series([True] * 5)).sum()) == 2
+        little = type("Signal", (), {"start_bit": 8, "bit_length": 12, "byte_order": "little_endian"})()
+        assert signal_byte_indices(little) == [1, 2]
+        motorola = type("Signal", (), {"start_bit": 15, "bit_length": 8, "byte_order": "big_endian"})()
+        assert signal_byte_indices(motorola) == [1]
+        assert root.exists()
+    print("UDP001-G10B1D2-SELFTEST-PASS-10")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--probe", action="store_true")
+    parser.add_argument("--source", type=Path)
+    parser.add_argument("--dbc", type=Path)
+    parser.add_argument("--program-root", type=Path)
+    parser.add_argument("--out", type=Path)
+    parser.add_argument("--target-channel", type=int, default=2)
+    parser.add_argument("--target-can-id", type=lambda value: int(value, 0), default=0x620)
+    parser.add_argument("--signal-name", default="FrameCount")
+    parser.add_argument("--max-source-rows", type=int, default=10000)
+    parser.add_argument("--chunksize", type=int, default=10000)
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        if args.self_test:
+            self_test()
+            return 0
+        if args.source is None or args.dbc is None or args.program_root is None or args.out is None:
+            raise ValueError("PROBE_REQUIRES_SOURCE_DBC_PROGRAM_ROOT_OUT")
+        analyze(
+            args.source,
+            args.dbc,
+            args.program_root,
+            args.out,
+            args.target_channel,
+            args.target_can_id,
+            args.signal_name,
+            args.max_source_rows,
+            args.chunksize,
+        )
+        return 0
+    except Exception as exc:
+        print(f"UDP001G10B1D2-ERROR:{type(exc).__name__}:{str(exc)}")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
