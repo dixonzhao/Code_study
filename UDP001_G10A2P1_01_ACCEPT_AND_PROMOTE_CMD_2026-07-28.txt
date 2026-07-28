@@ -1,0 +1,46 @@
+UDP001 G10A2P1 - ACCEPTED PROGRAM PROMOTION
+Date: 2026-07-28
+Status: G10A2 ACCEPTED; MOVE ONLY
+
+PURPOSE
+
+Move the accepted G10A2 program from 04_TEMP to 01_PROGRAMS without changing
+the program or overwriting an existing target.
+
+RUN ENVIRONMENT
+
+- Windows CMD
+- start directory: C-CODE
+
+COMMAND
+
+Run this as one line:
+
+if not exist ".\UDP001\04_TEMP\u001_auto_discovery_profile_builder_v0_2.py" (echo G10A2P1-BLOCKED-SOURCE-MISSING) else if exist ".\UDP001\01_PROGRAMS\u001_auto_discovery_profile_builder_v0_2.py" (echo G10A2P1-BLOCKED-TARGET-EXISTS) else (move ".\UDP001\04_TEMP\u001_auto_discovery_profile_builder_v0_2.py" ".\UDP001\01_PROGRAMS\u001_auto_discovery_profile_builder_v0_2.py" >nul && echo G10A2P1-PASS)
+
+EXPECTED TERMINAL LOCATION
+
+Read only the final line printed in the same CMD window.
+
+RETURN TO CODEX
+
+Return exactly one of:
+
+G10A2P1-PASS
+G10A2P1-BLOCKED-SOURCE-MISSING
+G10A2P1-BLOCKED-TARGET-EXISTS
+
+STOP RULE
+
+- On PASS: stop and wait for G10B design.
+- On BLOCKED: do not delete, rename or overwrite anything; return the exact
+  blocking token.
+
+DO NOT MOVE OR MODIFY
+
+- AUTO_DISCOVERY_ALL_V0_2 Case output folder;
+- Gate 1-G9 programs;
+- G10A2 output CSV/JSON/capsule files;
+- rejected v0.1 evidence under ARCH.
+
+END OF HANDOFF
