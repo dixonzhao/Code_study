@@ -1,0 +1,269 @@
+UDP001 G10B1R4A1 - SIMULTANEOUS FUTURE SUBMISSION v0.4C
+Date: 2026-07-28
+Status: NARROW PARALLEL-SCHEDULING CORRECTION
+
+======================================================================
+1. OBSERVED RESULT
+======================================================================
+
+v0.4B run:
+
+UDP001G10B1R N-V705-B23-M69-S10000-U1578619-F2062-Q23-H0-P189341-Z500511-T150-W4-X0 C-0
+
+Validator:
+
+UDP001-G10B1-VALIDATE-PASS V705-B23-S10000-U1578619-F2062-H0-X0-E1
+
+Runtime observation:
+
+- only two active Python processes were visible excluding Python Install
+  Manager;
+- total CPU remained near five percent;
+- T150 is slower than accepted single-process v0.4A T65.
+
+Classification:
+
+- semantic output PASS;
+- parallel performance FAIL;
+- W4 currently proves requested/configured workers only;
+- likely one worker is used because Futures are awaited sequentially.
+
+======================================================================
+2. INPUT AND OUTPUT
+======================================================================
+
+Input:
+
+u001_g10b_single_pass_discovery_engine_v0_4b.py
+
+Output:
+
+u001_g10b_single_pass_discovery_engine_v0_4c.py
+
+Do not overwrite v0.4B.
+Do not start from v0.4A.
+Do not alter accepted source/frame/signal semantics.
+
+Give Copilot exactly:
+
+1. u001_g10b_single_pass_discovery_engine_v0_4b.py
+2. this specification
+
+Copilot returns one complete downloadable v0.4C Python file.
+
+======================================================================
+3. REQUIRED CODE INSPECTION
+======================================================================
+
+Inspect every:
+
+- ProcessPoolExecutor construction;
+- executor.submit call;
+- Future.result call;
+- as_completed/wait call;
+- partition-building loop;
+- empty-partition filtering branch.
+
+Reject this pattern:
+
+for task in tasks:
+    future = executor.submit(worker, task)
+    result = future.result()
+
+Reject any equivalent pattern that waits inside the submission loop.
+
+Required pattern:
+
+futures = []
+for each of the four nonempty partition tasks:
+    futures.append(executor.submit(worker, task))
+
+# only after all four submissions:
+for future in futures or deterministic completion handling:
+    collect result
+
+No Future.result(), wait() or as_completed() consumption may occur before all
+four partition tasks for the chunk have been submitted.
+
+======================================================================
+4. FOUR NONEMPTY PARTITIONS
+======================================================================
+
+For --workers 4 and M69:
+
+- create exactly four partitions;
+- every partition contains at least one message plan;
+- the union contains all 69 message plans exactly once;
+- no Frame-key plan occurs in any partition;
+- partition signal weights must be balanced deterministically;
+- build exactly four task objects per nonempty source chunk;
+- submit exactly four Futures before awaiting any result.
+
+If any condition fails, exit nonzero with:
+
+PARALLEL_PARTITION_INVARIANT_FAILED
+
+Do not collapse four partitions into one outer task containing a list of four
+partitions.
+
+======================================================================
+5. ACTUAL WORKER EVIDENCE
+======================================================================
+
+Every module-level worker function must return, in its bounded metadata:
+
+- os.getpid();
+- PartitionOrdinal;
+- decoded record count;
+- worker error count.
+
+The main process must record for the complete run:
+
+- requested_worker_count;
+- executor_max_workers;
+- nonempty_partition_count;
+- submitted_task_count;
+- completed_task_count;
+- unique_worker_pid_count;
+- per-worker completed task count;
+- worker_failure_count.
+
+Do not write raw payload values to metadata.
+
+For the 10,000-row W4 smoke run, success requires:
+
+- requested_worker_count = 4;
+- executor_max_workers = 4;
+- nonempty_partition_count = 4;
+- first nonempty chunk submitted task count = 4 before waiting;
+- unique_worker_pid_count = 4;
+- worker_failure_count = 0.
+
+If unique_worker_pid_count < 4, do not emit C-0.  Fail with:
+
+ACTUAL_WORKER_COUNT_BELOW_REQUESTED
+
+======================================================================
+6. PRESERVE OWNERSHIP
+======================================================================
+
+Preserve exactly from v0.4B:
+
+- main process is the only Raw CSV reader;
+- Raw source scan count = 1;
+- main process owns payload change detection;
+- FrameCount remains serial in main;
+- main owns frame assignment/finalization;
+- main is the only final output writer;
+- workers decode changed non-Frame-key candidate payloads only;
+- at most one source chunk is in flight;
+- worker results merge in stable SourceRowIndex, MessagePlanOrdinal,
+  SignalOrdinal, CanonicalName order;
+- BUFFER_SNAPSHOT_WIDE and SNAPSHOT_STATE_CHANGE semantics;
+- exact Channel-2 / 0x620 / FrameCount authority;
+- no ThreadPoolExecutor;
+- no multiprocessing nested inside workers.
+
+Do not change payload caching, U/P/Z definitions, validity, hold, event,
+batching or output schema logic.
+
+======================================================================
+7. CAPSULE CORRECTION
+======================================================================
+
+Distinguish requested and actual worker count.
+
+Append/use:
+
+- W = requested/effective executor max_workers;
+- A = actual unique worker PID count;
+- D = nonempty partition/task count per nonempty chunk.
+
+Required run shape:
+
+UDP001G10B1R N-V{V}-B{B}-M{M}-S{S}-U{U}-F{F}-Q{Q}-H{H}-P{P}-Z{Z}-T{T}-W{W}-A{A}-D{D}-X{X} C-0
+
+For the smoke acceptance: W4-A4-D4.
+
+The independent validator must recompute/verify the parallel metadata and
+require W4-A4-D4 when the run declares MULTIPROCESS.
+
+Validator success shape with reference equivalence:
+
+UDP001-G10B1-VALIDATE-PASS V705-B23-S10000-U1578619-F2062-H0-W4-A4-D4-X0-E1
+
+======================================================================
+8. SELF-TESTS
+======================================================================
+
+Preserve the 60 accepted tests and add exactly five:
+
+T61 a fake executor proves four submit calls occur before the first result/wait;
+T62 four partitions are nonempty and cover all 69 plans once;
+T63 worker results expose PID and PartitionOrdinal;
+T64 runtime rejects A<W rather than reporting misleading C-0;
+T65 capsule and validator distinguish W, A and D.
+
+Success token:
+
+UDP001-G10B1R4A1-SELFTEST-PASS-65
+
+Successful self-test token does not require manual return.  On failure, return
+the exact failure and stop.
+
+======================================================================
+9. 10,000-ROW SMOKE
+======================================================================
+
+Run from C-CODE in Windows CMD.
+
+Self-test:
+
+python .\UDP001\04_TEMP\u001_g10b_single_pass_discovery_engine_v0_4c.py --self-test
+
+New empty output folder:
+
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_4C_W4
+
+Run:
+
+python .\UDP001\04_TEMP\u001_g10b_single_pass_discovery_engine_v0_4c.py --run --source ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\CANDump.csv" --dbc-ch1 ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\DBC1.dbc" --dbc-ch2 ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\DBC2.dbc" --config-folder ".\UDP001\03_CASES\TC001_20260422\01_CONFIG\AUTO_DISCOVERY_ALL_V0_2" --program-root ".\UDP001\01_PROGRAMS" --out ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_4C_W4" --source-id "SOURCE_001" --dataset-id "TC001_20260422" --run-id "G10B1_SMOKE_10000_V0_4C_W4" --segment-id "SOURCE_ROWS_0_9999" --max-assignment-age-rows 200 --chunksize 10000 --max-source-rows 10000 --workers 4
+
+Validate against v0.4A:
+
+python .\UDP001\04_TEMP\u001_g10b_single_pass_discovery_engine_v0_4c.py --validate-output --out ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_4C_W4" --config-folder ".\UDP001\03_CASES\TC001_20260422\01_CONFIG\AUTO_DISCOVERY_ALL_V0_2" --reference-out ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_4A"
+
+Acceptance requires:
+
+- exact V705/B23/M69/S10000/U1578619/F2062/Q23/H0/P189341/Z500511/X0;
+- W4-A4-D4;
+- validator E1;
+- T < 65 seconds.
+
+STOP RULE
+
+If W4-A4-D4 and E1 pass but T >= 65:
+
+- do not perform another parallel rewrite;
+- reject multiprocessing as inefficient for this workload;
+- select v0.4A W1 as the production implementation;
+- continue U001 using v0.4A.
+
+Do not run the 599,970-row source during this task.
+
+======================================================================
+10. RETURN
+======================================================================
+
+If self-test passes, do not return it.
+
+Return only:
+
+G10B1S6R-<exact run capsule>
+G10B1S6V-<exact validator line>
+
+If blocked:
+
+G10B1R4A1E-<exact final error>
+
+END OF SPECIFICATION
