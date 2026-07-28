@@ -1,0 +1,47 @@
+UDP001 G10B1D2 - FRAME-KEY BYTE OCCUPANCY PROBE
+Date: 2026-07-28
+Status: READ-ONLY DIRECT PROGRAM; NO COPILOT REQUIRED
+
+DOWNLOAD
+
+u001_g10b1_frame_key_byte_occupancy_probe_v0_1.py.txt
+
+Save under:
+
+C-CODE\UDP001\04_TEMP\u001_g10b1_frame_key_byte_occupancy_probe_v0_1.py.txt
+
+RUN ENVIRONMENT
+
+- Windows CMD
+- current directory C-CODE
+
+SELF-TEST
+
+python .\UDP001\04_TEMP\u001_g10b1_frame_key_byte_occupancy_probe_v0_1.py.txt --self-test
+
+Expected:
+
+UDP001-G10B1D2-SELFTEST-PASS-10
+
+OUTPUT FOLDER
+
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1D2_BYTE_OCCUPANCY_V0_1
+
+Confirm the folder is absent or empty.
+
+PROBE COMMAND
+
+python .\UDP001\04_TEMP\u001_g10b1_frame_key_byte_occupancy_probe_v0_1.py.txt --probe --source ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\CANDump.csv" --dbc ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\DBC2.dbc" --program-root ".\UDP001\01_PROGRAMS" --out ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1D2_BYTE_OCCUPANCY_V0_1" --target-channel 2 --target-can-id 0x620 --signal-name "FrameCount" --max-source-rows 10000 --chunksize 10000
+
+EVIDENCE LOCATION
+
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1D2_BYTE_OCCUPANCY_V0_1\udp001_g10b1d2_return_capsule.txt
+
+RETURN EXACTLY
+
+G10B1D2ST-<exact self-test line>
+G10B1D2R-<exact probe capsule>
+
+Do not modify G10B engine code and do not rerun the engine.
+
+END OF EXECUTION
