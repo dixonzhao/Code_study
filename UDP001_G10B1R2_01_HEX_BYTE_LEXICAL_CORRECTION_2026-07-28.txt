@@ -1,0 +1,270 @@
+UDP001 G10B1R2 - RAW CAN HEX-BYTE LEXICAL CORRECTION
+Date: 2026-07-28
+Status: IMPLEMENTATION CORRECTION SPECIFICATION
+
+======================================================================
+1. PURPOSE
+======================================================================
+
+Correct one proven lexical defect in the G10B1 single-pass discovery engine.
+
+The Raw MATLAB CAN CSV stores byte cells as hexadecimal text.  Hexadecimal
+digits-only text remains hexadecimal.  For example:
+
+- "00" -> 0
+- "10" -> 16, NOT decimal 10
+- "7F" -> 127
+- "FF" -> 255
+
+The current decimal-only validity rule rejects values containing A-F and can
+therefore reject complete CAN messages, including the authoritative FrameCount
+message.
+
+This correction does not change the accepted architecture, signal catalog,
+batch plan, frame assignment policy, hold policy, output schemas or Data
+Contract semantics beyond explicitly declaring the Raw-byte lexical encoding.
+
+======================================================================
+2. ACCEPTED EVIDENCE
+======================================================================
+
+G10B1D2 returned:
+
+UDP001G10B1D2 N-G1-C2-D8-H1-A9998-P9998-V0-M8-S1-K4-Q9998-L2644-N9998.9998.9998.9998.9998.9998.9998.9998-W3909.6550.9998.9998.9998.0.9998.9998-Y2.8.0-X0 C-0
+
+Interpretation:
+
+- exactly one Channel-2 / CAN-ID-0x620 / DLC-8 source group exists;
+- all eight byte cells are present on 9,998 observed message rows;
+- exact DBC signal FrameCount resolves and uses four payload bytes;
+- all four FrameCount bytes are present on 9,998 rows;
+- decimal-only conversion accepts only 2,644 of those rows;
+- Byte0 decimal acceptance is 3,909 / 9,998, closely matching the expected
+  digits-only fraction of two-character hexadecimal text;
+- Byte5 is present on 9,998 rows but decimal-valid on zero rows, consistent
+  with a hexadecimal token containing A-F rather than a missing byte.
+
+Decision:
+
+- source structure and FrameCount selection are accepted;
+- the decimal-only byte validity rule is rejected;
+- do not perform another source-structure probe before this correction.
+
+======================================================================
+3. INPUT AND OUTPUT PROGRAMS
+======================================================================
+
+Input program to modify:
+
+u001_g10b_single_pass_discovery_engine_v0_2.py
+
+Output program to create:
+
+u001_g10b_single_pass_discovery_engine_v0_3.py
+
+Do not overwrite v0.2.
+Do not edit the accepted Foundation program.
+Do not rewrite the engine from zero.
+
+Use v0.2 as the only implementation baseline and apply the narrow changes in
+this specification.
+
+======================================================================
+4. AUTHORITATIVE FRAME-KEY IDENTITY
+======================================================================
+
+Keep the exact authoritative identity:
+
+- Channel = 2
+- CAN ID = 0x620
+- SignalName = FrameCount
+- Canonical role = FRAME_KEY
+
+0x620 is a CAN Message containing five DBC signals.  The other four signals
+must not become Frame-key candidates merely because they share CAN ID 0x620.
+
+Runtime must resolve the exact FrameCount DBC signal actively and decode it
+from the normalized payload.  Do not select a signal by Message ID alone.
+
+======================================================================
+5. ONE CANONICAL RAW-BYTE PARSER
+======================================================================
+
+Implement one canonical scalar normalization function and one vectorized
+adapter used by every message route.
+
+Recommended semantic name:
+
+parse_raw_can_hex_byte(value) -> int | missing | invalid
+
+Exact rules:
+
+1. Preserve the distinction among PRESENT, MISSING and INVALID.
+2. Blank, whitespace-only and actual NaN are MISSING / NO_UPDATE inputs.
+3. Trim surrounding whitespace before parsing.
+4. Accept one or two hexadecimal digits [0-9A-Fa-f].
+5. Optionally accept a 0x or 0X prefix followed by one or two hexadecimal
+   digits, if the existing source reader can expose such values.
+6. Interpret every accepted token in base 16, including digits-only tokens.
+7. Return a normalized integer in [0,255].
+8. Preserve 0 as a real valid byte.
+9. Reject signs, decimal points, scientific notation, separators, more than
+   two hexadecimal digits after an optional prefix and any non-hex character.
+10. Never call decimal pd.to_numeric as the authoritative byte parser.
+11. Never infer decimal versus hexadecimal per cell.
+12. Do not silently coerce INVALID to MISSING or zero.
+
+Examples:
+
+"0"     -> 0
+"00"    -> 0
+"09"    -> 9
+"10"    -> 16
+"aF"    -> 175
+"FF"    -> 255
+"0x10"  -> 16
+""      -> MISSING
+"  "    -> MISSING
+"-1"    -> INVALID
+"1.0"   -> INVALID
+"100"   -> INVALID
+"0x100" -> INVALID
+"GG"    -> INVALID
+
+The normalized UInt8 payload produced by this parser must be the only payload
+passed to Foundation.decode_physical_value or equivalent accepted Foundation
+decode primitives.
+
+======================================================================
+6. APPLY THE SAME RULE TO ALL ROUTES
+======================================================================
+
+The exact same canonical parser must be used for:
+
+- the dedicated Channel-2 / 0x620 / FrameCount route;
+- every candidate message in all 23 batches;
+- byte-valid masks;
+- complete/invalid message classification;
+- scalar fallback decode paths;
+- vectorized decode paths;
+- quality counters;
+- runtime validation helpers that inspect Raw byte values.
+
+There must be no separate decimal parser for FrameCount and no second parser
+inside the candidate-batch path.
+
+Message classification remains:
+
+- all required message cells blank -> NO_UPDATE;
+- some but not all message cells present -> INCOMPLETE_MESSAGE;
+- all present but at least one token fails the canonical hex parser ->
+  INVALID_BYTE;
+- all present and every token normalizes to 0..255 -> DECODED_UPDATE.
+
+For the observed Channel-2 / 0x620 message rows, a present token such as FF is
+valid and must not cause INVALID_BYTE.
+
+======================================================================
+7. CONTRACT METADATA AMENDMENT
+======================================================================
+
+Record the following explicit source-interface metadata in the G10B1 quality
+JSON and Run Manifest if those files already carry source-format metadata:
+
+RawByteEncoding = HEX_TEXT
+RawByteDigitsOnlyBase = 16
+
+If the current schemas prohibit adding keys, place these two declarations in
+the existing warnings/notes metadata without changing required table columns.
+Do not change D1-D6 table schemas solely for these declarations.
+
+This is a metadata clarification.  Do not reopen FrameCount, missing-value,
+hold, cadence, batching or semantic-validity decisions.
+
+======================================================================
+8. REGRESSION SELF-TESTS
+======================================================================
+
+Preserve all 30 accepted v0.2 tests and add exactly ten deterministic tests:
+
+T31 "00" parses to 0 and remains valid.
+T32 digits-only "10" parses to 16, never decimal 10.
+T33 uppercase "FF" parses to 255.
+T34 lowercase/mixed-case hex parses identically.
+T35 optional 0x prefix parses in base 16.
+T36 blank and NaN remain MISSING / NO_UPDATE.
+T37 signed, floating, overlength and non-hex tokens are INVALID.
+T38 a synthetic DLC-8 0x620 payload containing FF in a non-FrameCount byte is
+    a valid decoded message and produces a FrameCount update.
+T39 Frame-key and candidate routes call the same canonical byte parser.
+T40 nonempty input with zero Frame-key updates still fails; the previous F>0
+    success invariant and validator correction remain active.
+
+When all 40 pass, print exactly:
+
+UDP001-G10B1R2-SELFTEST-PASS-40
+
+Any failure exits nonzero and must not print PASS.
+
+======================================================================
+9. REAL SMOKE RUN
+======================================================================
+
+After code generation and self-test, use a new empty output folder:
+
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_3
+
+Run from C-CODE in Windows CMD:
+
+python .\UDP001\04_TEMP\u001_g10b_single_pass_discovery_engine_v0_3.py --run --source ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\CANDump.csv" --dbc-ch1 ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\DBC1.dbc" --dbc-ch2 ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\DBC2.dbc" --config-folder ".\UDP001\03_CASES\TC001_20260422\01_CONFIG\AUTO_DISCOVERY_ALL_V0_2" --program-root ".\UDP001\01_PROGRAMS" --out ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_3" --source-id "SOURCE_001" --dataset-id "TC001_20260422" --run-id "G10B1_SMOKE_10000_V0_3" --segment-id "SOURCE_ROWS_0_9999" --max-assignment-age-rows 200 --chunksize 10000 --max-source-rows 10000
+
+Then validate:
+
+python .\UDP001\04_TEMP\u001_g10b_single_pass_discovery_engine_v0_3.py --validate-output --out ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_3" --config-folder ".\UDP001\03_CASES\TC001_20260422\01_CONFIG\AUTO_DISCOVERY_ALL_V0_2"
+
+Success requires:
+
+- run C-0;
+- U > 0;
+- F > 0;
+- Q = 23;
+- H = 0;
+- X = 0;
+- validator PASS with F > 0;
+- the exact Channel-2 / 0x620 / FrameCount identity remains declared;
+- no candidate signal is promoted to Frame-key by sharing 0x620.
+
+Do not run the full 599,970-row source before this smoke run is accepted.
+
+======================================================================
+10. COPILOT DELIVERY
+======================================================================
+
+Provide Copilot exactly two input files:
+
+1. u001_g10b_single_pass_discovery_engine_v0_2.py
+2. this G10B1R2 specification
+
+Copilot must return one complete downloadable Python source file:
+
+u001_g10b_single_pass_discovery_engine_v0_3.py
+
+Do not return a patch only.
+Do not return explanation only.
+Do not change unrelated behavior.
+
+======================================================================
+11. RETURN CAPSULE
+======================================================================
+
+Return only:
+
+G10B1R2ST-<exact self-test final line>
+G10B1S3R-<exact run capsule line>
+G10B1S3V-<exact validator final line>
+
+If blocked, return:
+
+G10B1R2E-<exact final error line>
+
+END OF SPECIFICATION
