@@ -1,0 +1,371 @@
+UDP001 G10B0 - ARCHITECTURE REUSE AND MATERIALIZATION PROBE
+IMPLEMENTATION SPECIFICATION v0.1
+Date: 2026-07-28
+
+======================================================================
+1. PROGRAM IDENTITY
+======================================================================
+
+Filename:
+
+u001_g10b_architecture_capacity_probe_v0_1.py
+
+Dependencies:
+
+- Python standard library only;
+- pandas is not required and must not be imported.
+
+Import safety:
+
+- importing this probe performs no I/O, subprocess, scan or logging;
+- execution only under the main guard;
+- all inspected inputs remain read-only;
+- no absolute company path is written to evidence;
+- only basenames, relative logical locations and hashes may be stored.
+
+======================================================================
+2. CLI
+======================================================================
+
+Self-test:
+
+python u001_g10b_architecture_capacity_probe_v0_1.py --self-test
+
+Probe:
+
+python u001_g10b_architecture_capacity_probe_v0_1.py --probe ^
+  --program-root "PATH_TO_UDP001_01_PROGRAMS" ^
+  --discovery-config "PATH_TO_AUTO_DISCOVERY_ALL_V0_2" ^
+  --out "NEW_G10B0_EVIDENCE_FOLDER"
+
+Rules:
+
+- input folders must exist;
+- output folder must be absent or empty;
+- no overwrite flag exists;
+- unknown arguments or ambiguous files block;
+- exit nonzero on a blocking structural inconsistency.
+
+======================================================================
+3. EXACT PROGRAM SET
+======================================================================
+
+Inspect exactly these six accepted source programs:
+
+M1 u001_foundation_core_v0_1.py
+M2 u001_selected_update_decoder_v0_1.py
+M3 u001_framecount_assignment_v0_1.py
+M4 u001_semantic_validity_classifier_v0_1.py
+M5 u001_framecount_view_builder_v0_1.py
+M6 u001_signal_cadence_bounded_hold_v0_1.py
+
+For each program:
+
+- require exactly one matching filename;
+- calculate SHA-256;
+- parse with ast without executing it;
+- list top-level function/class names and signatures;
+- list imports;
+- identify argparse CLI modes/options;
+- identify pandas/read_csv/to_csv/open usage by AST call names;
+- identify subprocess/runpy/dynamic import usage;
+- identify fixed output basenames in string literals;
+- identify main-guard presence;
+- test import safety in an isolated child process with cwd set to a new
+  temporary directory and a finite timeout;
+- capture only return code and compact stderr category, not full paths.
+
+The probe must not treat a leading underscore alone as proof of privacy or a
+public name alone as proof of semantic reusability.
+
+======================================================================
+4. API REUSE CLASSIFICATION
+======================================================================
+
+Assign one InterfaceCode to each module using deterministic evidence.
+
+0 = BLOCKED
+
+- file missing/duplicate;
+- AST parse fails;
+- import safety fails;
+- unbounded import-time side effect is observed.
+
+1 = FILE_CLI_ONLY
+
+- accepted work is exposed through CLI/file paths/fixed outputs;
+- no public callable accepts an in-memory/chunk input and explicit policy/config
+  while returning a result or writing through a caller-controlled sink;
+- composing the stage therefore requires materializing its complete input and
+  output files.
+
+2 = REUSABLE_CHUNK_API
+
+- at least one import-safe public callable accepts a bounded chunk/record
+  iterator plus explicit policy/state;
+- it does not require fixed filenames;
+- caller controls output sink or receives bounded results;
+- state can be passed across chunks explicitly;
+- AST evidence names the callable and signature.
+
+3 = FOUNDATION_PRIMITIVES
+
+- reserved for M1 only;
+- import-safe low-level functions exist for text-format/header parsing, DBC
+  parsing and physical decode primitives;
+- these primitives are reusable but do not by themselves implement the full
+  Gate 2-G6 streaming chain.
+
+M1 receives code 3 only when all required Foundation primitive groups are
+present.  Otherwise it receives 0, 1 or 2 according to evidence.
+
+For codes 2/3, evidence JSON must name the qualifying callables/signatures.
+For code 1, it must name the file/CLI coupling observations.  Heuristics that
+cannot establish code 2 must conservatively return code 1.
+
+======================================================================
+5. FOUNDATION REQUIRED PRIMITIVE GROUPS
+======================================================================
+
+Recognize exact or clearly version-equivalent public callables for:
+
+- text format detection;
+- Matlab CAN header parsing/group discovery;
+- DBC text loading/parsing;
+- raw bit extraction;
+- signedness application;
+- physical-value decoding.
+
+Expected historical names may include:
+
+- detect_text_format
+- parse_matlab_can_header
+- load_dbc_text
+- parse_dbc
+- extract_raw_unsigned
+- apply_signedness
+- decode_physical_value
+
+The probe records exact names found.  It must not invent a missing alias.
+
+======================================================================
+6. G10A2 CONFIGURATION VALIDATION
+======================================================================
+
+Read only:
+
+- u001_discovery_signal_inventory.csv
+- u001_discovery_batch_map.csv
+- u001_discovery_profile_manifest.json
+- udp001_g10a_return_capsule.txt
+
+Require:
+
+- processing_mode=AUTO_DISCOVERY;
+- profile_id=AUTO_DISCOVERY_ALL_V0_2;
+- completion_code=0;
+- manifest-declared hashes/rows match the two CSV files;
+- C=1112, E=706, X=406, K=1, V=705, B=23 for the accepted Case;
+- batch size=32;
+- BatchIds B001-B023 consecutive;
+- each of 705 candidates appears once;
+- FrameCount appears zero times in the batch map.
+
+The accepted real counts are verification inputs for this Case, not constants
+inside future G10B processing code.
+
+======================================================================
+7. PROCESS TOPOLOGY EVIDENCE
+======================================================================
+
+Create three structural strategy records without running them.
+
+Strategy A - PER_BATCH_EXISTING_CLI
+
+- RawSourceScanCount = batch_count = 23;
+- Gate2Runs=23;
+- Gate3Runs=23;
+- Gate4Runs=23;
+- Gate5Runs=23;
+- Gate6Runs=23;
+- risk code = REPEATED_RAW_PARSE.
+
+Strategy B - GLOBAL_LONG_STREAM_THEN_SPLIT
+
+- RawSourceScanCount=1;
+- GlobalLongStreamMaterializations=3 for G2/G3/G4;
+- BatchFrameRuns=23 for G5/G6;
+- risk code = GLOBAL_LONG_STREAM_DISK_AMPLIFICATION.
+
+Strategy C - SINGLE_PASS_DISCOVERY_STREAM
+
+- RawSourceScanCount=1;
+- GlobalLongStreamMaterializations=0 required by design;
+- candidate rows routed to 23 bounded batch sinks;
+- frame-key/spine handling explicitly required;
+- controlled-profile equivalence test explicitly required;
+- risk code = NEW_STREAMING_IMPLEMENTATION_REQUIRES_EQUIVALENCE_PROOF.
+
+These are topology facts, not execution-time predictions.
+
+======================================================================
+8. FRAME SHARD STRUCTURAL COUNTS
+======================================================================
+
+Gate 5/G6 currently expose, per candidate signal:
+
+1. __value
+2. __label
+3. __updated
+4. __update_count
+5. __age
+6. __valid
+7. __missing_reason
+
+Each frame shard has four leading columns:
+
+- FrameCount
+- SourceRowFirst
+- SourceRowLast
+- SourceUpdateCount
+
+Calculate from the batch map:
+
+- max candidate signals per batch;
+- final-batch candidate count;
+- max frame-shard column count = 4 + 7 * max batch width;
+- final frame-shard column count;
+- sum of all frame-shard columns;
+- FrameCount must be available to every shard to preserve a common domain;
+- candidate data must still partition once even if frame-key observations are
+  duplicated as processing support.
+
+Do not estimate numeric disk GB without data-row/serialization evidence.
+
+======================================================================
+9. DETERMINISTIC ARCHITECTURE CLASS
+======================================================================
+
+Emit EvidenceClass only; Codex makes the decision.
+
+P1 = COMPOSE_REUSABLE_CHUNK_APIS
+
+- M1 is 3;
+- M2, M3, M4 and M5 are all 2;
+- M6 is 2 or can be bypassed only by an already approved exact NONE-copy API;
+- caller-controlled sinks make global long-stream files unnecessary.
+
+P2 = FOUNDATION_BASED_NEW_STREAMING_ENGINE
+
+- M1 is 3;
+- at least one of M2-M5 is 1;
+- no module is 0;
+- new engine must prove equivalence against the controlled path before a full
+  discovery run.
+
+P3 = BLOCKED_REUSE_BOUNDARY
+
+- M1 is not 3; or
+- any required module is 0; or
+- discovery configuration fails validation.
+
+The probe must not implement the selected class.
+
+======================================================================
+10. REQUIRED OUTPUTS
+======================================================================
+
+Write exactly five files:
+
+1. u001_g10b0_program_api_inventory.csv
+2. u001_g10b0_process_topology.csv
+3. u001_g10b0_architecture_evidence.json
+4. u001_g10b0_probe_manifest.json
+5. udp001_g10b0_return_capsule.txt
+
+Program API inventory required columns:
+
+- ModuleId
+- ProgramBasename
+- ProgramSHA256
+- ASTParse
+- MainGuard
+- ImportSafe
+- InterfaceCode
+- PublicCallableCount
+- QualifyingCallableNames
+- CLIModes
+- FileIOObserved
+- FixedOutputNamesObserved
+- SubprocessObserved
+- EvidenceCodes
+
+Process topology columns:
+
+- StrategyId
+- StrategyName
+- RawSourceScanCount
+- Gate2Runs
+- Gate3Runs
+- Gate4Runs
+- Gate5Runs
+- Gate6Runs
+- GlobalLongStreamMaterializations
+- BatchCount
+- RiskCode
+
+Evidence JSON includes:
+
+- six module evidence objects;
+- exact function/signature/import inventories;
+- G10A2 configuration counts/hashes;
+- structural frame-shard counts;
+- three topology records;
+- EvidenceClass and exact reasons;
+- warnings/errors.
+
+Manifest includes:
+
+- program/version;
+- input basenames/hashes only;
+- output basenames/hashes/rows where applicable;
+- completion code;
+- no absolute paths.
+
+======================================================================
+11. RETURN CAPSULE
+======================================================================
+
+Success:
+
+UDP001G10B0 N-M6-I{import_safe_count}-B23-V705-F{M1_code}-D{M2_code}-A{M3_code}-S{M4_code}-W{M5_code}-H{M6_code}-P{class_number}-R23-G3-X0 C-0
+
+Where:
+
+- M = inspected module count;
+- I = isolated import-safe module count;
+- B/V = accepted discovery batches/candidates;
+- F/D/A/S/W/H = InterfaceCode for M1-M6;
+- P = EvidenceClass number 1/2/3;
+- R = Strategy A RawSourceScanCount;
+- G = Strategy B GlobalLongStreamMaterializations;
+- X = blocking error count.
+
+Failure uses the same labeled fields with known values and C-7.
+
+======================================================================
+12. NON-GOALS
+======================================================================
+
+The probe must not:
+
+- inspect company signal values;
+- read Raw CAN/DBC content;
+- benchmark real execution;
+- modify accepted programs/configuration;
+- claim API2 from a name alone;
+- generate G10B implementation;
+- choose U002 metrics;
+- upload evidence externally.
+
+END OF SPECIFICATION
