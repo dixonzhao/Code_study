@@ -1,0 +1,363 @@
+UDP001 G10B1R3 - CHANGE-DRIVEN BUFFER-SNAPSHOT ENGINE v0.4A
+Date: 2026-07-28
+Status: IMPLEMENTATION SPECIFICATION - SINGLE PROCESS REFERENCE
+
+======================================================================
+1. PURPOSE
+======================================================================
+
+Replace repeated per-row DBC decoding with a change-driven message cache while
+preserving one deterministic frame-level current-state output for every
+configured signal.
+
+This v0.4A is deliberately single-process.  It becomes the semantic reference
+for the later multiprocessing v0.4B.  Do not add ThreadPoolExecutor,
+ProcessPoolExecutor or multiprocessing in v0.4A.
+
+======================================================================
+2. ACCEPTED EVIDENCE
+======================================================================
+
+Functional baseline v0.3a:
+
+- self-test PASS-41;
+- V705, B23, M69, S10000;
+- U7048033;
+- F2062, Q23, H0, X0, C-0;
+- independent validator PASS.
+
+G10B1D3:
+
+UDP001G10B1D3 N-G134-S10000-D134-H112-V1000-C200-R800-K9998-J2061-E7936-T24-X0 C-0
+
+Interpretation:
+
+- the source is BUFFER_SNAPSHOT_WIDE;
+- all 134 inspected message groups are densely valid;
+- median payload repetition is 80 percent;
+- nonblank does not identify a real bus update;
+- Channel-2 / 0x620 initial payload plus 2,061 changes produces the accepted
+  2,062-frame domain.
+
+======================================================================
+3. INPUT AND OUTPUT
+======================================================================
+
+Input program:
+
+u001_g10b_single_pass_discovery_engine_v0_3a.py
+
+Output program:
+
+u001_g10b_single_pass_discovery_engine_v0_4a.py
+
+Do not overwrite v0.3a.
+Do not start from v0.2 or v0.3.
+Do not rewrite unrelated GUI, packaging or Foundation programs.
+
+Give Copilot exactly:
+
+1. u001_g10b_single_pass_discovery_engine_v0_3a.py
+2. this specification
+
+Copilot returns one complete downloadable Python source file, not a patch and
+not explanation only.
+
+======================================================================
+4. SOURCE REPRESENTATION AND TERMINOLOGY
+======================================================================
+
+Declare:
+
+SourceRepresentation = BUFFER_SNAPSHOT_WIDE
+RawByteEncoding = HEX_TEXT
+RawByteDigitsOnlyBase = 16
+ObservationSemantics = SNAPSHOT_STATE_CHANGE
+
+Required meanings:
+
+- SNAPSHOT_OBSERVED: a complete valid payload is visible in one source row;
+- PAYLOAD_STATE_CHANGE: current normalized payload differs from the previous
+  valid normalized payload for the same Channel/CAN-ID/DLC group;
+- PAYLOAD_REUSED: current valid payload equals the cached payload;
+- BUS_UPDATE: unknown and must not be claimed by this source adapter.
+
+Do not label nonblank repeated payloads as physical CAN updates.
+Do not claim measured bus cadence from source-row repetition.
+
+If existing output column names contain `update_count`, retain the columns for
+schema compatibility but declare in quality/manifest metadata:
+
+UpdateCountSemantics = SIGNAL_STATE_CHANGE_OBSERVED
+
+Do not silently describe these counts as CAN transmission counts.
+
+======================================================================
+5. AUTHORITATIVE FRAME KEY
+======================================================================
+
+Keep exactly:
+
+- Channel 2;
+- CAN ID 0x620;
+- exact DBC SignalName FrameCount;
+- FRAME_KEY role.
+
+0x620 contains five signals.  The other four never become Frame keys by
+sharing the Message ID.
+
+FrameCount processing remains serial and deterministic.
+
+For the Frame-key message:
+
+1. normalize the hexadecimal payload;
+2. on first valid payload, decode exact FrameCount;
+3. on a changed valid payload, decode exact FrameCount;
+4. on an identical repeated payload, reuse cached FrameCount without DBC
+   decode;
+5. equal FrameCount observations remain allowed;
+6. a decrease/reset/wrap remains blocking under the accepted current policy;
+7. EOF finalizes the last open frame exactly once.
+
+======================================================================
+6. MESSAGE-LEVEL CHANGE CACHE
+======================================================================
+
+Create one runtime cache per required message group keyed by the accepted exact
+identity:
+
+(Channel, normalized CAN ID, DLC)
+
+Each cache must contain at least:
+
+- last_valid_normalized_payload;
+- current decoded values for every configured signal in that message;
+- last_snapshot_observed_source_row;
+- last_payload_change_source_row;
+- per-frame signal-state-change counters;
+- current validity state;
+- bounded diagnostic counts only, no Raw payloads in quality JSON.
+
+For each source row and required message group:
+
+A. all cells missing:
+
+- mark SNAPSHOT_MISSING for that source row;
+- do not decode;
+- do not replace cached value with zero;
+- do not claim a payload change.
+
+B. partial or invalid payload:
+
+- mark SNAPSHOT_INVALID;
+- do not decode;
+- preserve the last valid cache internally for diagnostics only;
+- frame output validity must follow accepted validity/hold policy, not silently
+  present the invalid row as current valid data.
+
+C. first complete valid payload:
+
+- normalize using the accepted canonical hex parser;
+- decode the configured signals once;
+- initialize the cache;
+- classify INITIAL_STATE_OBSERVED;
+- count one payload decode.
+
+D. complete valid payload different from cache:
+
+- decode configured signals once;
+- compare each decoded signal with its cached decoded value using exact RawCode
+  and deterministic physical-value equality rules already accepted;
+- increment a signal state-change count only when that signal changes;
+- update cache;
+- classify PAYLOAD_STATE_CHANGE;
+- count one payload decode.
+
+E. complete valid payload identical to cache:
+
+- do not call any DBC signal decoder;
+- do not create 705 repeated per-signal update objects;
+- update last_snapshot_observed_source_row and snapshot-presence state;
+- reuse cached decoded values;
+- classify PAYLOAD_REUSED.
+
+The last valid payload cache must persist across pandas chunks.
+
+======================================================================
+7. FRAME-LEVEL STATE OUTPUT
+======================================================================
+
+The accepted output remains one row per finalized FrameCount per batch shard.
+
+At frame finalization, for each configured signal:
+
+- output the current decoded cached value if its parent snapshot was valid and
+  observed under the accepted policy;
+- output the accepted invalid/missing status otherwise;
+- preserve RawCode and PhysicalValue separately;
+- preserve ValueKind, role, unit and validity metadata;
+- never fill missing with zero;
+- never apply unlimited forward fill;
+- never convert an unchanged snapshot into a new signal state change;
+- do not omit a frame merely because its payload repeated.
+
+The current state must therefore remain available on repeated frames even when
+the expensive DBC decode was skipped.
+
+For EVENT_FLAG signals:
+
+- preserve current state at each frame;
+- record every decoded state change within the frame;
+- EVENT_FLAG remains never held across a missing/invalid parent snapshot;
+- do not invent an event from a repeated zero/default value;
+- do not discard a transient decoded active state that occurred within the
+  frame if the accepted configuration defines ANY_ACTIVE_WITHIN_FRAME;
+- if active aggregation is not configured, preserve the existing deterministic
+  last-state rule and record a warning rather than inventing semantics.
+
+======================================================================
+8. PERFORMANCE COUNTERS
+======================================================================
+
+Add to quality JSON and manifest where compatible:
+
+- snapshot_payload_observation_count;
+- payload_initial_decode_count;
+- payload_state_change_decode_count;
+- payload_reuse_count;
+- candidate_signal_decode_count;
+- signal_state_change_count;
+- source_rows_scanned;
+- finalized_frame_count;
+- elapsed_seconds;
+- source_representation;
+- observation_semantics;
+- worker_count = 1.
+
+No Raw payload strings or company values enter the quality JSON.
+
+For the run capsule, preserve existing fields and append:
+
+- P = message payload decode count (initial plus changed);
+- Z = repeated payload reuse count;
+- T = rounded elapsed seconds;
+- W1 = one worker.
+
+Required format:
+
+UDP001G10B1R N-V{V}-B{B}-M{M}-S{S}-U{U}-F{F}-Q{Q}-H{H}-P{P}-Z{Z}-T{T}-W1-X{X} C-0
+
+U now means actual candidate signal decode operations, not snapshot
+observations.  State that definition in the quality JSON.
+
+======================================================================
+9. INVARIANTS
+======================================================================
+
+Preserve:
+
+- Raw source read exactly once;
+- source order never sorted;
+- bounded memory;
+- deterministic message/signal/batch order;
+- 705 candidate signals;
+- 23 batches;
+- 69 candidate message groups;
+- exact FrameCount identity;
+- Q=23;
+- all batch shards share one nonempty FrameCount sequence;
+- F>0 required for success;
+- H0/X0 required;
+- independent read-only output validator;
+- no multiprocessing in v0.4A.
+
+The 10,000-row accepted test interval must produce F=2062 unless a documented
+blocking correctness defect is found.
+
+======================================================================
+10. SELF-TESTS
+======================================================================
+
+Preserve the 41 accepted tests and add exactly nine:
+
+T42 first valid payload decodes once and initializes state;
+T43 100 identical repeated snapshots reuse cache and perform zero additional
+    DBC signal decodes;
+T44 changed payload decodes once and updates only changed signal-state counts;
+T45 payload cache persists across at least three pandas chunks;
+T46 repeated payload across a FrameCount transition still outputs current state
+    in both frames without a second DBC decode;
+T47 missing/invalid snapshot does not become zero or a fake change;
+T48 exact FrameCount initial plus two payload changes produces three frames;
+T49 deterministic frame/batch output is identical for chunksize 2 and 100;
+T50 runtime metadata declares BUFFER_SNAPSHOT_WIDE,
+    SNAPSHOT_STATE_CHANGE and worker_count=1.
+
+Success token:
+
+UDP001-G10B1R3-SELFTEST-PASS-50
+
+======================================================================
+11. 10,000-ROW SMOKE RUN
+======================================================================
+
+Run from C-CODE in Windows CMD.
+
+Self-test:
+
+python .\UDP001\04_TEMP\u001_g10b_single_pass_discovery_engine_v0_4a.py --self-test
+
+Use a new empty folder:
+
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_4A
+
+Run:
+
+python .\UDP001\04_TEMP\u001_g10b_single_pass_discovery_engine_v0_4a.py --run --source ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\CANDump.csv" --dbc-ch1 ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\DBC1.dbc" --dbc-ch2 ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\DBC2.dbc" --config-folder ".\UDP001\03_CASES\TC001_20260422\01_CONFIG\AUTO_DISCOVERY_ALL_V0_2" --program-root ".\UDP001\01_PROGRAMS" --out ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_4A" --source-id "SOURCE_001" --dataset-id "TC001_20260422" --run-id "G10B1_SMOKE_10000_V0_4A" --segment-id "SOURCE_ROWS_0_9999" --max-assignment-age-rows 200 --chunksize 10000 --max-source-rows 10000
+
+Validate:
+
+python .\UDP001\04_TEMP\u001_g10b_single_pass_discovery_engine_v0_4a.py --validate-output --out ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_4A" --config-folder ".\UDP001\03_CASES\TC001_20260422\01_CONFIG\AUTO_DISCOVERY_ALL_V0_2"
+
+Acceptance requires:
+
+- self-test PASS-50;
+- C-0;
+- V705/B23/M69/S10000;
+- F2062;
+- Q23/H0/X0;
+- W1;
+- P>0 and Z>0;
+- U materially below 7,048,033;
+- elapsed T materially below the approximately 600-second v0.3a baseline;
+- validator PASS with F2062.
+
+Do not start the 599,970-row run after v0.4A.  On acceptance, proceed to the
+separate v0.4B bounded multiprocessing task.
+
+======================================================================
+12. FAILURE CONTROL
+======================================================================
+
+Preserve --debug-traceback from v0.3a.
+
+Do not repair an output folder in place.
+Do not reuse V0_3A or V0_4A after partial failure.
+Do not suppress exceptions to print C-0.
+Do not weaken the validator.
+
+======================================================================
+13. RETURN
+======================================================================
+
+Return only:
+
+G10B1R3ST-<exact self-test final line>
+G10B1S4R-<exact run capsule line>
+G10B1S4V-<exact validator final line>
+
+If blocked:
+
+G10B1R3E-<exact final error line>
+
+END OF SPECIFICATION
