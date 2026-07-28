@@ -1,0 +1,73 @@
+UDP001 G10B1S1 - 10,000-ROW REAL SMOKE RUN AND VALIDATION
+Date: 2026-07-28
+Status: EXECUTION AUTHORIZED; FULL SOURCE NOT AUTHORIZED
+
+PURPOSE
+
+Exercise the generated P2 single-pass engine on 10,000 real Raw CAN source
+rows and independently validate all 23 update/frame shard pairs before any
+full-source run.
+
+RUN ENVIRONMENT
+
+- Windows CMD
+- current directory: C-CODE
+- generated program remains under UDP001\04_TEMP
+
+PRECONDITIONS
+
+The following have already passed:
+
+UDP001-G10B1-SELFTEST-PASS-24
+UDP001G10B1P N-V705-B23-M69-R552-U0-K1-H0-X0 C-0
+
+Do not ask Copilot to modify the program before this smoke run.
+
+OUTPUT FOLDER
+
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_1
+
+Confirm that this folder is absent or empty.  Do not use --overwrite on the
+first attempt.
+
+RUN COMMAND
+
+python .\UDP001\04_TEMP\u001_g10b_single_pass_discovery_engine_v0_1.py --run --source ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\CANDump.csv" --dbc-ch1 ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\DBC1.dbc" --dbc-ch2 ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\DBC2.dbc" --config-folder ".\UDP001\03_CASES\TC001_20260422\01_CONFIG\AUTO_DISCOVERY_ALL_V0_2" --program-root ".\UDP001\01_PROGRAMS" --out ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_1" --source-id "SOURCE_001" --dataset-id "TC001_20260422" --run-id "G10B1_SMOKE_10000_V0_1" --segment-id "SOURCE_ROWS_0_9999" --max-assignment-age-rows 200 --chunksize 10000 --max-source-rows 10000
+
+EXPECTED RUN EVIDENCE LOCATION
+
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_1\udp001_g10b1_return_capsule.txt
+
+Successful run final line format:
+
+UDP001G10B1R N-V705-B23-M69-S10000-U{value}-F{value}-Q23-H0-X0 C-0
+
+STOP RULE AFTER RUN
+
+- If the run exits nonzero, do not repair or rerun.
+- Return G10B1S1E- followed by the exact final error line.
+- Run validation only after the run returns C-0.
+
+VALIDATION COMMAND
+
+python .\UDP001\04_TEMP\u001_g10b_single_pass_discovery_engine_v0_1.py --validate-output --out ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_1" --config-folder ".\UDP001\03_CASES\TC001_20260422\01_CONFIG\AUTO_DISCOVERY_ALL_V0_2"
+
+EXPECTED VALIDATION EVIDENCE
+
+The terminal final line must be:
+
+UDP001-G10B1-VALIDATE-PASS V705-B23-S10000-U{value}-F{value}-H0-X0
+
+The validation mode is read-only and must not modify the completed folder.
+
+RETURN TO CODEX
+
+Return exactly two lines:
+
+G10B1S1R-<exact run capsule line>
+G10B1S1V-<exact validation final line>
+
+Do not manually inspect 23 shard pairs yet.  Do not run the full source.  Wait
+for the controlled-equivalence decision after returning these two lines.
+
+END OF EXECUTION
