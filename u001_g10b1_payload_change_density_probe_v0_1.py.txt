@@ -1,0 +1,313 @@
+from __future__ import annotations
+
+import argparse
+import csv
+import importlib.util
+from pathlib import Path
+import re
+import statistics
+import sys
+import tempfile
+import time
+from typing import Any
+
+import pandas as pd
+
+
+PROGRAM_NAME = "u001_g10b1_payload_change_density_probe"
+PROGRAM_VERSION = "0.1"
+FOUNDATION_BASENAME = "u001_foundation_core_v0_1.py"
+HEX_PATTERN = re.compile(r"^(?:0[xX])?([0-9A-Fa-f]{1,2})$")
+MISSING_TOKENS = {"", "nan", "na", "null", "none", "<na>"}
+
+
+def load_foundation(program_root: Path) -> Any:
+    target = program_root.resolve() / FOUNDATION_BASENAME
+    if not target.is_file():
+        raise FileNotFoundError("FOUNDATION_NOT_FOUND")
+    spec = importlib.util.spec_from_file_location("_u001_g10b1d3_foundation", target)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("INVALID_FOUNDATION_SPEC")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    for name in ("detect_text_format", "discover_source_message_groups"):
+        if not callable(getattr(module, name, None)):
+            raise RuntimeError(f"FOUNDATION_CALLABLE_MISSING_{name}")
+    return module
+
+
+def normalize_hex_series(series: pd.Series) -> tuple[pd.Series, pd.Series, pd.Series]:
+    text = series.astype("string").fillna("").str.strip()
+    missing = text.str.lower().isin(MISSING_TOKENS)
+    extracted = text.str.extract(HEX_PATTERN, expand=False)
+    valid = ~missing & extracted.notna()
+    canonical = extracted.fillna("").str.upper().str.zfill(2)
+    return missing, valid, canonical
+
+
+def update_sequence_counts(state: dict[str, Any], payloads: list[str]) -> None:
+    for payload in payloads:
+        previous = state["last_payload"]
+        if previous is None:
+            state["initial"] += 1
+        elif payload == previous:
+            state["repeat"] += 1
+        else:
+            state["change"] += 1
+        state["last_payload"] = payload
+
+
+def safe_permille(numerator: int, denominator: int) -> int:
+    if denominator <= 0:
+        return 0
+    return int(round(1000.0 * numerator / denominator))
+
+
+def analyze(
+    source: Path,
+    program_root: Path,
+    out: Path,
+    max_source_rows: int,
+    chunksize: int,
+    frame_channel: int,
+    frame_can_id: int,
+) -> str:
+    if max_source_rows < 1 or max_source_rows > 100000:
+        raise ValueError("MAX_SOURCE_ROWS_OUT_OF_RANGE")
+    if chunksize < 1 or chunksize > max_source_rows:
+        raise ValueError("INVALID_CHUNKSIZE")
+    output = out.resolve()
+    if output.exists() and any(output.iterdir()):
+        raise ValueError("OUTPUT_FOLDER_NOT_EMPTY")
+    output.mkdir(parents=True, exist_ok=True)
+
+    started = time.perf_counter()
+    foundation = load_foundation(program_root)
+    info = foundation.detect_text_format(source.resolve())
+    discovered = list(foundation.discover_source_message_groups(list(info.columns)))
+    groups = sorted(
+        [group for group in discovered if bool(group.complete)],
+        key=lambda group: (int(group.channel), int(group.can_id), int(group.dlc)),
+    )
+    if not groups:
+        raise ValueError("NO_COMPLETE_SOURCE_MESSAGE_GROUPS")
+
+    frame_groups = [
+        group for group in groups
+        if int(group.channel) == frame_channel and int(group.can_id) == frame_can_id
+    ]
+    if len(frame_groups) != 1:
+        raise ValueError(f"FRAME_GROUP_COUNT_{len(frame_groups)}")
+    frame_group = frame_groups[0]
+
+    usecols: list[str] = []
+    for group in groups:
+        for index in range(int(group.dlc)):
+            name = group.byte_columns_by_index.get(index)
+            if name is None:
+                raise ValueError("COMPLETE_GROUP_MISSING_COLUMN")
+            if name not in usecols:
+                usecols.append(name)
+
+    states: dict[tuple[int, int, int], dict[str, Any]] = {}
+    for group in groups:
+        key = (int(group.channel), int(group.can_id), int(group.dlc))
+        states[key] = {
+            "group": group,
+            "valid": 0,
+            "missing": 0,
+            "invalid": 0,
+            "initial": 0,
+            "change": 0,
+            "repeat": 0,
+            "last_payload": None,
+        }
+
+    read_rows = 0
+    reader = pd.read_csv(
+        source,
+        encoding=str(info.encoding),
+        sep=str(info.delimiter),
+        header=int(info.header_row_index),
+        usecols=usecols,
+        dtype="string",
+        keep_default_na=False,
+        na_filter=False,
+        chunksize=chunksize,
+        low_memory=False,
+    )
+    for chunk in reader:
+        remaining = max_source_rows - read_rows
+        if remaining <= 0:
+            break
+        if len(chunk) > remaining:
+            chunk = chunk.iloc[:remaining].copy()
+        row_count = len(chunk)
+        if row_count == 0:
+            continue
+
+        for key, state in states.items():
+            group = state["group"]
+            missing_masks: list[pd.Series] = []
+            valid_masks: list[pd.Series] = []
+            canonical_parts: list[pd.Series] = []
+            for index in range(int(group.dlc)):
+                name = group.byte_columns_by_index[index]
+                missing, valid, canonical = normalize_hex_series(chunk[name])
+                missing_masks.append(missing)
+                valid_masks.append(valid)
+                canonical_parts.append(canonical)
+
+            all_missing = missing_masks[0].copy()
+            all_valid = valid_masks[0].copy()
+            for index in range(1, len(missing_masks)):
+                all_missing &= missing_masks[index]
+                all_valid &= valid_masks[index]
+            invalid = ~all_missing & ~all_valid
+
+            payload = canonical_parts[0]
+            for index in range(1, len(canonical_parts)):
+                payload = payload.str.cat(canonical_parts[index], sep=".")
+            valid_payloads = payload[all_valid].tolist()
+
+            state["valid"] += int(all_valid.sum())
+            state["missing"] += int(all_missing.sum())
+            state["invalid"] += int(invalid.sum())
+            update_sequence_counts(state, valid_payloads)
+
+        read_rows += row_count
+        if read_rows >= max_source_rows:
+            break
+
+    if read_rows == 0:
+        raise ValueError("NO_SOURCE_ROWS_READ")
+
+    output_csv = output / "u001_g10b1d3_payload_change_density.csv"
+    fieldnames = [
+        "GroupOrdinal", "Channel", "CAN_ID_Hex", "DLC", "ScannedRows",
+        "ValidPayloadRows", "AllMissingRows", "InvalidOrPartialRows",
+        "InitialObservationCount", "PayloadChangeCount", "RepeatedPayloadCount",
+        "ValidPermille", "ChangePermilleAmongTransitions",
+        "RepeatPermilleAmongTransitions", "DenseValid", "DenseHeld",
+        "IsFrameMessage",
+    ]
+    valid_rates: list[int] = []
+    change_rates: list[int] = []
+    repeat_rates: list[int] = []
+    dense_count = 0
+    dense_held_count = 0
+    with output_csv.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
+        writer.writeheader()
+        for ordinal, group in enumerate(groups, start=1):
+            key = (int(group.channel), int(group.can_id), int(group.dlc))
+            state = states[key]
+            transitions = state["change"] + state["repeat"]
+            valid_rate = safe_permille(state["valid"], read_rows)
+            change_rate = safe_permille(state["change"], transitions)
+            repeat_rate = safe_permille(state["repeat"], transitions)
+            dense = valid_rate >= 950
+            dense_held = dense and repeat_rate >= 500
+            dense_count += int(dense)
+            dense_held_count += int(dense_held)
+            valid_rates.append(valid_rate)
+            change_rates.append(change_rate)
+            repeat_rates.append(repeat_rate)
+            writer.writerow({
+                "GroupOrdinal": ordinal,
+                "Channel": int(group.channel),
+                "CAN_ID_Hex": str(group.can_id_hex),
+                "DLC": int(group.dlc),
+                "ScannedRows": read_rows,
+                "ValidPayloadRows": state["valid"],
+                "AllMissingRows": state["missing"],
+                "InvalidOrPartialRows": state["invalid"],
+                "InitialObservationCount": state["initial"],
+                "PayloadChangeCount": state["change"],
+                "RepeatedPayloadCount": state["repeat"],
+                "ValidPermille": valid_rate,
+                "ChangePermilleAmongTransitions": change_rate,
+                "RepeatPermilleAmongTransitions": repeat_rate,
+                "DenseValid": int(dense),
+                "DenseHeld": int(dense_held),
+                "IsFrameMessage": int(group is frame_group),
+            })
+
+    frame_key = (int(frame_group.channel), int(frame_group.can_id), int(frame_group.dlc))
+    frame_state = states[frame_key]
+    elapsed = int(round(time.perf_counter() - started))
+    capsule = (
+        "UDP001G10B1D3 "
+        f"N-G{len(groups)}-S{read_rows}-D{dense_count}-H{dense_held_count}-"
+        f"V{int(statistics.median(valid_rates))}-"
+        f"C{int(statistics.median(change_rates))}-"
+        f"R{int(statistics.median(repeat_rates))}-"
+        f"K{frame_state['valid']}-J{frame_state['change']}-"
+        f"E{frame_state['repeat']}-T{elapsed}-X0 C-0"
+    )
+    (output / "udp001_g10b1d3_return_capsule.txt").write_text(
+        capsule + "\n", encoding="utf-8", newline="\n"
+    )
+    print(capsule)
+    return capsule
+
+
+def self_test() -> None:
+    series = pd.Series(["00", "10", "FF", "af", "0x0A", "", "NaN", "GG"])
+    missing, valid, canonical = normalize_hex_series(series)
+    assert missing.tolist() == [False, False, False, False, False, True, True, False]
+    assert valid.tolist() == [True, True, True, True, True, False, False, False]
+    assert canonical.tolist()[:5] == ["00", "10", "FF", "AF", "0A"]
+    state = {"last_payload": None, "initial": 0, "change": 0, "repeat": 0}
+    update_sequence_counts(state, ["AA", "AA", "AB", "AB", "AC"])
+    assert state["initial"] == 1
+    assert state["change"] == 2
+    assert state["repeat"] == 2
+    assert safe_permille(95, 100) == 950
+    assert safe_permille(0, 0) == 0
+    with tempfile.TemporaryDirectory(prefix="u001_g10b1d3_") as temp:
+        assert Path(temp).exists()
+    print("UDP001-G10B1D3-SELFTEST-PASS-12")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--probe", action="store_true")
+    parser.add_argument("--source", type=Path)
+    parser.add_argument("--program-root", type=Path)
+    parser.add_argument("--out", type=Path)
+    parser.add_argument("--max-source-rows", type=int, default=10000)
+    parser.add_argument("--chunksize", type=int, default=2000)
+    parser.add_argument("--frame-channel", type=int, default=2)
+    parser.add_argument("--frame-can-id", type=lambda value: int(value, 0), default=0x620)
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        if args.self_test:
+            self_test()
+            return 0
+        if args.source is None or args.program_root is None or args.out is None:
+            raise ValueError("PROBE_REQUIRES_SOURCE_PROGRAM_ROOT_OUT")
+        analyze(
+            args.source,
+            args.program_root,
+            args.out,
+            args.max_source_rows,
+            args.chunksize,
+            args.frame_channel,
+            args.frame_can_id,
+        )
+        return 0
+    except Exception as exc:
+        print(f"UDP001G10B1D3-ERROR:{type(exc).__name__}:{str(exc)}")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
