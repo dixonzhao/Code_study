@@ -1,0 +1,55 @@
+UDP001 G10B1D3 - PAYLOAD CHANGE-DENSITY PROBE
+Date: 2026-07-28
+Status: READ-ONLY PERFORMANCE/SEMANTICS PROBE; NO COPILOT REQUIRED
+
+PURPOSE
+
+Determine whether the Raw MATLAB CAN CSV is a sparse real-update table or a
+dense retained-buffer snapshot.  The probe compares complete Raw payloads by
+message group.  It does not decode the 705 candidate signals and writes no Raw
+payload values.
+
+DOWNLOAD
+
+u001_g10b1_payload_change_density_probe_v0_1.py.txt
+
+Save under:
+
+C-CODE\UDP001\04_TEMP\u001_g10b1_payload_change_density_probe_v0_1.py.txt
+
+RUN ENVIRONMENT
+
+- Windows CMD
+- current directory C-CODE
+- do not use Copilot
+
+SELF-TEST
+
+python .\UDP001\04_TEMP\u001_g10b1_payload_change_density_probe_v0_1.py.txt --self-test
+
+Expected:
+
+UDP001-G10B1D3-SELFTEST-PASS-12
+
+OUTPUT FOLDER
+
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1D3_PAYLOAD_DENSITY_V0_1
+
+The folder must be absent or empty.
+
+PROBE
+
+python .\UDP001\04_TEMP\u001_g10b1_payload_change_density_probe_v0_1.py.txt --probe --source ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\CANDump.csv" --program-root ".\UDP001\01_PROGRAMS" --out ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1D3_PAYLOAD_DENSITY_V0_1" --max-source-rows 10000 --chunksize 2000 --frame-channel 2 --frame-can-id 0x620
+
+EVIDENCE
+
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1D3_PAYLOAD_DENSITY_V0_1\udp001_g10b1d3_return_capsule.txt
+
+RETURN ONLY
+
+G10B1D3ST-<exact self-test line>
+G10B1D3R-<exact probe capsule>
+
+Do not run the 599,970-row G10B1 job yet.
+
+END OF EXECUTION
