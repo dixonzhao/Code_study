@@ -1,0 +1,175 @@
+UDP001 G10B1R2A1 - SETDEFAULT CONTAINER CORRECTION
+Date: 2026-07-28
+Status: NARROW IMPLEMENTATION-BUG CORRECTION
+
+OBSERVED ERROR
+
+UDP001G10B1-ERROR::AttributeError: 'list' object has no attribute 'setdefault'
+
+CLASSIFICATION
+
+- implementation defect;
+- not a Raw CAN data-quality result;
+- not a Data Contract change;
+- not permission to redesign G10B1;
+- preserve the accepted hexadecimal Raw-byte correction from G10B1R2.
+
+INPUT
+
+u001_g10b_single_pass_discovery_engine_v0_3.py
+
+OUTPUT
+
+u001_g10b_single_pass_discovery_engine_v0_3a.py
+
+Do not overwrite v0.3.  Do not start from v0.2.  Do not rewrite the program.
+
+======================================================================
+1. REQUIRED STATIC INSPECTION
+======================================================================
+
+Find every `.setdefault(` call in v0.3.
+
+For every call, record internally:
+
+- receiver expression;
+- receiver initialization site;
+- intended container contract;
+- value type returned by setdefault;
+- every later read/write of that container.
+
+Then correct the concrete type mismatch.
+
+Rules:
+
+1. `.setdefault()` is permitted only on a dict.
+2. A list used as an ordered sequence remains a list and uses append/indexing.
+3. A dict used as key-to-value storage remains a dict.
+4. Do not convert a list to dict merely to suppress AttributeError.
+5. Do not replace `.setdefault()` with append unless the downstream contract
+   actually expects an ordered sequence.
+6. Do not use `hasattr(receiver, "setdefault")` as a workaround.
+7. Do not catch and suppress AttributeError.
+8. Preserve deterministic order, 23 BatchIds and all accepted schemas.
+
+Typical valid patterns are:
+
+mapping: dict[str, list[...]] = {}
+mapping.setdefault(key, []).append(value)
+
+or, when the owner is intentionally a list:
+
+sequence: list[...] = []
+sequence.append(value)
+
+Choose only from the actual downstream contract in v0.3.
+
+======================================================================
+2. PRESERVE G10B1R2
+======================================================================
+
+Do not change these accepted rules:
+
+- Raw CAN bytes are HEX_TEXT;
+- digits-only text is base 16;
+- "10" decodes as 16;
+- "FF" decodes as 255;
+- Frame-key identity is Channel 2 / CAN ID 0x620 / SignalName FrameCount;
+- the other four 0x620 signals are not Frame keys;
+- Frame-key and candidate routes use the same canonical hex-byte parser;
+- nonempty input with F=0 cannot pass;
+- validator remains independent and read-only.
+
+======================================================================
+3. DIAGNOSTIC TRACEABILITY
+======================================================================
+
+Add an optional CLI flag:
+
+--debug-traceback
+
+Default behavior remains the short one-line error capsule.
+
+When the flag is present and an unhandled exception occurs:
+
+- write the complete Python traceback to `g10b1_debug_traceback.txt` in the
+  requested output folder when an output folder is available;
+- print the traceback to stderr;
+- still print the normal final one-line error;
+- exit nonzero;
+- never include Raw CAN values in the traceback file intentionally.
+
+Do not enable this flag by default.
+
+======================================================================
+4. REGRESSION TEST
+======================================================================
+
+Preserve the 40 G10B1R2 tests.
+
+Add T41:
+
+- execute one complete synthetic source chunk through the same production
+  run-core path that constructs message plans, Frame-key storage, batch
+  buffers, quality counters and output buffers;
+- exercise every `.setdefault()` call reachable in a normal run;
+- include one valid hexadecimal Channel-2 / 0x620 / FrameCount update and one
+  candidate update;
+- require at least one finalized frame;
+- fail if any setdefault receiver is not dict;
+- fail if a list/dict contract is changed incompatibly.
+
+Success token:
+
+UDP001-G10B1R2A1-SELFTEST-PASS-41
+
+======================================================================
+5. DELIVERY AND EXECUTION
+======================================================================
+
+Give Copilot exactly two files:
+
+1. u001_g10b_single_pass_discovery_engine_v0_3.py
+2. this correction specification
+
+Copilot returns one complete downloadable file:
+
+u001_g10b_single_pass_discovery_engine_v0_3a.py
+
+Run from C-CODE in Windows CMD.
+
+Self-test:
+
+python .\UDP001\04_TEMP\u001_g10b_single_pass_discovery_engine_v0_3a.py --self-test
+
+Use a new empty output folder:
+
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_3A
+
+Smoke run:
+
+python .\UDP001\04_TEMP\u001_g10b_single_pass_discovery_engine_v0_3a.py --run --source ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\CANDump.csv" --dbc-ch1 ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\DBC1.dbc" --dbc-ch2 ".\UDP001\03_CASES\TC001_20260422\00_SOURCE-READONLY\DBC2.dbc" --config-folder ".\UDP001\03_CASES\TC001_20260422\01_CONFIG\AUTO_DISCOVERY_ALL_V0_2" --program-root ".\UDP001\01_PROGRAMS" --out ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_3A" --source-id "SOURCE_001" --dataset-id "TC001_20260422" --run-id "G10B1_SMOKE_10000_V0_3A" --segment-id "SOURCE_ROWS_0_9999" --max-assignment-age-rows 200 --chunksize 10000 --max-source-rows 10000
+
+Validate:
+
+python .\UDP001\04_TEMP\u001_g10b_single_pass_discovery_engine_v0_3a.py --validate-output --out ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B1_SMOKE_10000_V0_3A" --config-folder ".\UDP001\03_CASES\TC001_20260422\01_CONFIG\AUTO_DISCOVERY_ALL_V0_2"
+
+Success still requires U>0, F>0, Q=23, H0, X0, C-0 and validator PASS.
+
+======================================================================
+6. RETURN
+======================================================================
+
+Return only:
+
+G10B1R2A1ST-<exact self-test final line>
+G10B1S3A1R-<exact run capsule line>
+G10B1S3A1V-<exact validator final line>
+
+If it still fails, rerun the same smoke command with `--debug-traceback` and
+return:
+
+G10B1R2A1E-<exact final error line>
+G10B1R2A1T-<last traceback line beginning with File plus exception line>
+
+END OF SPECIFICATION
