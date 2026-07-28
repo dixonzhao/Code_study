@@ -1,0 +1,110 @@
+UDP001 G10C1 - START HERE AND FROZEN SCOPE
+Date: 2026-07-29
+Status: IMPLEMENTATION AUTHORIZED
+
+======================================================================
+1. PURPOSE
+======================================================================
+
+Create the public headless AUTO_DISCOVERY controller for U001.
+
+Accepted processing chain:
+
+prepared Case sources
+-> accepted Gate 1 catalog probe
+-> accepted G10A2 auto-discovery profile builder
+-> accepted G10B1 v0.5a single-pass discovery engine
+-> one versioned, validated U001 discovery response for U002.
+
+G10C1 is a thin control plane.  It does not decode a CAN signal itself and it
+does not define any analysis algorithm.
+
+======================================================================
+2. G10C DECOMPOSITION
+======================================================================
+
+G10C is deliberately split into three nodes:
+
+- G10C1: public headless request/response controller;
+- G10C2: GUI v0.4 integration as a human client of G10C1;
+- G10C3: portable-package integration and final release regression.
+
+This task implements G10C1 only.  Do not modify the accepted GUI, portable
+builder, runtime host, Gate 1-G9 programs, G10A2 or G10B1.
+
+======================================================================
+3. FILES TO GIVE A FRESH COMPANY COPILOT CHAT
+======================================================================
+
+Give exactly these three files in this order:
+
+1. UDP001_G10C1_00_START_AND_SCOPE_2026-07-29.txt
+2. UDP001_G10C1_01_HEADLESS_DISCOVERY_CONTROLLER_SPEC_v0_1_2026-07-29.txt
+3. UDP001_G10C1_02_IMPLEMENTATION_AND_PREFLIGHT_PROTOCOL_v0_1_2026-07-29.txt
+
+No company Raw CAN, DBC or output file is required for code generation.
+Do not provide an earlier G10C implementation because none is accepted.
+
+======================================================================
+4. REQUIRED COPILOT DELIVERABLE
+======================================================================
+
+Generate and return one directly downloadable Python file:
+
+u001_discovery_controller_v0_1.py
+
+Do not return only chat text or a code block.  Return the actual Python file.
+
+Initial company-PC location:
+
+C-CODE\UDP001\04_TEMP\u001_discovery_controller_v0_1.py
+
+Promotion to 01_PROGRAMS is forbidden until Codex accepts G10C1.
+
+Allowed dependencies:
+
+- Python standard library only.
+
+======================================================================
+5. ACCEPTED CHILD PROGRAMS
+======================================================================
+
+G10C1 calls, but never edits or imports private internals from:
+
+- u001_foundation_core_v0_1.py;
+- u001_auto_discovery_profile_builder_v0_2.py;
+- u001_g10b_single_pass_discovery_engine_v0_5a.py.
+
+All three are resolved by exact basename below UDP001\01_PROGRAMS.
+Subprocess execution uses sys.executable and shell=False.
+
+======================================================================
+6. RESPONSIBILITY BOUNDARY
+======================================================================
+
+U001 owns source/DBC identity, decoding, FrameCount alignment, signal identity,
+validity/missingness, bounded data representation, quality gates and packages.
+
+U002 owns outcome definition, variable screening, ranking, statistics,
+scenario/event analysis, dynamic modelling and shortlist proposals.
+
+U003 owns synchronized video/CAN human review and evidence disposition.
+
+G10C1 must not contain correlation, baseline, residual, anomaly, target
+association, root-cause or ground-truth logic.
+
+======================================================================
+7. STOP RULE
+======================================================================
+
+Stop and report instead of improvising if:
+
+- a design file conflicts with another;
+- a required accepted child program is absent;
+- implementation would require changing a child program;
+- the Case source aliases are absent;
+- the output location is unsafe or nonempty without exact-hash reuse;
+- a child stage does not end with its approved success evidence;
+- a response cannot be validated without trusting undeclared files.
+
+END OF START HERE
