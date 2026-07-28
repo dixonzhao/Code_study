@@ -1,0 +1,82 @@
+UDP001 G10B0D2 - FOUNDATION CALLABLE CHECK
+Date: 2026-07-28
+Status: READ-ONLY EXACT CHECK
+
+PURPOSE
+
+Determine whether the accepted Foundation program exposes the eight exact
+public primitives required by its accepted Gate 1 specification.  This resolves
+whether G10B0 Foundation code F1 is a true limitation or probe-classification
+error.
+
+DOWNLOAD
+
+Download:
+
+u001_g10b0_foundation_callable_probe_v0_1.py.txt
+
+Save it under:
+
+C-CODE\UDP001\04_TEMP\u001_g10b0_foundation_callable_probe_v0_1.py.txt
+
+No Copilot code generation is required.
+
+RUN ENVIRONMENT
+
+- Windows CMD
+- start directory C-CODE
+
+SELF-TEST COMMAND
+
+python .\UDP001\04_TEMP\u001_g10b0_foundation_callable_probe_v0_1.py.txt --self-test
+
+Expected terminal final line:
+
+UDP001-G10B0D2-SELFTEST-PASS-6
+
+PROBE OUTPUT FOLDER
+
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B0_FOUNDATION_CALLABLE_PROBE_V0_1
+
+Confirm the folder is absent or empty.
+
+PROBE COMMAND
+
+python .\UDP001\04_TEMP\u001_g10b0_foundation_callable_probe_v0_1.py.txt --probe --program-root ".\UDP001\01_PROGRAMS" --out ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B0_FOUNDATION_CALLABLE_PROBE_V0_1"
+
+EXPECTED RESULT LOCATION
+
+- terminal final line; and
+- identical line in:
+
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B0_FOUNDATION_CALLABLE_PROBE_V0_1\udp001_g10b0d2_return_capsule.txt
+
+RETURN TO CODEX
+
+Return exactly:
+
+G10B0D2ST-UDP001-G10B0D2-SELFTEST-PASS-6
+G10B0D2R1-<exact terminal/capsule line>
+
+BIT ORDER
+
+Q bits are ordered as:
+
+1 detect_text_format
+2 parse_matlab_can_column
+3 discover_source_message_groups
+4 load_dbc_text
+5 parse_dbc
+6 extract_raw_unsigned
+7 apply_signedness
+8 decode_physical_value
+
+Q11111111 proves the accepted Foundation primitive boundary is complete.
+
+STOP RULE
+
+- Do not modify Foundation if a bit is zero.
+- Do not move this diagnostic probe into 01_PROGRAMS.
+- Return the two lines and wait for the G10B architecture decision.
+
+END OF EXECUTION
