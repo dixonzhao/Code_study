@@ -1,0 +1,106 @@
+UDP001 G10B0 - EXECUTION AND RETURN PROTOCOL
+Date: 2026-07-28
+
+======================================================================
+1. GENERATE THE PROBE
+======================================================================
+
+Give the three G10B0 design files to a fresh or stable Company Copilot chat.
+
+Required downloadable file:
+
+u001_g10b_architecture_capacity_probe_v0_1.py
+
+Save as:
+
+C-CODE\UDP001\04_TEMP\u001_g10b_architecture_capacity_probe_v0_1.py
+
+Do not modify any accepted U001 program.
+
+======================================================================
+2. SELF-TEST
+======================================================================
+
+Environment:
+
+- Windows CMD
+- start directory C-CODE
+
+Command:
+
+python .\UDP001\04_TEMP\u001_g10b_architecture_capacity_probe_v0_1.py --self-test
+
+Expected terminal final line:
+
+UDP001-G10B0-SELFTEST-PASS-14
+
+Tests must cover:
+
+T01 import safety;
+T02 missing/duplicate program detection;
+T03 AST syntax failure blocks;
+T04 main-guard detection;
+T05 isolated import timeout/failure classification;
+T06 FILE_CLI_ONLY classification;
+T07 REUSABLE_CHUNK_API positive and conservative negative;
+T08 FOUNDATION_PRIMITIVES complete/incomplete classification;
+T09 exact G10A2 manifest/count validation;
+T10 three topology records and 23/1/1 source-scan counts;
+T11 frame-shard column arithmetic;
+T12 P1/P2/P3 deterministic classification;
+T13 no absolute paths in outputs;
+T14 hashes, manifest and capsule consistency.
+
+On failure, stop and return the final error line.  Do not alter accepted U001
+programs to make the probe pass.
+
+======================================================================
+3. RUN THE READ-ONLY PROBE
+======================================================================
+
+Output folder:
+
+C-CODE\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B0_ARCHITECTURE_PROBE_V0_1
+
+Confirm the folder is absent or empty.  There is no overwrite mode.
+
+Run from C-CODE as one CMD line:
+
+python .\UDP001\04_TEMP\u001_g10b_architecture_capacity_probe_v0_1.py --probe --program-root ".\UDP001\01_PROGRAMS" --discovery-config ".\UDP001\03_CASES\TC001_20260422\01_CONFIG\AUTO_DISCOVERY_ALL_V0_2" --out ".\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B0_ARCHITECTURE_PROBE_V0_1"
+
+Expected terminal location:
+
+- the terminal final line prints the capsule;
+- the identical line is saved at:
+
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\G10B0_ARCHITECTURE_PROBE_V0_1\udp001_g10b0_return_capsule.txt
+
+Do not search other JSON/CSV files for the return value.
+
+======================================================================
+4. RETURN TO CODEX
+======================================================================
+
+Return exactly two lines on success:
+
+G10B0ST-UDP001-G10B0-SELFTEST-PASS-14
+G10B0R1-<terminal final line or exact capsule-file line>
+
+On failure add at most three short memos:
+
+MEMO1-<first failure>
+MEMO2-<module/stage>
+MEMO3-<whether anything was modified>
+
+======================================================================
+5. STOP
+======================================================================
+
+After returning G10B0R1:
+
+- do not move the probe into 01_PROGRAMS;
+- do not implement P1/P2/P3;
+- do not run Raw CAN;
+- wait for Codex architecture decision and G10B1 design.
+
+END OF PROTOCOL
