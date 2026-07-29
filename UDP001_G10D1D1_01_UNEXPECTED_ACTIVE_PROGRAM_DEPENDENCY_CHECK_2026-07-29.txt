@@ -1,0 +1,73 @@
+UDP001 G10D1D1 - UNEXPECTED ACTIVE PROGRAM DEPENDENCY CHECK
+Date: 2026-07-29
+Status: READ-ONLY EXECUTION AUTHORIZED
+Environment: Windows CMD; current directory C-CODE
+
+======================================================================
+1. INTERPRETATION OF G10D1
+======================================================================
+
+G10D1 proved:
+
+- all 12 expected active programs exist: PFFF;
+- all 12 compile: SFFF;
+- all 12 self-test: TFFF;
+- all four policy controls exist;
+- four additional Python files remain active in 01_PROGRAMS;
+- old packaging candidates know none of the four G10A-G10C additions: K0;
+- old packaging still mentions GUI v0.3 and the legacy nine-program model: O11.
+
+U001 runtime health is therefore not rejected.  C-7 is a release-layout and
+obsolete-packaging blocker.
+
+This task identifies whether the four extra active files are referenced or
+imported by any of the 12 accepted programs.  It does not move them.
+
+======================================================================
+2. PREPARE PROGRAM
+======================================================================
+
+Download:
+
+u001_g10d1d1_unexpected_program_dependency_probe_v0_1.py.txt
+
+Place in C-CODE\UDP001\04_TEMP and remove only the final `.txt`.
+Do not ask Copilot to rewrite it.
+
+======================================================================
+3. EXECUTE
+======================================================================
+
+From C-CODE CMD:
+
+python .\UDP001\04_TEMP\u001_g10d1d1_unexpected_program_dependency_probe_v0_1.py --self-test
+
+Require:
+
+U001-G10D1D1-SELFTEST-PASS-6
+
+The output folder must not already exist:
+
+.\UDP001\03_CASES\TC001_20260422\03_RETURN\G10D1D1_DEPENDENCY_01
+
+Run:
+
+python .\UDP001\04_TEMP\u001_g10d1d1_unexpected_program_dependency_probe_v0_1.py --audit-report ".\UDP001\03_CASES\TC001_20260422\03_RETURN\G10D1_RELEASE_AUDIT_01\u001_g10d1_release_inventory_audit.json" --udp001-root ".\UDP001" --out ".\UDP001\03_CASES\TC001_20260422\03_RETURN\G10D1D1_DEPENDENCY_01"
+
+This is read-only.  Do not move, delete, edit, package or run Case data after
+the probe.
+
+======================================================================
+4. RETURN
+======================================================================
+
+Return only the two terminal lines beginning:
+
+G10D1D1 N-
+EH-
+
+The detailed filenames and references remain in the local JSON.  Codex will
+use the same JSON as input to a later non-destructive archive tool if R0/I0 is
+confirmed, so no filename needs to be typed manually.
+
+END OF G10D1D1 PROTOCOL
