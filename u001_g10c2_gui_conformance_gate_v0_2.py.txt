@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""G10C2CG2 independent conformance gate for actual GUI v0.4a wiring."""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import inspect
+import subprocess
+import sys
+from pathlib import Path
+
+
+CONTROLLER = "u001_discovery_controller_v0_2.py"
+TOKEN = "U001-GUIV04A-SELFTEST-PASS-40"
+FIELDS = (
+    "udp001_root", "case_root", "controller_path", "run_id", "source_id",
+    "segment_id", "max_source_rows", "chunksize", "batch_size",
+    "max_assignment_age_rows", "max_rss_mb", "update_buffer_rows",
+    "frame_buffer_rows", "memory_check_every_rows", "minimum_free_gib",
+)
+ACTIONS = (
+    "controller_selftest", "create_request", "preflight", "run_request",
+    "validate_response", "execute_new_run", "validate_existing_response",
+    "cancel", "open_response_folder",
+)
+SEQUENCE = (
+    "controller_selftest", "make_request", "preflight", "run_request",
+    "validate_response",
+)
+REGISTRY = (
+    "page", *FIELDS, "frame_key_display", "request_path_display",
+    "preflight_path_display", "response_root_display", "incomplete_root_display",
+    "controller_selftest_button", "create_request_button", "preflight_button",
+    "run_request_button", "validate_response_button", "execute_new_run_button",
+    "validate_existing_response_button", "cancel_button",
+    "open_response_folder_button", "status_display", "log_widget",
+    "progress_widget",
+)
+FORBIDDEN = (
+    "u001_foundation_core_v0_1.py",
+    "u001_auto_discovery_profile_builder_v0_2.py",
+    "u001_g10b_single_pass_discovery_engine_v0_5a.py",
+)
+
+
+def fail(code: str, detail: str = "") -> int:
+    suffix = f" D-{detail[:100]}" if detail else ""
+    print(f"G10C2CG2-ERROR:{code}{suffix} C-7")
+    return 7
+
+
+def load(path: Path):
+    spec = importlib.util.spec_from_file_location("u001_gui_v04a_candidate", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("IMPORT_SPEC")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def locate_method_source(module, required_name: str, excluded_names=()) -> str:
+    pieces = []
+    excluded = {name.lower() for name in excluded_names}
+    for _, obj in inspect.getmembers(module):
+        if (inspect.isfunction(obj) and required_name in obj.__name__.lower()
+                and obj.__name__.lower() not in excluded):
+            try:
+                pieces.append(inspect.getsource(obj))
+            except (OSError, TypeError):
+                pass
+        if inspect.isclass(obj):
+            for name, method in inspect.getmembers(obj, inspect.isfunction):
+                if required_name in name.lower() and name.lower() not in excluded:
+                    try:
+                        pieces.append(inspect.getsource(method))
+                    except (OSError, TypeError):
+                        pass
+    return "\n".join(pieces)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--gui", required=True)
+    args = parser.parse_args()
+    path = Path(args.gui).resolve()
+    if not path.is_file():
+        return fail("GUI_MISSING")
+
+    source = path.read_text(encoding="utf-8", errors="replace")
+    if CONTROLLER not in source:
+        return fail("CONTROLLER_LITERAL")
+    leaked = [name for name in FORBIDDEN if name in source]
+    if leaked:
+        return fail("DIRECT_CHILD_REFERENCE", leaked[0])
+
+    check = subprocess.run(
+        [sys.executable, str(path), "--self-test"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        shell=False, check=False,
+    )
+    if check.returncode != 0 or TOKEN not in check.stdout:
+        return fail("SELFTEST", f"E{check.returncode}")
+
+    try:
+        module = load(path)
+    except Exception as exc:
+        return fail("IMPORT", type(exc).__name__)
+
+    if getattr(module, "PROGRAM_VERSION", None) != "0.4a":
+        return fail("PROGRAM_VERSION")
+    if getattr(module, "DISCOVERY_CONTROLLER_NAME", None) != CONTROLLER:
+        return fail("CONTROLLER_CONSTANT")
+    if getattr(module, "SELFTEST_TOKEN", None) != TOKEN:
+        return fail("SELFTEST_CONSTANT")
+
+    contract_fn = getattr(module, "get_auto_discovery_ui_contract", None)
+    order_fn = getattr(module, "get_execute_new_run_action_order", None)
+    plan_fn = getattr(module, "build_auto_discovery_command_plan", None)
+    if not callable(contract_fn) or not callable(order_fn) or not callable(plan_fn):
+        return fail("PUBLIC_API")
+
+    try:
+        contract = contract_fn()
+        order = tuple(order_fn())
+    except Exception as exc:
+        return fail("API_EXECUTION", type(exc).__name__)
+    if not isinstance(contract, dict):
+        return fail("CONTRACT_TYPE")
+    required_top = {
+        "PageTitle", "Fields", "Actions", "Sequence", "Defaults",
+        "FrameKey", "WidgetRegistryKeys",
+    }
+    if set(contract) != required_top:
+        return fail("CONTRACT_KEYS")
+    if "AUTO_DISCOVERY" not in str(contract["PageTitle"]).upper():
+        return fail("PAGE_TITLE")
+    if tuple(contract["Fields"]) != FIELDS:
+        return fail("FIELDS")
+    if tuple(contract["Actions"]) != ACTIONS:
+        return fail("ACTIONS")
+    if tuple(contract["Sequence"]) != SEQUENCE or order != SEQUENCE:
+        return fail("SEQUENCE")
+    if set(contract["WidgetRegistryKeys"]) != set(REGISTRY):
+        return fail("REGISTRY_KEYS")
+
+    defaults = contract["Defaults"]
+    expected_defaults = {
+        "source_id": "SOURCE_001", "segment_id": "FULL_SOURCE",
+        "max_source_rows": 10000, "chunksize": 10000, "batch_size": 32,
+        "max_assignment_age_rows": 200, "max_rss_mb": 2048,
+        "update_buffer_rows": 256, "frame_buffer_rows": 32,
+        "memory_check_every_rows": 1000, "minimum_free_gib": 25,
+    }
+    for key, value in expected_defaults.items():
+        if defaults.get(key) != value:
+            return fail("DEFAULT", key)
+    frame = contract["FrameKey"]
+    if str(frame.get("Channel")) != "2" or frame.get("CANID") != "0x620" or frame.get("Signal") != "FrameCount":
+        return fail("FRAME_KEY")
+
+    page_source = locate_method_source(
+        module, "auto_discovery",
+        ("get_auto_discovery_ui_contract", "build_auto_discovery_command_plan"),
+    )
+    execute_source = locate_method_source(
+        module, "execute_new_run", ("get_execute_new_run_action_order",),
+    )
+    if not page_source:
+        return fail("PAGE_CONSTRUCTOR_MISSING")
+    if not execute_source:
+        return fail("EXECUTE_CALLBACK_MISSING")
+    if "get_auto_discovery_ui_contract" not in page_source:
+        return fail("PAGE_NOT_BOUND_TO_CONTRACT")
+    if "auto_discovery_widgets" not in page_source:
+        return fail("WIDGET_REGISTRY_NOT_BUILT")
+    if "get_execute_new_run_action_order" not in execute_source:
+        return fail("EXECUTE_NOT_BOUND_TO_SEQUENCE")
+    if "build_auto_discovery_command_plan" not in source:
+        return fail("COMMAND_PLAN_MISSING")
+    if "Ready for U002" not in source:
+        return fail("READY_TOKEN_MISSING")
+
+    button_terms = (
+        "Controller Self-test", "Create Request", "Preflight", "Run Request",
+        "Validate Response", "Execute New Run", "Validate Existing Response",
+        "Cancel", "Open Response Folder",
+    )
+    missing = [term for term in button_terms if term not in source]
+    if missing:
+        return fail("VISIBLE_ACTION_MISSING", missing[0])
+
+    print("G10C2CG2-PASS U3-F15-A9-S5-W33-X0 C-0")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        raise SystemExit(fail("UNHANDLED", type(exc).__name__))
