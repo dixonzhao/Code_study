@@ -1,0 +1,156 @@
+UDP001 G10C2P1 - GUI v0.4a PROMOTION, PROMOTED-PATH CHECK AND ARCHIVE
+Date: 2026-07-29
+Status: EXECUTION AUTHORIZED
+Environment: Windows CMD; current directory C-CODE
+
+======================================================================
+1. ACCEPTED EVIDENCE
+======================================================================
+
+Accepted independent gate:
+
+G10C2CG2-PASS U3-F15-A9-S5-W33-X0 C-0
+
+Accepted visible/real-Case integration:
+
+G10C2R2 N-O1-A1-F15-B9-D4-T1-Q1-P1-R1-V1-U1-X0 C-0
+
+Candidate:
+
+.\UDP001\04_TEMP\u001_data_preparation_workbench_gui_v0_4a.py
+
+Promotion target:
+
+.\UDP001\01_PROGRAMS\u001_data_preparation_workbench_gui_v0_4a.py
+
+Do not edit the candidate, Controller, accepted response or Gate.
+
+======================================================================
+2. TARGET SAFETY CHECK
+======================================================================
+
+Confirm the candidate exists and the promotion target is absent.
+
+If the target already exists, do not overwrite or delete it.  Stop and return:
+
+G10C2P1-BLOCKED-TARGET-EXISTS C-7
+
+======================================================================
+3. BYTE-PRESERVING PROMOTION COPY
+======================================================================
+
+From C-CODE CMD:
+
+copy /b ".\UDP001\04_TEMP\u001_data_preparation_workbench_gui_v0_4a.py" ".\UDP001\01_PROGRAMS\u001_data_preparation_workbench_gui_v0_4a.py"
+
+Require one copied file and no error.
+
+Run promoted-path self-test:
+
+python .\UDP001\01_PROGRAMS\u001_data_preparation_workbench_gui_v0_4a.py --self-test
+
+Require:
+
+U001-GUIV04A-SELFTEST-PASS-40
+
+======================================================================
+4. INDEPENDENT GATE ON PROMOTED PATH
+======================================================================
+
+Run the existing Gate from C-CODE CMD:
+
+python .\UDP001\04_TEMP\u001_g10c2_gui_conformance_gate_v0_2.py --gui ".\UDP001\01_PROGRAMS\u001_data_preparation_workbench_gui_v0_4a.py"
+
+Require:
+
+G10C2CG2-PASS U3-F15-A9-S5-W33-X0 C-0
+
+If self-test or Gate fails, preserve all files, do not archive anything and
+return the complete final error line.
+
+======================================================================
+5. PROMOTED-PATH EXISTING-RESPONSE CHECK
+======================================================================
+
+Start the promoted GUI:
+
+python .\UDP001\01_PROGRAMS\u001_data_preparation_workbench_gui_v0_4a.py
+
+Open AUTO_DISCOVERY and select:
+
+UDP001 Root = .\UDP001
+Case Root = .\UDP001\03_CASES\TC001_20260422
+Controller Path = .\UDP001\01_PROGRAMS\u001_discovery_controller_v0_2.py
+Run ID = G10C2_GUI_SMOKE_10000_02
+
+Do not press Execute New Run.  Press only:
+
+Validate Existing Response
+
+Require:
+
+G10C1-VALIDATE-PASS C-0
+Ready for U002
+
+Confirm Open Response Folder opens the existing exact Response folder.  Close
+the GUI after this check.  Do not modify or regenerate the accepted Response.
+
+======================================================================
+6. NON-DESTRUCTIVE DEVELOPMENT ARCHIVE
+======================================================================
+
+Only after sections 3-5 pass, confirm this archive target does not already
+exist:
+
+.\UDP001\ARCH\G10C2_DEVELOPMENT_20260729_01
+
+If it exists, stop and return:
+
+G10C2P1-BLOCKED-ARCHIVE-EXISTS C-7
+
+Create it:
+
+mkdir ".\UDP001\ARCH\G10C2_DEVELOPMENT_20260729_01"
+
+Move only files that actually exist:
+
+if exist ".\UDP001\04_TEMP\u001_data_preparation_workbench_gui_v0_4.py" move ".\UDP001\04_TEMP\u001_data_preparation_workbench_gui_v0_4.py" ".\UDP001\ARCH\G10C2_DEVELOPMENT_20260729_01"
+if exist ".\UDP001\04_TEMP\u001_data_preparation_workbench_gui_v0_4a.py" move ".\UDP001\04_TEMP\u001_data_preparation_workbench_gui_v0_4a.py" ".\UDP001\ARCH\G10C2_DEVELOPMENT_20260729_01"
+if exist ".\UDP001\04_TEMP\u001_g10c2_gui_conformance_gate_v0_1.py" move ".\UDP001\04_TEMP\u001_g10c2_gui_conformance_gate_v0_1.py" ".\UDP001\ARCH\G10C2_DEVELOPMENT_20260729_01"
+if exist ".\UDP001\04_TEMP\u001_g10c2_gui_conformance_gate_v0_2.py" move ".\UDP001\04_TEMP\u001_g10c2_gui_conformance_gate_v0_2.py" ".\UDP001\ARCH\G10C2_DEVELOPMENT_20260729_01"
+
+Do not move or delete:
+
+- promoted GUI v0.4a in 01_PROGRAMS;
+- GUI v0.3 fallback;
+- Controller v0.2 or any accepted child;
+- TC001 source, request, preflight, Run or Response evidence;
+- unrelated 04_TEMP content;
+- portable release/package files.
+
+No file is deleted by this task.
+
+======================================================================
+7. FINAL CHECK AND RETURN
+======================================================================
+
+Confirm these remain present:
+
+.\UDP001\01_PROGRAMS\u001_data_preparation_workbench_gui_v0_4a.py
+.\UDP001\01_PROGRAMS\u001_discovery_controller_v0_2.py
+.\UDP001\03_CASES\TC001_20260422\02_RUNS\G10C2_GUI_SMOKE_10000_02
+
+If all checks pass, return only:
+
+G10C2P1 N-C1-S1-G1-O1-V1-A1-X0 C-0
+
+For failure, return at most three lines:
+
+G10C2P1 C-7
+ERR-<complete final error line>
+MEMO-<optional one short observation>
+
+After return, stop.  Do not rebuild the portable package or begin U002 until
+Codex issues a separate task.
+
+END OF G10C2P1 PROTOCOL
