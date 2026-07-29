@@ -1,0 +1,100 @@
+UDP001 G10D1A1 - SAFE EXTRA-PROGRAM ARCHIVE AND ACTIVE-SET REAUDIT
+Date: 2026-07-29
+Status: EXECUTION AUTHORIZED
+Environment: Windows CMD; current directory C-CODE
+
+======================================================================
+1. ACCEPTED BASIS
+======================================================================
+
+G10D1D1 result:
+
+G10D1D1 N-E4-R0-I0-V2-P1-D1-L0-X0 C-0
+
+All four extra 01_PROGRAMS files are unreferenced and unimported by the 12
+accepted runtime programs.  They consist of two validation tools, one old
+packaging tool and one deprecated-version file.
+
+This task uses the detailed local dependency JSON to move those exact four
+files into a new ARCH folder.  No filename is manually transcribed.
+
+======================================================================
+2. PREPARE ARCHIVER
+======================================================================
+
+Download:
+
+u001_g10d1a1_safe_extra_program_archiver_v0_1.py.txt
+
+Place it in C-CODE\UDP001\04_TEMP and remove only the final `.txt`.
+Do not ask Copilot to rewrite it.
+
+From C-CODE CMD run:
+
+python .\UDP001\04_TEMP\u001_g10d1a1_safe_extra_program_archiver_v0_1.py --self-test
+
+Require:
+
+U001-G10D1A1-SELFTEST-PASS-8
+
+======================================================================
+3. SAFE ARCHIVE
+======================================================================
+
+The archive target must not already exist:
+
+.\UDP001\ARCH\G10D_RELEASE_AUDIT_20260729_01
+
+Run:
+
+python .\UDP001\04_TEMP\u001_g10d1a1_safe_extra_program_archiver_v0_1.py --archive --udp001-root ".\UDP001" --dependency-report ".\UDP001\03_CASES\TC001_20260422\03_RETURN\G10D1D1_DEPENDENCY_01\u001_g10d1d1_unexpected_program_dependency.json" --archive-name "G10D_RELEASE_AUDIT_20260729_01"
+
+Require a line beginning:
+
+G10D1A1 N-E4-M4-
+
+The program checks dependencies again, records original hashes, moves only the
+four report-listed files and verifies their hashes after moving.  Do not move
+any additional file manually.
+
+======================================================================
+4. REAUDIT ACTIVE SET
+======================================================================
+
+Keep the previous audit program in 04_TEMP for this step:
+
+u001_g10d1_release_inventory_audit_v0_1.py
+
+The new output folder must not already exist:
+
+.\UDP001\03_CASES\TC001_20260422\03_RETURN\G10D1_RELEASE_AUDIT_02
+
+Run:
+
+python .\UDP001\04_TEMP\u001_g10d1_release_inventory_audit_v0_1.py --audit --udp001-root ".\UDP001" --out ".\UDP001\03_CASES\TC001_20260422\03_RETURN\G10D1_RELEASE_AUDIT_02"
+
+Expected active-set result:
+
+- A12: all formal programs present;
+- C4: all controls present;
+- P13: 12 formal programs plus GUI v0.3 fallback;
+- M0/E0/X0;
+- P/S/T bitmaps remain FFF;
+- K0/O11 may remain because packaging has not yet been redesigned.
+
+Do not package or edit programs after this audit.
+
+======================================================================
+5. RETURN
+======================================================================
+
+Return exactly three terminal lines:
+
+G10D1A1 N-...
+G10D1 N-...
+BM-...
+
+After return, stop.  Codex will design the new release from the clean active
+set rather than modifying the obsolete K0/O11 release in place.
+
+END OF G10D1A1 PROTOCOL
