@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Independent import-safe command-plan gate for U001 GUI v0.4."""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+CONTROLLER_NAME = "u001_discovery_controller_v0_2.py"
+FORBIDDEN_DIRECT_CHILDREN = (
+    "u001_foundation_core_v0_1.py",
+    "u001_auto_discovery_profile_builder_v0_2.py",
+    "u001_g10b_single_pass_discovery_engine_v0_5a.py",
+)
+MODES = {
+    "make_request": "--make-request",
+    "preflight": "--preflight",
+    "run_request": "--run-request",
+    "validate_response": "--validate-response",
+}
+
+
+def fail(code: str, detail: str = "") -> int:
+    suffix = f" D-{detail[:120]}" if detail else ""
+    print(f"G10C2CG1-ERROR:{code}{suffix} C-7")
+    return 7
+
+
+def load_module(path: Path):
+    spec = importlib.util.spec_from_file_location("u001_gui_v04_candidate", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("IMPORT_SPEC")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def value_after(command: list[str], flag: str) -> str:
+    index = command.index(flag)
+    return command[index + 1]
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--gui", required=True)
+    args = parser.parse_args()
+    gui = Path(args.gui).resolve()
+    if not gui.is_file():
+        return fail("GUI_MISSING")
+
+    source = gui.read_text(encoding="utf-8", errors="replace")
+    if CONTROLLER_NAME not in source:
+        return fail("CONTROLLER_LITERAL")
+    leaked = [name for name in FORBIDDEN_DIRECT_CHILDREN if name in source]
+    if leaked:
+        return fail("DIRECT_CHILD_REFERENCE", leaked[0])
+
+    check = subprocess.run(
+        [sys.executable, str(gui), "--self-test"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        shell=False, check=False,
+    )
+    if check.returncode != 0 or "U001-GUIV04-SELFTEST-PASS-32" not in check.stdout:
+        return fail("SELFTEST", f"E{check.returncode}")
+
+    try:
+        module = load_module(gui)
+    except Exception as exc:
+        return fail("IMPORT", type(exc).__name__)
+
+    if getattr(module, "PROGRAM_VERSION", None) != "0.4":
+        return fail("PROGRAM_VERSION")
+    if getattr(module, "DISCOVERY_CONTROLLER_NAME", None) != CONTROLLER_NAME:
+        return fail("CONTROLLER_CONSTANT")
+    build = getattr(module, "build_auto_discovery_command_plan", None)
+    if not callable(build):
+        return fail("PLAN_API_MISSING")
+
+    with tempfile.TemporaryDirectory(prefix="u001_g10c2cg1_") as tmp:
+        base = Path(tmp)
+        udp = base / "UDP001"
+        case = udp / "03_CASES" / "TC_SYNTHETIC_001"
+        controller = udp / "01_PROGRAMS" / CONTROLLER_NAME
+        run_id = "GUI_CG1_RUN_001"
+        plan = build(
+            "PYTHON_EXE", controller, udp, case, run_id,
+            "SOURCE_SYNTHETIC", "FULL_SOURCE", 0, 10000, 32, 200,
+            2048, 256, 32, 1000, 25,
+        )
+
+        if not isinstance(plan, dict) or not isinstance(plan.get("Commands"), dict):
+            return fail("PLAN_SHAPE")
+        commands = plan["Commands"]
+        if set(commands) != set(MODES):
+            return fail("COMMAND_KEYS")
+        for key, mode in MODES.items():
+            cmd = commands[key]
+            if not isinstance(cmd, list) or not all(isinstance(x, str) for x in cmd):
+                return fail("COMMAND_NOT_LIST", key)
+            if len(cmd) < 3 or cmd[0] != "PYTHON_EXE" or Path(cmd[1]) != controller:
+                return fail("COMMAND_PREFIX", key)
+            if cmd[2] != mode or cmd.count(mode) != 1:
+                return fail("COMMAND_MODE", key)
+            if any("\"" in item for item in cmd):
+                return fail("EMBEDDED_QUOTE", key)
+
+        expected_request = case / "01_CONFIG" / run_id / "u001_discovery_request.json"
+        expected_preflight = case / "03_RETURN" / f"{run_id}_PREFLIGHT"
+        expected_response = case / "02_RUNS" / run_id
+        expected_incomplete = case / "02_RUNS" / f".{run_id}.g10c1_incomplete"
+        if Path(plan.get("RequestPath", "")) != expected_request:
+            return fail("REQUEST_PATH")
+        if Path(plan.get("PreflightPath", "")) != expected_preflight:
+            return fail("PREFLIGHT_PATH")
+        if Path(plan.get("ResponseRoot", "")) != expected_response:
+            return fail("RESPONSE_PATH")
+        if Path(plan.get("IncompleteRoot", "")) != expected_incomplete:
+            return fail("INCOMPLETE_PATH")
+
+        make = commands["make_request"]
+        required_pairs = {
+            "--request-id": run_id,
+            "--run-id": run_id,
+            "--dataset-id": case.name,
+            "--source-id": "SOURCE_SYNTHETIC",
+            "--segment-id": "FULL_SOURCE",
+            "--requested-output-root": f"02_RUNS/{run_id}",
+            "--reuse-policy": "FORCE_NEW_RUN",
+            "--frame-key-channel": "2",
+            "--frame-key-can-id": "0x620",
+            "--frame-key-signal": "FrameCount",
+            "--max-source-rows": "0",
+            "--chunksize": "10000",
+            "--batch-size": "32",
+        }
+        for flag, expected in required_pairs.items():
+            try:
+                observed = value_after(make, flag)
+            except (ValueError, IndexError):
+                return fail("MAKE_FLAG_MISSING", flag)
+            if observed != expected:
+                return fail("MAKE_FLAG_VALUE", flag)
+
+        if value_after(commands["preflight"], "--request") != str(expected_request):
+            return fail("PREFLIGHT_REQUEST")
+        if value_after(commands["run_request"], "--request") != str(expected_request):
+            return fail("RUN_REQUEST")
+        if value_after(commands["validate_response"], "--response-root") != str(expected_response):
+            return fail("VALIDATE_RESPONSE")
+
+    print("G10C2CG1-PASS P4-I12-B4-X0 C-0")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        raise SystemExit(fail("UNHANDLED", type(exc).__name__))
