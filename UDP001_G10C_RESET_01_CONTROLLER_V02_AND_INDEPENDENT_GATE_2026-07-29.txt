@@ -1,0 +1,272 @@
+UDP001 G10C RESET - CONTROLLER v0.2 AND INDEPENDENT CONFORMANCE GATE
+Date: 2026-07-29
+Status: CLEAN REBUILD AUTHORIZED; REAL CASE EXECUTION FORBIDDEN UNTIL CG1 PASS
+Environment: Windows CMD, current directory C-CODE
+
+======================================================================
+1. WHY RESET IS REQUIRED
+======================================================================
+
+Reject controller v0.1b as an implementation candidate.
+
+Observed independent evidence:
+
+- the real C2 child returned exit 0 with one stdout line and no stderr;
+- controller reported all eight G10A artifacts absent;
+- the V0_2 incomplete root was not preserved;
+- static inspection found none of the eight authoritative G10A filenames in
+  the controller source;
+- controller self-tests nevertheless passed.
+
+Therefore the existing self-test suite does not prove conformance to the real
+child contracts.  Do not patch v0.1b in place and do not execute another real
+Case until the independent synthetic gate passes.
+
+======================================================================
+2. THREE COPILOT INPUT FILES
+======================================================================
+
+Open a fresh Company Copilot chat and provide exactly:
+
+1. company file u001_discovery_controller_v0_1b.py as implementation history;
+2. UDP001_G10C_RESET_01_CONTROLLER_V02_AND_INDEPENDENT_GATE_2026-07-29.txt;
+3. u001_g10c1_controller_conformance_gate_v0_1.py.txt.
+
+Tell Copilot:
+
+Read all three files completely.  Build a clean v0.2 controller.  Reuse only
+stable request/schema/hash/path helpers from v0.1b; do not inherit its artifact
+lists, directory creation lifecycle, failure cleanup or self-test assumptions.
+Do not modify the independent conformance gate.  Return one actual downloadable
+file named exactly:
+
+u001_discovery_controller_v0_2.py.txt
+
+Do not return only a code block.  Do not add spaces, parentheses, `download`,
+`下载` or any other filename decoration.
+
+Save after transfer as:
+
+C-CODE\UDP001\04_TEMP\u001_discovery_controller_v0_2.py
+
+Keep older controller versions unchanged and do not promote v0.2 yet.
+
+======================================================================
+3. PUBLIC MODES AND ARCHITECTURE
+======================================================================
+
+Retain these public modes and their accepted v0.1 request/response vocabulary:
+
+- --self-test
+- --make-request
+- --preflight
+- --run-request
+- --validate-response
+
+G10C remains a thin controller.  It calls exact accepted children through
+sys.executable, explicit argument lists, shell=False and cwd=01_PROGRAMS.  It
+does not decode CAN, select analysis variables, calculate statistics or modify
+child programs.
+
+Exact child basenames:
+
+- u001_foundation_core_v0_1.py
+- u001_auto_discovery_profile_builder_v0_2.py
+- u001_g10b_single_pass_discovery_engine_v0_5a.py
+
+======================================================================
+4. AUTHORITATIVE ARTIFACT CONTRACTS
+======================================================================
+
+C1 G1 exact direct outputs:
+
+1. udp001_g1_signal_catalog.csv
+2. udp001_g1_probe_summary.json
+3. udp001_g1_return_capsule.txt
+
+C2 G10A2 exact direct outputs:
+
+1. u001_discovery_signal_inventory.csv
+2. u001_g2_selected_signals.csv
+3. u001_g4_signal_policy.csv
+4. u001_g5_frame_policy.csv
+5. u001_g6_hold_policy.csv
+6. u001_discovery_batch_map.csv
+7. u001_discovery_profile_manifest.json
+8. udp001_g10a_return_capsule.txt
+
+These exact eight literal basenames must appear in the controller source.  No
+placeholder `eight-file set`, generated guessed names, old G10A v0.1 names or
+prefix search is permitted.
+
+C4 G10B1 exact root outputs:
+
+1. u001_g10b_frame_key_updates.csv
+2. u001_g10b_batch_index.csv
+3. u001_g10b_global_quality.csv
+4. u001_g10b_signal_quality.csv
+5. u001_g10b_run_manifest.json
+6. udp001_g10b1_return_capsule.txt
+
+Required G10B1 shard folders:
+
+- 01_UPDATE_SHARDS containing exact B###_updates.csv files;
+- 02_FRAME_SHARDS containing exact B###_frames.csv files.
+
+Artifact recognition is by exact basename and exact folder only.  Do not use
+mtime, latest, recursive fuzzy lookup or silently accept unexpected substitutes.
+
+======================================================================
+5. DIRECTORY OWNERSHIP
+======================================================================
+
+Controller creates only:
+
+- sibling incomplete root;
+- 00_REQUEST and copied request;
+- 04_RESPONSE/LOGS;
+- abort/response evidence;
+- final atomic rename after full success.
+
+Children create their own absent --out directories:
+
+- C1 creates 01_G1_CATALOG;
+- C2 creates 02_PROFILE_CONFIG;
+- C4 creates 03_DISCOVERY_DATA.
+
+Never pre-create these three child output directories.  If one exists before
+its owning child begins, return STAGE_OUTPUT_COLLISION without launch.  Never
+delete or empty it.
+
+======================================================================
+6. UNIVERSAL LOG AND FAILURE LIFECYCLE
+======================================================================
+
+One shared subprocess runner serves C1-C5.  Immediately after every child
+returns, and before any evidence check, it writes and closes:
+
+04_RESPONSE/LOGS/C#.stdout.txt
+04_RESPONSE/LOGS/C#.stderr.txt
+
+Empty stderr is still represented by an existing zero-byte file.
+
+After incomplete-root creation, no failure path may remove, rename over,
+auto-clean or discard it.  Do not use TemporaryDirectory for the real Run.
+Write ABORTED_RUN.txt and preserve all observed child output and logs.
+
+Failure categories are distinct:
+
+- STAGE_OUTPUT_COLLISION
+- CHILD_LAUNCH
+- CHILD_EXIT
+- CHILD_ARTIFACT
+- CHILD_TOKEN
+- CHILD_VALIDATION
+- RESPONSE_CONSTRUCTION
+- INTERNAL_VALIDATION
+
+Terminal failure capsule:
+
+G10C1-ERROR:<stage>:<category> E<exit_or_NA>-F<bits>-SO<bytes>.<lines>-SE<bytes>.<lines>-AB<0_or_1> C-7
+
+No absolute path or full log is printed.
+
+======================================================================
+7. CHILD SUCCESS EVIDENCE
+======================================================================
+
+C1:
+
+- exit 0;
+- all three exact nonempty artifacts;
+- parseable summary JSON;
+- final child-capsule line contains standalone C-0.
+
+C2:
+
+- exit 0;
+- all eight exact nonempty artifacts;
+- parseable profile manifest;
+- final child-capsule line contains standalone C-0.
+
+C3:
+
+- exit 0;
+- stdout contains UDP001-G10A2-VALIDATE-PASS.
+
+C4:
+
+- exit 0;
+- six exact nonempty root artifacts;
+- both shard folders exist and are nonempty;
+- final child-capsule line contains standalone C-0.
+
+C5:
+
+- exit 0;
+- stdout contains UDP001-G10B1 and VALIDATE-PASS.
+
+Do not require an invented verbose stdout token from a build child when its
+authoritative child capsule already provides C-0.
+
+======================================================================
+8. SELF-TEST CONTRACT
+======================================================================
+
+The controller self-test must contain at least 40 deterministic tests and end:
+
+U001-G10C1R-SELFTEST-PASS-40
+
+A higher count is allowed, but this exact token must also be printed so the
+independent gate has a stable contract.
+
+Internal self-tests are necessary but not sufficient.  Only independent CG1
+authorization permits a real Case run.
+
+For synthetic tests, --minimum-free-gib 0 is allowed.  Production request
+defaults remain unchanged.
+
+======================================================================
+9. INDEPENDENT CG1 EXECUTION
+======================================================================
+
+Download the unmodified independent gate and remove only its final `.txt`:
+
+C-CODE\UDP001\04_TEMP\u001_g10c1_controller_conformance_gate_v0_1.py
+
+First run candidate self-test:
+
+python .\UDP001\04_TEMP\u001_discovery_controller_v0_2.py --self-test
+
+Then run independent CG1:
+
+python .\UDP001\04_TEMP\u001_g10c1_controller_conformance_gate_v0_1.py --controller ".\UDP001\04_TEMP\u001_discovery_controller_v0_2.py"
+
+CG1 creates only synthetic temporary sources and fake children.  It verifies:
+
+- exact G10A artifact literals;
+- child-owned absent output directories;
+- C2 exit-zero/no-artifact rejection;
+- preservation of C2 stdout/stderr and incomplete evidence;
+- recognition of the exact eight-file G10A set;
+- successful arrival at C3;
+- preservation of C4 stdout/stderr after a fake nonzero exit;
+- no false final output on either failure.
+
+Required result:
+
+G10C1CG1-PASS S8-D2-P2-L6-X0 C-0
+
+======================================================================
+10. RETURN AND STOP
+======================================================================
+
+If CG1 passes, return only its complete PASS line.
+
+If it fails, return the complete G10C1CG1-ERROR line.  Do not change the
+independent gate to make the candidate pass.
+
+After CG1, stop.  Do not run a real request, do not delete V0_1/V0_2 evidence,
+do not promote v0.2, do not begin G10C2 and do not package U001.
+
+END OF RESET SPECIFICATION
