@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""Read-only U001 final active-program and portable-release compatibility audit."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+PROGRAMS = (
+    "u001_foundation_core_v0_1.py",
+    "u001_selected_update_decoder_v0_1.py",
+    "u001_framecount_assignment_v0_1.py",
+    "u001_semantic_validity_classifier_v0_1.py",
+    "u001_framecount_view_builder_v0_1.py",
+    "u001_signal_cadence_bounded_hold_v0_1.py",
+    "u001_output_package_assembler_v0_3.py",
+    "u001_g8a_thin_orchestrator_v0_5.py",
+    "u001_auto_discovery_profile_builder_v0_2.py",
+    "u001_g10b_single_pass_discovery_engine_v0_5a.py",
+    "u001_discovery_controller_v0_2.py",
+    "u001_data_preparation_workbench_gui_v0_4a.py",
+)
+ALLOWED_FALLBACKS = ("u001_data_preparation_workbench_gui_v0_3.py",)
+CONTROLS = (
+    "u001_g2_selected_signals.csv",
+    "u001_g4_signal_policy.csv",
+    "u001_g5_frame_policy.csv",
+    "u001_g6_hold_policy.csv",
+)
+PACKAGE_PATTERNS = (
+    "u001_portable_host_package_builder_v0_*.py",
+    "u001_portable_runtime_host_v0_*.py",
+    "u001_portable_package_builder_v0_*.py",
+    "u001_workbench_portable_launcher_v0_*.py",
+)
+COMPAT_NAMES = (
+    "u001_data_preparation_workbench_gui_v0_4a.py",
+    "u001_discovery_controller_v0_2.py",
+    "u001_auto_discovery_profile_builder_v0_2.py",
+    "u001_g10b_single_pass_discovery_engine_v0_5a.py",
+)
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while True:
+            block = stream.read(1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def mask_hex(flags) -> str:
+    value = 0
+    for index, flag in enumerate(flags):
+        if flag:
+            value |= 1 << index
+    width = max(1, (len(tuple(flags)) + 3) // 4)
+    return f"{value:0{width}X}"
+
+
+def compile_file(path: Path) -> tuple[bool, str]:
+    try:
+        source = path.read_text(encoding="utf-8-sig")
+        compile(source, str(path), "exec")
+        return True, ""
+    except Exception as exc:
+        return False, f"{type(exc).__name__}:{exc}"[:300]
+
+
+def selftest(path: Path, timeout_seconds: int) -> dict:
+    try:
+        result = subprocess.run(
+            [sys.executable, str(path), "--self-test"],
+            cwd=str(path.parent), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, shell=False, check=False, timeout=timeout_seconds,
+        )
+        stdout = result.stdout.strip().splitlines()
+        stderr = result.stderr.strip().splitlines()
+        passed = result.returncode == 0 and not any("Traceback" in line for line in stderr)
+        return {
+            "Passed": passed,
+            "ExitCode": result.returncode,
+            "StdoutFinal": stdout[-1] if stdout else "",
+            "StderrFinal": stderr[-1] if stderr else "",
+        }
+    except subprocess.TimeoutExpired:
+        return {"Passed": False, "ExitCode": "TIMEOUT", "StdoutFinal": "", "StderrFinal": "TIMEOUT"}
+    except Exception as exc:
+        return {"Passed": False, "ExitCode": "ERROR", "StdoutFinal": "", "StderrFinal": type(exc).__name__}
+
+
+def package_candidates(root: Path) -> list[Path]:
+    found = []
+    for folder_name in ("01_PROGRAMS", "04_TEMP", "ARCH"):
+        folder = root / folder_name
+        if not folder.is_dir():
+            continue
+        for pattern in PACKAGE_PATTERNS:
+            found.extend(path for path in folder.rglob(pattern) if path.is_file())
+    unique = {str(path.resolve()).lower(): path.resolve() for path in found}
+    return sorted(unique.values(), key=lambda p: (p.name.lower(), str(p).lower()))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--audit", action="store_true")
+    parser.add_argument("--udp001-root")
+    parser.add_argument("--out")
+    parser.add_argument("--timeout-seconds", type=int, default=120)
+    args = parser.parse_args()
+    if args.self_test:
+        assert len(PROGRAMS) == 12
+        assert len(CONTROLS) == 4
+        assert mask_hex([True] * 12) == "FFF"
+        assert mask_hex([False] * 4) == "0"
+        print("U001-G10D1-SELFTEST-PASS-12")
+        return 0
+    if not args.audit or not args.udp001_root or not args.out:
+        parser.error("--audit requires --udp001-root and --out")
+
+    root = Path(args.udp001_root).resolve()
+    out = Path(args.out).resolve()
+    programs_root = root / "01_PROGRAMS"
+    controls_root = root / "02_CONTROL"
+    if not programs_root.is_dir() or not controls_root.is_dir():
+        print("G10D1-ERROR:ROOT_LAYOUT C-7")
+        return 7
+    if out.exists():
+        print("G10D1-ERROR:OUT_EXISTS C-7")
+        return 7
+
+    out.mkdir(parents=True, exist_ok=False)
+    presence = []
+    syntax = []
+    tests = []
+    program_report = []
+    for name in PROGRAMS:
+        path = programs_root / name
+        exists = path.is_file()
+        presence.append(exists)
+        syntax_ok, syntax_error = compile_file(path) if exists else (False, "MISSING")
+        syntax.append(syntax_ok)
+        test = selftest(path, args.timeout_seconds) if syntax_ok else {
+            "Passed": False, "ExitCode": "NOT_RUN", "StdoutFinal": "", "StderrFinal": syntax_error,
+        }
+        tests.append(bool(test["Passed"]))
+        program_report.append({
+            "Index": len(program_report) + 1,
+            "Name": name,
+            "Exists": exists,
+            "SyntaxValid": syntax_ok,
+            "SyntaxError": syntax_error,
+            "Bytes": path.stat().st_size if exists else 0,
+            "SHA256": sha256(path) if exists else "",
+            "SelfTest": test,
+        })
+
+    active_py = sorted(path.name for path in programs_root.glob("*.py") if path.is_file())
+    expected_or_allowed = set(PROGRAMS) | set(ALLOWED_FALLBACKS)
+    unexpected = [name for name in active_py if name not in expected_or_allowed]
+    control_presence = [(controls_root / name).is_file() for name in CONTROLS]
+
+    candidates = package_candidates(root)
+    package_report = []
+    aggregate_source = ""
+    for path in candidates:
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
+        aggregate_source += "\n" + text
+        package_report.append({
+            "Name": path.name,
+            "RelativePath": str(path.relative_to(root)),
+            "Bytes": path.stat().st_size,
+            "SHA256": sha256(path),
+            "CompatibilityMentions": {name: name in text for name in COMPAT_NAMES},
+            "MentionsGUIv03": "u001_data_preparation_workbench_gui_v0_3.py" in text,
+            "MentionsExpectedNine": any(token in text for token in ("expected_programs = 9", "ExpectedPrograms\": 9", "P9")),
+        })
+    compat = [name in aggregate_source for name in COMPAT_NAMES]
+    old_gui = "u001_data_preparation_workbench_gui_v0_3.py" in aggregate_source
+    old_nine = any(token in aggregate_source for token in ("expected_programs = 9", "ExpectedPrograms\": 9", "P9"))
+    release_exists = (root / "05_PORTABLE_RELEASE").exists()
+
+    errors = sum(not item for item in presence + syntax + tests + control_presence)
+    errors += len(unexpected)
+    report = {
+        "Schema": "UDP001_G10D1_RELEASE_AUDIT_V0_1",
+        "CreatedUTC": datetime.now(timezone.utc).isoformat(),
+        "ReadOnlyAudit": True,
+        "UDP001Root": str(root),
+        "Programs": program_report,
+        "ProgramOrder": list(PROGRAMS),
+        "AllowedFallbacks": list(ALLOWED_FALLBACKS),
+        "ActivePythonFiles": active_py,
+        "UnexpectedActivePythonFiles": unexpected,
+        "Controls": {name: (controls_root / name).is_file() for name in CONTROLS},
+        "PackageCandidates": package_report,
+        "PackageCompatibilityOrder": list(COMPAT_NAMES),
+        "PackageCompatibilityBits": compat,
+        "PackageMentionsOldGUIv03": old_gui,
+        "PackageMentionsLegacyExpectedNine": old_nine,
+        "PortableReleaseExists": release_exists,
+        "BlockingCount": errors,
+    }
+    report_path = out / "u001_g10d1_release_inventory_audit.json"
+    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    line1 = (
+        f"G10D1 N-A{sum(presence)}-C{sum(control_presence)}-P{len(active_py)}-"
+        f"M{len(PROGRAMS)-sum(presence)}-E{len(unexpected)}-B{len(candidates)}-"
+        f"R{int(release_exists)}-X{errors} C-{0 if errors == 0 else 7}"
+    )
+    line2 = (
+        f"BM-P{mask_hex(presence)}-S{mask_hex(syntax)}-T{mask_hex(tests)}-"
+        f"K{mask_hex(compat)}-O{int(old_gui)}{int(old_nine)}"
+    )
+    capsule = out / "u001_g10d1_release_inventory_capsule.txt"
+    capsule.write_text(line1 + "\n" + line2 + "\n", encoding="utf-8")
+    print(line1)
+    print(line2)
+    return 0 if errors == 0 else 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
