@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Independent conformance gate for U001 Portable Runtime Host v0.5."""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+PROGRAMS = (
+    "u001_foundation_core_v0_1.py",
+    "u001_selected_update_decoder_v0_1.py",
+    "u001_framecount_assignment_v0_1.py",
+    "u001_semantic_validity_classifier_v0_1.py",
+    "u001_framecount_view_builder_v0_1.py",
+    "u001_signal_cadence_bounded_hold_v0_1.py",
+    "u001_output_package_assembler_v0_3.py",
+    "u001_g8a_thin_orchestrator_v0_5.py",
+    "u001_auto_discovery_profile_builder_v0_2.py",
+    "u001_g10b_single_pass_discovery_engine_v0_5a.py",
+    "u001_discovery_controller_v0_2.py",
+    "u001_data_preparation_workbench_gui_v0_4a.py",
+)
+GUI = "u001_data_preparation_workbench_gui_v0_4a.py"
+TOKEN = "U001-PORTABLE-HOST-V05-SELFTEST-PASS-24"
+
+
+def fail(code: str, detail: str = "") -> int:
+    suffix = f" D-{detail[:100]}" if detail else ""
+    print(f"G10D2ACG1-ERROR:{code}{suffix} C-7")
+    return 7
+
+
+def load(path: Path):
+    spec = importlib.util.spec_from_file_location("u001_runtime_host_v05_candidate", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("IMPORT_SPEC")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def run(command):
+    return subprocess.run(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        shell=False, check=False, timeout=30,
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", required=True)
+    args = parser.parse_args()
+    host = Path(args.host).resolve()
+    if not host.is_file():
+        return fail("HOST_MISSING")
+    source = host.read_text(encoding="utf-8-sig", errors="replace")
+    if "u001_data_preparation_workbench_gui_v0_3.py" in source:
+        return fail("OLD_GUI_LITERAL")
+
+    result = run([sys.executable, str(host), "--self-test"])
+    if result.returncode != 0 or TOKEN not in result.stdout:
+        return fail("SELFTEST", f"E{result.returncode}")
+    try:
+        module = load(host)
+    except Exception as exc:
+        return fail("IMPORT", type(exc).__name__)
+    if getattr(module, "PROGRAM_VERSION", None) != "0.5":
+        return fail("VERSION")
+    if tuple(getattr(module, "APPROVED_PROGRAMS", ())) != PROGRAMS:
+        return fail("ALLOWLIST")
+    if getattr(module, "DEFAULT_GUI_NAME", None) != GUI:
+        return fail("DEFAULT_GUI")
+    if getattr(module, "SELFTEST_TOKEN", None) != TOKEN:
+        return fail("TOKEN_CONSTANT")
+    contract_fn = getattr(module, "get_portable_host_contract", None)
+    resolve_fn = getattr(module, "resolve_approved_program", None)
+    dispatch_fn = getattr(module, "dispatch_hosted_program", None)
+    if not all(callable(item) for item in (contract_fn, resolve_fn, dispatch_fn)):
+        return fail("PUBLIC_API")
+    contract = contract_fn()
+    if set(contract) != {"Version", "ApprovedPrograms", "DefaultGUI", "ProgramDirectory", "DispatchModes"}:
+        return fail("CONTRACT_KEYS")
+    if contract["Version"] != "0.5" or tuple(contract["ApprovedPrograms"]) != PROGRAMS:
+        return fail("CONTRACT_VALUES")
+    if contract["DefaultGUI"] != GUI or contract["ProgramDirectory"] != "01_PROGRAMS":
+        return fail("CONTRACT_LAYOUT")
+    if tuple(contract["DispatchModes"]) != (
+        "direct_script", "host_program", "run_gui", "list_programs", "hosted_self_test_all"
+    ):
+        return fail("CONTRACT_MODES")
+
+    listed = run([sys.executable, str(host), "--list-programs"])
+    observed = tuple(line.strip() for line in listed.stdout.splitlines() if line.strip() in PROGRAMS)
+    if listed.returncode != 0 or observed != PROGRAMS:
+        return fail("LIST_PROGRAMS")
+
+    with tempfile.TemporaryDirectory(prefix="u001_g10d2acg1_") as tmp:
+        base = Path(tmp)
+        root = base / "UDP001"
+        program_root = root / "01_PROGRAMS"
+        program_root.mkdir(parents=True)
+        approved = program_root / PROGRAMS[0]
+        approved.write_text(
+            "import sys\nprint('FAKE-CHILD-PASS|' + '|'.join(sys.argv[1:]))\n",
+            encoding="utf-8",
+        )
+        unapproved = program_root / "unapproved.py"
+        unapproved.write_text("print('UNAPPROVED-RAN')\n", encoding="utf-8")
+        outside = base / PROGRAMS[0]
+        outside.write_text("print('OUTSIDE-RAN')\n", encoding="utf-8")
+
+        explicit = run([
+            sys.executable, str(host), "--host-program", str(approved), "--", "A", "B"
+        ])
+        if explicit.returncode != 0 or "FAKE-CHILD-PASS|A|B" not in explicit.stdout:
+            return fail("EXPLICIT_DISPATCH", f"E{explicit.returncode}")
+        direct = run([sys.executable, str(host), str(approved), "C", "D"])
+        if direct.returncode != 0 or "FAKE-CHILD-PASS|C|D" not in direct.stdout:
+            return fail("DIRECT_DISPATCH", f"E{direct.returncode}")
+        bad1 = run([sys.executable, str(host), str(unapproved)])
+        if bad1.returncode == 0 or "UNAPPROVED-RAN" in bad1.stdout:
+            return fail("UNAPPROVED_ACCEPTED")
+        bad2 = run([sys.executable, str(host), str(outside)])
+        if bad2.returncode == 0 or "OUTSIDE-RAN" in bad2.stdout:
+            return fail("OUTSIDE_ACCEPTED")
+
+        try:
+            resolved = resolve_fn(approved)
+        except Exception as exc:
+            return fail("RESOLVE_APPROVED", type(exc).__name__)
+        if Path(resolved).resolve() != approved.resolve():
+            return fail("RESOLVE_VALUE")
+        for bad in (unapproved, outside):
+            try:
+                resolve_fn(bad)
+            except Exception:
+                pass
+            else:
+                return fail("RESOLVE_REJECTION")
+
+    print("G10D2ACG1-PASS A12-E2-R2-X0 C-0")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        raise SystemExit(fail("UNHANDLED", type(exc).__name__))
