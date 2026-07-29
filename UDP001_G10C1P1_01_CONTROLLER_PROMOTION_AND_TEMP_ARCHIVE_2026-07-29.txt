@@ -1,0 +1,118 @@
+UDP001 G10C1P1 - CONTROLLER PROMOTION AND NON-DESTRUCTIVE TEMP ARCHIVE
+Date: 2026-07-29
+Status: EXECUTION AUTHORIZED
+Environment: Windows CMD, current directory C-CODE
+
+======================================================================
+1. ACCEPTED ENTRY EVIDENCE
+======================================================================
+
+G10C1CG1-PASS S8-D2-P2-L6-X0 C-0
+G10C1-RUN-PASS C-0
+G10C1-VALIDATE-PASS C-0
+
+Candidate:
+
+.\UDP001\04_TEMP\u001_discovery_controller_v0_2.py
+
+Promotion target:
+
+.\UDP001\01_PROGRAMS\u001_discovery_controller_v0_2.py
+
+Do not edit either file and do not overwrite an existing promotion target.
+
+======================================================================
+2. PRE-PROMOTION CHECK
+======================================================================
+
+Confirm the candidate exists and the target is absent.
+
+If the target already exists, stop and return:
+
+G10C1P1-BLOCKED:TARGET_EXISTS C-7
+
+Do not delete or overwrite it.
+
+======================================================================
+3. BYTE-PRESERVING COPY
+======================================================================
+
+From C-CODE CMD:
+
+copy /b ".\UDP001\04_TEMP\u001_discovery_controller_v0_2.py" ".\UDP001\01_PROGRAMS\u001_discovery_controller_v0_2.py"
+
+Require one copied file and no error.
+
+Run promoted self-test:
+
+python .\UDP001\01_PROGRAMS\u001_discovery_controller_v0_2.py --self-test
+
+Require:
+
+U001-G10C1R-SELFTEST-PASS-40
+
+======================================================================
+4. INDEPENDENT GATE AGAINST PROMOTED PATH
+======================================================================
+
+The independent gate must still exist temporarily at:
+
+.\UDP001\04_TEMP\u001_g10c1_controller_conformance_gate_v0_1.py
+
+Run:
+
+python .\UDP001\04_TEMP\u001_g10c1_controller_conformance_gate_v0_1.py --controller ".\UDP001\01_PROGRAMS\u001_discovery_controller_v0_2.py"
+
+Require:
+
+G10C1CG1-PASS S8-D2-P2-L6-X0 C-0
+
+If either promoted self-test or CG1 fails, leave the copied target unchanged,
+return the complete error line and stop.  Do not begin archival or G10C2.
+
+======================================================================
+5. NON-DESTRUCTIVE DEVELOPMENT ARCHIVE
+======================================================================
+
+Only after promoted CG1 passes, create:
+
+mkdir ".\UDP001\ARCH\G10C_DEVELOPMENT_20260729"
+
+Move only files that actually exist.  CMD commands:
+
+if exist ".\UDP001\04_TEMP\u001_discovery_controller_v0_1.py" move ".\UDP001\04_TEMP\u001_discovery_controller_v0_1.py" ".\UDP001\ARCH\G10C_DEVELOPMENT_20260729"
+if exist ".\UDP001\04_TEMP\u001_discovery_controller_v0_1a.py" move ".\UDP001\04_TEMP\u001_discovery_controller_v0_1a.py" ".\UDP001\ARCH\G10C_DEVELOPMENT_20260729"
+if exist ".\UDP001\04_TEMP\u001_discovery_controller_v0_1b.py" move ".\UDP001\04_TEMP\u001_discovery_controller_v0_1b.py" ".\UDP001\ARCH\G10C_DEVELOPMENT_20260729"
+if exist ".\UDP001\04_TEMP\u001_discovery_controller_v0_2.py" move ".\UDP001\04_TEMP\u001_discovery_controller_v0_2.py" ".\UDP001\ARCH\G10C_DEVELOPMENT_20260729"
+if exist ".\UDP001\04_TEMP\u001_g10c1_c1_failure_probe_v0_1.py" move ".\UDP001\04_TEMP\u001_g10c1_c1_failure_probe_v0_1.py" ".\UDP001\ARCH\G10C_DEVELOPMENT_20260729"
+if exist ".\UDP001\04_TEMP\u001_g10c1_failure_probe_v0_2.py" move ".\UDP001\04_TEMP\u001_g10c1_failure_probe_v0_2.py" ".\UDP001\ARCH\G10C_DEVELOPMENT_20260729"
+if exist ".\UDP001\04_TEMP\u001_g10c1_c2_failure_probe_v0_1.py" move ".\UDP001\04_TEMP\u001_g10c1_c2_failure_probe_v0_1.py" ".\UDP001\ARCH\G10C_DEVELOPMENT_20260729"
+if exist ".\UDP001\04_TEMP\u001_g10c1_controller_conformance_gate_v0_1.py" move ".\UDP001\04_TEMP\u001_g10c1_controller_conformance_gate_v0_1.py" ".\UDP001\ARCH\G10C_DEVELOPMENT_20260729"
+
+Do not archive or move:
+
+- any 01_PROGRAMS accepted child;
+- any Case source;
+- V0_1/V0_2/V0_3 request, preflight, Run or response evidence;
+- GUI v0.3;
+- portable package files;
+- unrelated 04_TEMP content.
+
+No file is deleted by this task.
+
+======================================================================
+6. FINAL CHECK AND RETURN
+======================================================================
+
+Confirm this file remains present:
+
+.\UDP001\01_PROGRAMS\u001_discovery_controller_v0_2.py
+
+Then return only:
+
+G10C1P1-PASS
+
+After return, stop.  Do not start G10C2 until Codex publishes its separate
+design package.
+
+END OF PROMOTION PROTOCOL
