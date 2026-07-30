@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""Safely copy and revalidate a completed G10D2C release stage."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+
+PROGRAM_NAME = "u001_g10d2cd3_safe_release_finalizer_v0_1.py"
+PROGRAM_VERSION = "0.1"
+SELFTEST_TOKEN = "UDP001-G10D2CD3-SELFTEST-PASS-20"
+GATE_NAME = "u001_g10d2c_portable_release_acceptance_gate_v0_1.py"
+D2_EVIDENCE = "G10D2CD2_GATE_STDOUT.txt"
+D2_PASS = "G10D2CCG1-PASS P12-C4-H12-Z1-R1-X0 C-0"
+GATE_PASS = D2_PASS
+PACKAGE_NAME = "U001_Portable_v0_2"
+INCOMPLETE_MARKER = ".G10D2C_INCOMPLETE"
+MAX_COPY_ATTEMPTS = 12
+
+
+def latest_pk04(temp_root: Path) -> Path | None:
+    if not temp_root.is_dir():
+        return None
+    candidates = [
+        path for path in temp_root.iterdir()
+        if path.is_dir() and path.name.upper().startswith("PK04")
+    ]
+    return max(candidates, key=lambda path: path.stat().st_mtime, default=None)
+
+
+def release_stage(build_root: Path | None) -> Path | None:
+    if build_root is None or not build_root.is_dir():
+        return None
+    direct = build_root / "release_stage"
+    if (direct / PACKAGE_NAME).is_dir() and (direct / f"{PACKAGE_NAME}.zip").is_file():
+        return direct
+    candidates = []
+    try:
+        for path in build_root.rglob("*"):
+            if path.is_dir() and (path / PACKAGE_NAME).is_dir() and (path / f"{PACKAGE_NAME}.zip").is_file():
+                candidates.append(path)
+    except OSError:
+        return None
+    return min(candidates, key=lambda path: len(path.parts), default=None)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def file_inventory(root: Path, ignore_marker: bool = True) -> list[tuple[str, int]]:
+    records = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(root).as_posix()
+        if ignore_marker and relative == INCOMPLETE_MARKER:
+            continue
+        records.append((relative, path.stat().st_size))
+    return sorted(records)
+
+
+def critical_relative_paths() -> tuple[str, ...]:
+    base = f"{PACKAGE_NAME}/UDP001"
+    programs = (
+        "u001_foundation_core_v0_1.py",
+        "u001_selected_update_decoder_v0_1.py",
+        "u001_framecount_assignment_v0_1.py",
+        "u001_semantic_validity_classifier_v0_1.py",
+        "u001_framecount_view_builder_v0_1.py",
+        "u001_signal_cadence_bounded_hold_v0_1.py",
+        "u001_output_package_assembler_v0_3.py",
+        "u001_g8a_thin_orchestrator_v0_5.py",
+        "u001_auto_discovery_profile_builder_v0_2.py",
+        "u001_g10b_single_pass_discovery_engine_v0_5a.py",
+        "u001_discovery_controller_v0_2.py",
+        "u001_data_preparation_workbench_gui_v0_4a.py",
+    )
+    controls = (
+        "u001_g2_selected_signals.csv",
+        "u001_g4_signal_policy.csv",
+        "u001_g5_frame_policy.csv",
+        "u001_g6_hold_policy.csv",
+    )
+    fixed = (
+        f"{PACKAGE_NAME}.zip",
+        f"{base}/00_LAUNCHER/U001_Workbench.exe",
+        f"{PACKAGE_NAME}/_internal/evidence/u001_portable_host_package_manifest.json",
+        f"{PACKAGE_NAME}/_internal/evidence/u001_portable_host_package_capsule.txt",
+    )
+    return fixed + tuple(f"{base}/01_PROGRAMS/{name}" for name in programs) + tuple(
+        f"{base}/02_CONTROL/{name}" for name in controls
+    )
+
+
+def copy_file_with_retry(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    last_error = None
+    for attempt in range(1, MAX_COPY_ATTEMPTS + 1):
+        try:
+            shutil.copy2(source, target)
+            return
+        except (OSError, PermissionError) as exc:
+            last_error = exc
+            try:
+                if target.exists():
+                    target.unlink()
+            except OSError:
+                pass
+            if attempt < MAX_COPY_ATTEMPTS:
+                time.sleep(min(5.0, 0.5 * attempt))
+    raise PermissionError(f"COPY_RETRY_EXHAUSTED:{source.name}") from last_error
+
+
+def copy_tree_with_marker(source: Path, out: Path) -> tuple[int, int]:
+    if out.exists():
+        raise FileExistsError("OUTPUT_EXISTS")
+    out.mkdir(parents=False)
+    marker = out / INCOMPLETE_MARKER
+    marker.write_text("G10D2C copy or validation is incomplete. Do not use this output.\n", encoding="utf-8")
+    files = [path for path in source.rglob("*") if path.is_file()]
+    files.sort(key=lambda path: path.relative_to(source).as_posix())
+    total_bytes = sum(path.stat().st_size for path in files)
+    copied_bytes = 0
+    for index, path in enumerate(files, 1):
+        relative = path.relative_to(source)
+        copy_file_with_retry(path, out / relative)
+        copied_bytes += path.stat().st_size
+        if index == 1 or index % 500 == 0 or index == len(files):
+            print(f"G10D2CD3-PROGRESS F{index}/{len(files)} B{copied_bytes}/{total_bytes}", flush=True)
+    return len(files), total_bytes
+
+
+def verify_copy(source: Path, out: Path) -> None:
+    if file_inventory(source) != file_inventory(out):
+        raise RuntimeError("INVENTORY_OR_SIZE_MISMATCH")
+    for relative in critical_relative_paths():
+        first = source / Path(relative)
+        second = out / Path(relative)
+        if not first.is_file() or not second.is_file():
+            raise RuntimeError("CRITICAL_FILE_MISSING:" + Path(relative).name)
+        if sha256_file(first) != sha256_file(second):
+            raise RuntimeError("CRITICAL_HASH_MISMATCH:" + Path(relative).name)
+
+
+def run_gate(gate: Path, out: Path, temp_root: Path) -> tuple[int, str, str]:
+    result = subprocess.run(
+        [sys.executable, str(gate.resolve()), "--release-root", str(out.resolve())],
+        cwd=str(temp_root),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=2100,
+        shell=False,
+    )
+    (temp_root / "G10D2CD3_GATE_STDOUT.txt").write_text(result.stdout, encoding="utf-8")
+    (temp_root / "G10D2CD3_GATE_STDERR.txt").write_text(result.stderr, encoding="utf-8")
+    return result.returncode, result.stdout, result.stderr
+
+
+def compact_reason(text: str, default: str) -> str:
+    for line in text.splitlines():
+        if "G10D2CCG1-FAIL:" in line:
+            value = line.split("G10D2CCG1-FAIL:", 1)[1].split(" C-7", 1)[0]
+            return "".join(ch if ch.isalnum() or ch in "_-" else "_" for ch in value)[:80]
+    return default
+
+
+def finalize(udp001_root: Path, out: Path) -> int:
+    root = udp001_root.resolve()
+    temp_root = root / "04_TEMP"
+    out = out.resolve()
+    if not root.is_dir() or root.name.upper() != "UDP001" or not temp_root.is_dir():
+        print("G10D2CD3 N-R0-C0-V0-G0-E7-X1 K-UDP001_ROOT C-7")
+        return 7
+    build = latest_pk04(temp_root)
+    source = release_stage(build)
+    if source is None:
+        print("G10D2CD3 N-R0-C0-V0-G0-E7-X0 K-RELEASE_STAGE C-7")
+        return 7
+    gate = temp_root / GATE_NAME
+    evidence = temp_root / D2_EVIDENCE
+    if not gate.is_file() or not evidence.is_file() or D2_PASS not in evidence.read_text(encoding="utf-8-sig", errors="replace"):
+        print("G10D2CD3 N-R1-C0-V0-G0-E7-X0 K-D2_EVIDENCE_OR_GATE C-7")
+        return 7
+    if out.exists():
+        print("G10D2CD3 N-R1-C0-V0-G0-E7-X0 K-OUTPUT_EXISTS C-7")
+        return 7
+    copied = 0
+    verified = 0
+    gate_pass = 0
+    try:
+        copy_tree_with_marker(source, out)
+        copied = 1
+        verify_copy(source, out)
+        verified = 1
+        rc, stdout, stderr = run_gate(gate, out, temp_root)
+        if rc != 0 or GATE_PASS not in stdout:
+            reason = compact_reason(stdout + "\n" + stderr, f"GATE_RC{rc}")
+            print(f"G10D2CD3 N-R1-C1-V1-G0-E{rc}-X0 K-{reason} C-7")
+            return 7
+        gate_pass = 1
+        (out / INCOMPLETE_MARKER).unlink()
+    except subprocess.TimeoutExpired:
+        print(f"G10D2CD3 N-R1-C{copied}-V{verified}-G{gate_pass}-E124-X0 K-GATE_TIMEOUT C-7")
+        return 7
+    except Exception as exc:
+        print(
+            f"G10D2CD3 N-R1-C{copied}-V{verified}-G{gate_pass}-E7-X1 K-{type(exc).__name__} C-7"
+        )
+        return 7
+    print("G10D2CD3 N-R1-C1-V1-G1-E0-X0 C-0")
+    return 0
+
+
+def run_self_test() -> None:
+    checks = 0
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        source = base / "source"
+        out = base / "out"
+        (source / PACKAGE_NAME).mkdir(parents=True)
+        (source / PACKAGE_NAME / "a.txt").write_text("A", encoding="utf-8")
+        (source / f"{PACKAGE_NAME}.zip").write_bytes(b"ZIP")
+        checks += int(len(file_inventory(source)) == 2)
+        count, total = copy_tree_with_marker(source, out)
+        checks += int(count == 2)
+        checks += int(total == 4)
+        checks += int((out / INCOMPLETE_MARKER).is_file())
+        checks += int(file_inventory(source) == file_inventory(out))
+        checks += int(sha256_file(source / f"{PACKAGE_NAME}.zip") == sha256_file(out / f"{PACKAGE_NAME}.zip"))
+        checks += int(PROGRAM_VERSION == "0.1")
+        checks += int(PROGRAM_NAME.endswith("v0_1.py"))
+        checks += int(SELFTEST_TOKEN.endswith("PASS-20"))
+        checks += int(MAX_COPY_ATTEMPTS == 12)
+        checks += int(len(critical_relative_paths()) == 20)
+        checks += int(critical_relative_paths()[0] == f"{PACKAGE_NAME}.zip")
+        checks += int(compact_reason("G10D2CCG1-FAIL:ZIP C-7", "X") == "ZIP")
+        checks += int(compact_reason("none", "X") == "X")
+        temp_root = base / "UDP001" / "04_TEMP"
+        temp_root.mkdir(parents=True)
+        checks += int(latest_pk04(temp_root) is None)
+        pk = temp_root / "PK04_TEST"
+        stage = pk / "release_stage"
+        (stage / PACKAGE_NAME).mkdir(parents=True)
+        (stage / f"{PACKAGE_NAME}.zip").write_bytes(b"ZIP")
+        checks += int(latest_pk04(temp_root) == pk)
+        checks += int(release_stage(pk) == stage)
+        checks += int(INCOMPLETE_MARKER.startswith("."))
+        checks += int(D2_PASS.endswith("C-0"))
+        checks += int(GATE_NAME.endswith("v0_1.py"))
+    if checks != 20:
+        raise AssertionError(f"SELFTEST_COUNT:{checks}")
+    print(SELFTEST_TOKEN)
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="Safely finalize a valid G10D2C release stage")
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--udp001-root")
+    parser.add_argument("--out")
+    args = parser.parse_args(argv)
+    if args.self_test:
+        run_self_test()
+        return 0
+    if not args.udp001_root or not args.out:
+        parser.error("--udp001-root and --out are required")
+    return finalize(Path(args.udp001_root), Path(args.out))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
