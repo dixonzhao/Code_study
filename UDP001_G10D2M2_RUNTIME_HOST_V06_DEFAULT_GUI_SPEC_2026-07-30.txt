@@ -1,0 +1,120 @@
+UDP001 G10D2-M2 — PORTABLE RUNTIME HOST v0.6 DEFAULT-GUI SPEC
+Date: 2026-07-30
+Status: MINIMAL SOURCE CORRECTION; ACCEPTED RELEASE FROZEN
+
+1. EVIDENCE AND SCOPE
+
+Accepted evidence:
+
+G10D2CD5D2 N-R1-C1-E1-G1-P1-H12-Z1-M1-X0 C-0
+G10D2CM1D1 N-E1-S1-A0-RC2-O0-SE309-L1-X0 C-0
+G10D2CM1D2-GUI-VISIBLE-NORMAL-CLOSE C-0
+
+Conclusion:
+
+- the portable package and all 12 hosted program self-tests pass;
+- the GUI payload, Tk runtime and explicit --run-gui path are healthy;
+- only the no-argument dispatcher is incomplete;
+- double-click starts the EXE with no arguments, so argparse exits RC2.
+
+Do not modify the accepted G10D2C_RELEASE_01 package during this node.
+
+2. COPILOT INPUT AND OUTPUT
+
+Provide Copilot exactly these two inputs:
+
+1. this specification;
+2. current company-side u001_portable_runtime_host_v0_5.py.
+
+Copilot must return exactly one complete file named:
+
+u001_portable_runtime_host_v0_6.py.txt
+
+Do not return a patch, excerpt, prose-only answer or a file named with a
+download suffix. Preserve v0.5 and create v0.6 as a new file.
+
+3. ONLY AUTHORIZED BEHAVIOR CHANGE
+
+When the Runtime Host receives zero user arguments, it must perform exactly
+the same action as:
+
+--run-gui
+
+The default portable-root resolution must remain identical to the existing
+explicit --run-gui implementation. Inject or normalize the default action
+before argparse rejects an empty argv.
+
+Recommended structure:
+
+def main(argv=None):
+    effective_argv = list(sys.argv[1:] if argv is None else argv)
+    if not effective_argv:
+        effective_argv = ["--run-gui"]
+    # continue through the existing parser and dispatcher
+
+Adapt this to the actual v0.5 structure; do not create a second GUI path.
+
+4. REQUIRED VERSION AND CONTRACT UPDATE
+
+- PROGRAM_NAME = "u001_portable_runtime_host_v0_6.py"
+- PROGRAM_VERSION = "0.6"
+- SELFTEST_TOKEN = "U001-PORTABLE-HOST-V06-SELFTEST-PASS-26"
+- contract Version = "0.6"
+- ApprovedPrograms, DefaultGUI, ProgramDirectory and existing explicit
+  DispatchModes remain unchanged;
+- no_argument_gui is an alias/default policy, not a new hosted-program mode.
+
+5. BEHAVIOR THAT MUST NOT CHANGE
+
+Preserve exactly:
+
+- the 12-program allowlist and order;
+- DEFAULT_GUI_NAME = u001_data_preparation_workbench_gui_v0_4a.py;
+- --self-test;
+- --list-programs;
+- --host-program <path> -- [args];
+- direct-script hosted dispatch;
+- --run-gui [--portable-root <root>];
+- --hosted-self-test-all [--portable-root <root>];
+- portable-root derivation for frozen and source execution;
+- approved-path security and rejection behavior;
+- sys.argv, cwd and sys.path setup/restoration;
+- SystemExit propagation;
+- no external-Python fallback;
+- no U001 data logic inside the Host.
+
+6. SELF-TEST
+
+Increase the deterministic source self-test to 26 checks. Add checks proving:
+
+- empty argv normalizes to the existing run-gui action;
+- explicit actions are not altered by normalization;
+- the new version/name/token/contract are exact.
+
+Source self-test final line:
+
+U001-PORTABLE-HOST-V06-SELFTEST-PASS-26
+
+Self-test must not open a real GUI.
+
+7. COMPANY-SIDE EXECUTION
+
+Save Copilot output after removing only the final .txt as:
+
+UDP001\04_TEMP\u001_portable_runtime_host_v0_6.py
+
+Keep the independent Gate downloaded with this specification as:
+
+UDP001\04_TEMP\u001_g10d2m2_runtime_host_default_gui_gate_v0_1.py
+
+From C-CODE Windows CMD run:
+
+python .\UDP001\04_TEMP\u001_portable_runtime_host_v0_6.py --self-test
+
+python .\UDP001\04_TEMP\u001_g10d2m2_runtime_host_default_gui_gate_v0_1.py --self-test
+
+python .\UDP001\04_TEMP\u001_g10d2m2_runtime_host_default_gui_gate_v0_1.py --host .\UDP001\04_TEMP\u001_portable_runtime_host_v0_6.py
+
+Return only the final G10D2M2CG1 line. Do not rebuild the EXE until the
+independent Gate returns C-0.
+
