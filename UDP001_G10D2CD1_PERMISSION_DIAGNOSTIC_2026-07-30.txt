@@ -1,0 +1,49 @@
+UDP001 G10D2C-D1 — UNEXPECTED PermissionError DIAGNOSTIC
+Date: 2026-07-30
+Status: DIAGNOSE ONLY; BUILDER/HOST PATCH FORBIDDEN
+
+Observed result:
+
+U001PK04-ERROR:UNEXPECTED:PermissionError
+C-7
+
+This error does not identify which filesystem operation failed. Do not ask
+Copilot to patch Builder v0.7, Runtime Host v0.5, the Gate or U001 programs.
+
+Download:
+
+u001_g10d2cd1_permission_diagnostic_v0_1.py.txt
+
+Remove only the final .txt and place the Python file in:
+
+C-CODE\UDP001\04_TEMP
+
+From C-CODE in Windows CMD run one line:
+
+python .\UDP001\04_TEMP\u001_g10d2cd1_permission_diagnostic_v0_1.py --udp001-root .\UDP001 --out .\UDP001\04_TEMP\G10D2C_RELEASE_01
+
+The diagnostic does not rerun PyInstaller and does not modify Builder/Host or
+existing build artifacts. It only:
+
+- identifies the newest PK04 build workspace;
+- infers the last completed build stage;
+- checks whether output/EXE/manifest/ZIP exist;
+- scans existing small logs for permission clues;
+- creates, renames and removes its own tiny probe file/directory in 04_TEMP;
+- writes one local diagnostic report in 04_TEMP.
+
+Return only:
+
+1. the `G10D2CD1 N-... C-0` capsule;
+2. the optional `H-...` line if one is printed.
+
+Do not return the full report unless ChatGPT explicitly requests it.
+
+After return, ChatGPT will decide among:
+
+- path/output collision correction;
+- antivirus/file-lock wait and retry;
+- PyInstaller stage correction;
+- ZIP/final promote correction;
+- Builder v0.7A patch with a new independent Gate.
+
