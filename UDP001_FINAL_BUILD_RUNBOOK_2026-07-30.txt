@@ -1,0 +1,58 @@
+UDP001 FINAL BUILD RUNBOOK
+Date: 2026-07-30
+Status: SINGLE AUTHORIZED REAL BUILD
+
+Accepted source Gates:
+
+G10D2M2CG1-PASS A12-N1-E1-R2-X0 C-0
+G10D2M3CG1-PASS H06-B08-D1-P1-R1-X0 C-0
+
+Do not modify the old accepted/recovery output G10D2C_RELEASE_01. The final
+build uses a new output directory:
+
+UDP001\04_TEMP\U001_FINAL_RELEASE
+
+Required company-side files already in UDP001\04_TEMP:
+
+- u001_portable_runtime_host_v0_6.py
+- u001_portable_host_package_builder_v0_8.py
+- u001_final_release_acceptance_v0_1.py
+
+From C-CODE Windows CMD, first confirm the final output is absent:
+
+if exist .\UDP001\04_TEMP\U001_FINAL_RELEASE (echo STOP-OUTPUT-EXISTS) else (echo OUTPUT-READY)
+
+Continue only after OUTPUT-READY. Run the one real build:
+
+python .\UDP001\04_TEMP\u001_portable_host_package_builder_v0_8.py --build --udp001-root .\UDP001 --host-source .\UDP001\04_TEMP\u001_portable_runtime_host_v0_6.py --out .\UDP001\04_TEMP\U001_FINAL_RELEASE
+
+Required builder success capsule:
+
+U001PK05
+N-R1-D1-P12-C4-H1-B1-E1-S12-Z1-M1-Q1-X0
+C-0
+
+If the build fails, return only its U001PK05-ERROR line and stop. Do not patch,
+delete or rebuild independently.
+
+After builder C-0, run the independent final acceptance:
+
+python .\UDP001\04_TEMP\u001_final_release_acceptance_v0_1.py --release-root .\UDP001\04_TEMP\U001_FINAL_RELEASE
+
+Required acceptance result:
+
+UDP001-FINAL-ACCEPT P12-C4-H12-Z1-D1-N1-X0 C-0
+
+After acceptance C-0, test true one-click/no-argument behavior:
+
+start "" ".\UDP001\04_TEMP\U001_FINAL_RELEASE\U001_Portable_v0_2\UDP001\00_LAUNCHER\U001_Workbench.exe"
+
+Confirm the GUI becomes visible, v0.4a controls are present, and normal close
+works. Return exactly two lines when complete:
+
+UDP001-FINAL-ACCEPT P12-C4-H12-Z1-D1-N1-X0 C-0
+UDP001-FINAL-GUI C-0
+
+These two lines end implementation and enter UDP001-CLOSEOUT. No additional
+Gate family or nested diagnostic node will be introduced.
+
