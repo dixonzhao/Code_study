@@ -1,0 +1,19 @@
+UDP001 G10D2C-D5D1 — RELEASE AND GATE LOCATOR
+Date: 2026-07-30
+Status: READ ONLY
+
+Observed result:
+
+G10D2CD5 N-R0-E0-G0-P0-H0-Z0-M0-X1 K-RELEASE-OR-GATE C-7
+
+This is a preflight location failure, not an acceptance failure. D5 could not
+find either the expected copied-release structure, the exact Gate file, or both.
+
+Download u001_g10d2cd5d1_release_locator_v0_1.py.txt, remove only the final
+.txt and place it in UDP001\04_TEMP. From C-CODE Windows CMD run:
+
+python .\UDP001\04_TEMP\u001_g10d2cd5d1_release_locator_v0_1.py --udp001-root .\UDP001 --out .\UDP001\04_TEMP\G10D2C_RELEASE_01
+
+Return the complete G10D2CD5D1 line and every printed M1/M2/M3 line. The
+locator does not copy, rename, delete, patch, launch or execute the Gate.
+
