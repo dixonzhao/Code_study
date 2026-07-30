@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""Read-only probe of actual Builder/Host identity representation in final Manifest."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import tempfile
+from pathlib import Path
+
+
+PROGRAM_NAME = "u001_final_manifest_identity_probe_v0_1.py"
+PROGRAM_VERSION = "0.1"
+SELFTEST_TOKEN = "UDP001-FINAL-MANIFEST-PROBE-SELFTEST-PASS-16"
+PACKAGE_NAME = "U001_Portable_v0_2"
+BUILDER_NAME = "u001_portable_host_package_builder_v0_8.py"
+HOST_NAME = "u001_portable_runtime_host_v0_6.py"
+REPORT_NAME = "UDP001_FINAL_MANIFEST_IDENTITY_REPORT.txt"
+
+
+def safe_token(value: object, limit: int = 160) -> str:
+    text = str(value)
+    cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in text)
+    return cleaned[:limit] or "EMPTY"
+
+
+def flatten(value: object, path: str = "ROOT") -> list[tuple[str, object]]:
+    result = []
+    if isinstance(value, dict):
+        for key in sorted(value, key=lambda item: str(item)):
+            result.extend(flatten(value[key], f"{path}.{key}"))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            result.extend(flatten(item, f"{path}[{index}]"))
+    else:
+        result.append((path, value))
+    return result
+
+
+def identity_candidates(leaves: list[tuple[str, object]]) -> list[tuple[str, object]]:
+    terms = ("builder", "host", "runtime", "source", "version")
+    selected = []
+    for path, value in leaves:
+        searchable = (path + " " + str(value)).lower()
+        if any(term in searchable for term in terms):
+            selected.append((path, value))
+    def priority(item: tuple[str, object]) -> tuple[int, str]:
+        text = (item[0] + " " + str(item[1])).lower()
+        if "builder" in text:
+            rank = 0
+        elif "runtime" in text or "host" in text:
+            rank = 1
+        else:
+            rank = 2
+        return rank, item[0]
+    return sorted(selected, key=priority)
+
+
+def has_version(candidates: list[tuple[str, object]], term: str, version: str) -> int:
+    for path, value in candidates:
+        text = (path + " " + str(value)).lower()
+        if term in text and str(value).strip() == version:
+            return 1
+    return 0
+
+
+def has_sha(candidates: list[tuple[str, object]], term: str) -> int:
+    for path, value in candidates:
+        text = (path + " " + str(value)).lower()
+        candidate = str(value).strip()
+        if term in text and len(candidate) == 64:
+            try:
+                int(candidate, 16)
+                return 1
+            except ValueError:
+                pass
+    return 0
+
+
+def probe(release_root: Path) -> int:
+    root = release_root.resolve()
+    manifest_path = root / PACKAGE_NAME / "_internal" / "evidence" / "u001_portable_host_package_manifest.json"
+    if not manifest_path.is_file():
+        print("FINAL-MANIFEST N-R0-K0-B0-V0-S0-H0-W0-T0-L0-P0-X1 C-7")
+        return 7
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        print("FINAL-MANIFEST N-R1-K0-B0-V0-S0-H0-W0-T0-L0-P0-X1 C-7")
+        return 7
+    serialized = json.dumps(manifest, ensure_ascii=False, sort_keys=True)
+    leaves = flatten(manifest)
+    candidates = identity_candidates(leaves)
+    builder_literal = int(BUILDER_NAME in serialized)
+    builder_version = has_version(candidates, "builder", "0.8")
+    builder_sha = has_sha(candidates, "builder")
+    host_literal = int(HOST_NAME in serialized)
+    host_version = int(
+        has_version(candidates, "host", "0.6") or has_version(candidates, "runtime", "0.6")
+    )
+    host_sha = int(has_sha(candidates, "host") or has_sha(candidates, "runtime"))
+    legacy = int(any("0.5" == str(value).strip() and ("host" in path.lower() or "runtime" in path.lower()) for path, value in candidates))
+    report = [
+        "UDP001 FINAL MANIFEST IDENTITY REPORT",
+        f"ManifestSHA256={hashlib.sha256(manifest_path.read_bytes()).hexdigest()}",
+        f"TopLevelKeys={','.join(sorted(str(key) for key in manifest))}",
+        f"BuilderLiteral={builder_literal}",
+        f"BuilderVersion08={builder_version}",
+        f"BuilderSHA={builder_sha}",
+        f"HostLiteral={host_literal}",
+        f"HostVersion06={host_version}",
+        f"HostSHA={host_sha}",
+        f"LegacyHost05={legacy}",
+        "",
+        "IDENTITY CANDIDATES",
+    ]
+    report.extend(f"{path}={value}" for path, value in candidates)
+    report_path = root.parent / REPORT_NAME
+    try:
+        report_path.write_text("\n".join(report) + "\n", encoding="utf-8")
+        report_ok = 1
+    except OSError:
+        report_ok = 0
+    print(
+        f"FINAL-MANIFEST N-R1-K{len(manifest) if isinstance(manifest, dict) else 0}"
+        f"-B{builder_literal}-V{builder_version}-S{builder_sha}"
+        f"-H{host_literal}-W{host_version}-T{host_sha}-L{legacy}-P{report_ok}-X0 C-0"
+    )
+    for index, (path, value) in enumerate(candidates[:3], 1):
+        print(f"M{index}-{safe_token(path)}-{safe_token(value)}")
+    return 0
+
+
+def run_self_test() -> None:
+    sample = {
+        "Builder": {"Version": "0.8", "SHA256": "a" * 64},
+        "RuntimeHost": {"Version": "0.6", "SHA256": "b" * 64},
+    }
+    leaves = flatten(sample)
+    candidates = identity_candidates(leaves)
+    checks = (
+        PROGRAM_VERSION == "0.1",
+        PROGRAM_NAME.endswith("v0_1.py"),
+        SELFTEST_TOKEN.endswith("PASS-16"),
+        PACKAGE_NAME.endswith("v0_2"),
+        BUILDER_NAME.endswith("v0_8.py"),
+        HOST_NAME.endswith("v0_6.py"),
+        len(leaves) == 4,
+        len(candidates) == 4,
+        has_version(candidates, "builder", "0.8") == 1,
+        has_sha(candidates, "builder") == 1,
+        has_version(candidates, "host", "0.6") == 1,
+        has_sha(candidates, "host") == 1,
+        safe_token("a/b c") == "a_b_c",
+        len(hashlib.sha256(b"x").hexdigest()) == 64,
+        REPORT_NAME.endswith(".txt"),
+        isinstance(sample, dict),
+    )
+    if sum(bool(item) for item in checks) != 16:
+        raise AssertionError("SELFTEST_COUNT")
+    print(SELFTEST_TOKEN)
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="Probe final Manifest tool identity fields")
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--release-root")
+    args = parser.parse_args(argv)
+    if args.self_test:
+        run_self_test()
+        return 0
+    if not args.release_root:
+        parser.error("--release-root is required")
+    return probe(Path(args.release_root))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
