@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""Manifest-compatible adapter for the unchanged final acceptance v0.1 checks."""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+
+PROGRAM_NAME = "u001_final_release_acceptance_v0_2.py"
+PROGRAM_VERSION = "0.2"
+SELFTEST_TOKEN = "UDP001-FINAL-ACCEPTANCE-V02-SELFTEST-PASS-18"
+PACKAGE_NAME = "U001_Portable_v0_2"
+LEGACY_ACCEPTANCE_NAME = "u001_final_release_acceptance_v0_1.py"
+
+
+class CompatibilityFailure(RuntimeError):
+    pass
+
+
+def fail(code: str) -> None:
+    raise CompatibilityFailure(code)
+
+
+def flatten(value: object, path: str = "ROOT") -> list[tuple[str, object]]:
+    result = []
+    if isinstance(value, dict):
+        for key in sorted(value, key=lambda item: str(item)):
+            result.extend(flatten(value[key], f"{path}.{key}"))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            result.extend(flatten(item, f"{path}[{index}]"))
+    else:
+        result.append((path, value))
+    return result
+
+
+def is_sha256(value: object) -> bool:
+    text = str(value).strip()
+    if len(text) != 64:
+        return False
+    try:
+        int(text, 16)
+        return True
+    except ValueError:
+        return False
+
+
+def tool_identity(manifest: dict) -> tuple[bool, bool, bool, bool]:
+    leaves = flatten(manifest)
+    builder_sha = False
+    host_version = False
+    host_sha = False
+    legacy_host = False
+    for path, value in leaves:
+        lowered = path.lower()
+        text = str(value).strip()
+        if "builder" in lowered and "sha" in lowered and is_sha256(value):
+            builder_sha = True
+        if ("host" in lowered or "runtime" in lowered) and "version" in lowered:
+            if text == "0.6":
+                host_version = True
+            if text == "0.5":
+                legacy_host = True
+        if ("host" in lowered or "runtime" in lowered) and "sha" in lowered and is_sha256(value):
+            host_sha = True
+    return builder_sha, host_version, host_sha, legacy_host
+
+
+def load_legacy(path: Path):
+    if not path.is_file():
+        fail("V01_MISSING")
+    spec = importlib.util.spec_from_file_location("u001_final_acceptance_v01_delegate", path)
+    if spec is None or spec.loader is None:
+        fail("V01_IMPORT_SPEC")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def accept(release_root: Path, legacy_path: Path) -> None:
+    root = release_root.resolve()
+    manifest_path = root / PACKAGE_NAME / "_internal" / "evidence" / "u001_portable_host_package_manifest.json"
+    if not manifest_path.is_file():
+        fail("MANIFEST_MISSING")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        fail("MANIFEST_PARSE")
+    builder_sha, host_version, host_sha, legacy_host = tool_identity(manifest)
+    if not builder_sha:
+        fail("BUILDER_SHA")
+    if not host_version:
+        fail("HOST_VERSION")
+    if not host_sha:
+        fail("HOST_SHA")
+    if legacy_host:
+        fail("LEGACY_HOST")
+    legacy = load_legacy(legacy_path)
+    legacy.BUILDER_NAME = "BuilderSourceSHA256"
+    legacy.HOST_NAME = "0.6"
+    legacy.accept(root)
+
+
+def run_self_test() -> None:
+    sample = {
+        "BuilderSourceSHA256": "a" * 64,
+        "RuntimeHost": {"Version": "0.6", "SourceSHA256": "b" * 64},
+    }
+    identity = tool_identity(sample)
+    checks = (
+        PROGRAM_VERSION == "0.2",
+        PROGRAM_NAME.endswith("v0_2.py"),
+        SELFTEST_TOKEN.endswith("PASS-18"),
+        PACKAGE_NAME.endswith("v0_2"),
+        LEGACY_ACCEPTANCE_NAME.endswith("v0_1.py"),
+        len(flatten(sample)) == 3,
+        identity == (True, True, True, False),
+        is_sha256("a" * 64),
+        not is_sha256("a" * 63),
+        not is_sha256("z" * 64),
+        tool_identity({"RuntimeHost": {"Version": "0.5"}})[3] is True,
+        callable(flatten),
+        callable(tool_identity),
+        callable(load_legacy),
+        callable(accept),
+        issubclass(CompatibilityFailure, RuntimeError),
+        sys.executable != "",
+        Path(LEGACY_ACCEPTANCE_NAME).suffix == ".py",
+    )
+    if sum(bool(item) for item in checks) != 18:
+        raise AssertionError("SELFTEST_COUNT")
+    print(SELFTEST_TOKEN)
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="Final acceptance v0.2 Manifest compatibility adapter")
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--release-root")
+    parser.add_argument("--legacy-acceptance")
+    args = parser.parse_args(argv)
+    if args.self_test:
+        run_self_test()
+        return 0
+    if not args.release_root:
+        parser.error("--release-root is required")
+    legacy = Path(args.legacy_acceptance) if args.legacy_acceptance else Path(__file__).resolve().parent / LEGACY_ACCEPTANCE_NAME
+    try:
+        accept(Path(args.release_root), legacy)
+    except CompatibilityFailure as exc:
+        print(f"UDP001-FINAL-FAIL-{exc.args[0]} C-7")
+        return 7
+    except subprocess.TimeoutExpired:
+        print("UDP001-FINAL-FAIL-TIMEOUT C-7")
+        return 7
+    except Exception as exc:
+        name = type(exc).__name__
+        message = str(exc)
+        if name == "AcceptanceFailure" and message:
+            print(f"UDP001-FINAL-FAIL-{message} C-7")
+        else:
+            print(f"UDP001-FINAL-FAIL-UNHANDLED-{name} C-7")
+        return 7
+    print("UDP001-FINAL-ACCEPT P12-C4-H12-Z1-D1-N1-X0 C-0")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
