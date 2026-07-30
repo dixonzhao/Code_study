@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""Independent Gate for Runtime Host v0.6 no-argument GUI default."""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+PROGRAM_NAME = "u001_g10d2m2_runtime_host_default_gui_gate_v0_1.py"
+PROGRAM_VERSION = "0.1"
+SELFTEST_TOKEN = "UDP001-G10D2M2-CG1-SELFTEST-PASS-18"
+HOST_NAME = "u001_portable_runtime_host_v0_6.py"
+HOST_VERSION = "0.6"
+HOST_TOKEN = "U001-PORTABLE-HOST-V06-SELFTEST-PASS-26"
+GUI_NAME = "u001_data_preparation_workbench_gui_v0_4a.py"
+PROGRAMS = (
+    "u001_foundation_core_v0_1.py",
+    "u001_selected_update_decoder_v0_1.py",
+    "u001_framecount_assignment_v0_1.py",
+    "u001_semantic_validity_classifier_v0_1.py",
+    "u001_framecount_view_builder_v0_1.py",
+    "u001_signal_cadence_bounded_hold_v0_1.py",
+    "u001_output_package_assembler_v0_3.py",
+    "u001_g8a_thin_orchestrator_v0_5.py",
+    "u001_auto_discovery_profile_builder_v0_2.py",
+    "u001_g10b_single_pass_discovery_engine_v0_5a.py",
+    "u001_discovery_controller_v0_2.py",
+    GUI_NAME,
+)
+FAKE_TOKEN = "G10D2M2-FAKE-DEFAULT-GUI-PASS"
+
+
+class GateFailure(RuntimeError):
+    pass
+
+
+def fail(code: str) -> None:
+    raise GateFailure(code)
+
+
+def run(command: list[str], cwd: Path, timeout: int = 90) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        command,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        shell=False,
+        check=False,
+    )
+
+
+def load_host(path: Path):
+    spec = importlib.util.spec_from_file_location("u001_runtime_host_v06_candidate", path)
+    if spec is None or spec.loader is None:
+        fail("IMPORT_SPEC")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def validate(host: Path) -> None:
+    host = host.resolve()
+    if not host.is_file() or host.name != HOST_NAME:
+        fail("HOST_IDENTITY")
+    source = host.read_text(encoding="utf-8-sig", errors="replace")
+    if "u001_data_preparation_workbench_gui_v0_3.py" in source:
+        fail("OLD_GUI_LITERAL")
+    source_selftest = run([sys.executable, str(host), "--self-test"], host.parent)
+    if source_selftest.returncode != 0 or HOST_TOKEN not in source_selftest.stdout:
+        fail("HOST_SELFTEST")
+    try:
+        module = load_host(host)
+    except GateFailure:
+        raise
+    except Exception as exc:
+        fail("HOST_IMPORT_" + type(exc).__name__)
+    if getattr(module, "PROGRAM_NAME", None) != HOST_NAME:
+        fail("PROGRAM_NAME")
+    if getattr(module, "PROGRAM_VERSION", None) != HOST_VERSION:
+        fail("PROGRAM_VERSION")
+    if getattr(module, "SELFTEST_TOKEN", None) != HOST_TOKEN:
+        fail("HOST_TOKEN")
+    if tuple(getattr(module, "APPROVED_PROGRAMS", ())) != PROGRAMS:
+        fail("ALLOWLIST")
+    if getattr(module, "DEFAULT_GUI_NAME", None) != GUI_NAME:
+        fail("DEFAULT_GUI")
+    contract_fn = getattr(module, "get_portable_host_contract", None)
+    if not callable(contract_fn):
+        fail("CONTRACT_API")
+    contract = contract_fn()
+    if contract.get("Version") != HOST_VERSION:
+        fail("CONTRACT_VERSION")
+    if tuple(contract.get("ApprovedPrograms", ())) != PROGRAMS:
+        fail("CONTRACT_PROGRAMS")
+    if contract.get("DefaultGUI") != GUI_NAME or contract.get("ProgramDirectory") != "01_PROGRAMS":
+        fail("CONTRACT_LAYOUT")
+    listed = run([sys.executable, str(host), "--list-programs"], host.parent)
+    observed = tuple(line.strip() for line in listed.stdout.splitlines() if line.strip() in PROGRAMS)
+    if listed.returncode != 0 or observed != PROGRAMS:
+        fail("LIST_PROGRAMS")
+    with tempfile.TemporaryDirectory(prefix="u001_g10d2m2cg1_") as td:
+        base = Path(td)
+        root = base / "UDP001"
+        temp_root = root / "04_TEMP"
+        program_root = root / "01_PROGRAMS"
+        temp_root.mkdir(parents=True)
+        program_root.mkdir(parents=True)
+        staged_host = temp_root / HOST_NAME
+        shutil.copy2(host, staged_host)
+        fake_gui = program_root / GUI_NAME
+        fake_gui.write_text(
+            "import sys\nprint('" + FAKE_TOKEN + "|' + '|'.join(sys.argv[1:]))\n",
+            encoding="utf-8",
+        )
+        no_argument = run([sys.executable, str(staged_host)], temp_root)
+        if no_argument.returncode != 0 or FAKE_TOKEN not in no_argument.stdout:
+            fail("NO_ARGUMENT_GUI")
+        explicit = run(
+            [sys.executable, str(staged_host), "--run-gui", "--portable-root", str(root)],
+            temp_root,
+        )
+        if explicit.returncode != 0 or FAKE_TOKEN not in explicit.stdout:
+            fail("EXPLICIT_GUI")
+        if no_argument.stdout.split("|", 1)[0].strip() != FAKE_TOKEN:
+            fail("NO_ARGUMENT_OUTPUT")
+
+
+def run_self_test() -> None:
+    checks = (
+        PROGRAM_VERSION == "0.1",
+        PROGRAM_NAME.endswith("v0_1.py"),
+        SELFTEST_TOKEN.endswith("PASS-18"),
+        HOST_NAME.endswith("v0_6.py"),
+        HOST_VERSION == "0.6",
+        HOST_TOKEN.endswith("PASS-26"),
+        len(PROGRAMS) == 12,
+        len(set(PROGRAMS)) == 12,
+        PROGRAMS[-1] == GUI_NAME,
+        GUI_NAME.endswith("v0_4a.py"),
+        "u001_data_preparation_workbench_gui_v0_3.py" not in PROGRAMS,
+        FAKE_TOKEN.endswith("PASS"),
+        callable(run),
+        callable(load_host),
+        callable(validate),
+        issubclass(GateFailure, RuntimeError),
+        sys.executable != "",
+        Path("x.py").suffix == ".py",
+    )
+    if sum(bool(item) for item in checks) != 18:
+        raise AssertionError("SELFTEST_COUNT")
+    print(SELFTEST_TOKEN)
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="Gate Runtime Host v0.6 default GUI dispatch")
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--host")
+    args = parser.parse_args(argv)
+    if args.self_test:
+        run_self_test()
+        return 0
+    if not args.host:
+        parser.error("--host is required")
+    try:
+        validate(Path(args.host))
+    except GateFailure as exc:
+        print(f"G10D2M2CG1-FAIL-{exc.args[0]} C-7")
+        return 7
+    except subprocess.TimeoutExpired:
+        print("G10D2M2CG1-FAIL-TIMEOUT C-7")
+        return 7
+    except Exception as exc:
+        print(f"G10D2M2CG1-FAIL-UNHANDLED-{type(exc).__name__} C-7")
+        return 7
+    print("G10D2M2CG1-PASS A12-N1-E1-R2-X0 C-0")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
