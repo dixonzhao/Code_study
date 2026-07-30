@@ -1,0 +1,436 @@
+U001 DATA PREPARATION WORKBENCH
+用户操作手册 / USER OPERATION MANUAL
+版本：1.0
+日期：2026-07-31
+适用产品：U001 Portable v0.2
+入口程序：U001_Workbench.exe
+对象：第一次拿到程序、不了解内部 Gate 的工程人员
+
+======================================================================
+0. 一句话理解 U001
+======================================================================
+
+U001 把：
+
+  MATLAB-format Raw CAN CSV + 两个 DBC
+
+转换成：
+
+  按可信 FrameCount 对齐、保留单位/有效性/真实更新/保持年龄/质量证据，
+  可供 U002 自动分析的标准数据包。
+
+U001 是“数据准备工具”，不是异常判断工具。
+
+U001 会做：
+
+- 发现原始 CAN 中实际存在且能被 DBC 解码的信号；
+- 将 Raw CAN byte 解码为物理量；
+- 保存真实 update 的来源和顺序；
+- 使用 Channel 2 / CAN ID 0x620 / FrameCount 建立视频同步域；
+- 区分 float、integer、boolean、enum、bitfield 等语义；
+- 区分真实零、无更新、无效默认值、缺失值和被保持的旧值；
+- 生成 FrameCount 级数据、信号目录、质量报告和运行身份记录；
+- 把大量信号分批输出，供 U002 自动筛查。
+
+U001 不会做：
+
+- Camera 1 / Camera 3 连续信号拼接；
+- 决定 Camera 和 Radar 谁是真值；
+- 计算 discrepancy、baseline、residual 或 anomaly score；
+- 生成最终异常事件；
+- 判断 root cause；
+- 进行 SysID；
+- 做视频人工复核。
+
+这些分别属于 U002 和 U003 / Reviewer。
+
+======================================================================
+1. 运行前准备
+======================================================================
+
+1.1 保持整个程序文件夹完整
+
+U001 是 one-folder portable package。不要只复制 EXE，也不要移动
+_internal、01_PROGRAMS、02_CONTROLS 等内部文件。
+
+正式入口示例：
+
+  U001_Portable_v0_2\UDP001\00_LAUNCHER\U001_Workbench.exe
+
+双击 U001_Workbench.exe 即可启动。正常使用不需要安装 Python，也不需要
+理解内部 Gate。
+
+1.2 建议的磁盘和电脑条件
+
+- Windows 公司电脑；
+- 保持便携包完整；
+- 运行期间不要移动程序或 Case 文件夹；
+- 预留至少 25 GiB 可用空间；
+- 第一次只做 10,000 source rows 的 smoke run；
+- smoke run 成功后再做 full-source run。
+
+参考公司电脑上，全源 discovery 曾约耗时 35 分钟。不同文件大小、硬盘、
+杀毒软件和公司策略会改变耗时。程序无响应或持续增长内存时，不要仅凭等待
+判断成功，应按第 7 节处理。
+
+1.3 Case 的三个固定输入别名
+
+每个 Case 的只读输入目录必须包含：
+
+  <CaseRoot>\00_SOURCE-READONLY\CANDump.csv
+  <CaseRoot>\00_SOURCE-READONLY\DBC1.dbc
+  <CaseRoot>\00_SOURCE-READONLY\DBC2.dbc
+
+含义：
+
+- CANDump.csv：原始 MATLAB-format CAN CSV；
+- DBC1.dbc：Channel 1 对应 DBC；
+- DBC2.dbc：Channel 2 对应 DBC。
+
+这些是接口别名，不要求公司原文件原本就叫这个名字。使用 New Case / Workspace
+建立 Case 时，由 GUI 负责把用户选择的文件复制成固定别名。源文件本身不修改。
+
+必须确认：DBC1/DBC2 的 Channel 分配正确。放反 DBC 可能仍然产生文件，但信号
+定义会错误，因此不属于可接受运行。
+
+1.4 当前固定 FrameCount 定义
+
+当前项目唯一可信的视频同步键：
+
+  Channel = 2
+  CAN ID = 0x620
+  Signal = FrameCount
+
+FrameCount 约为 20 Hz 视频域标号，不是高精度 CAN timestamp。不要在 GUI 中把
+0x620 下其他 signal 当成 FrameCount，也不要用 DateTime / Time[us] 替代它。
+
+======================================================================
+2. 第一次标准运行：推荐操作
+======================================================================
+
+标准流程由 GUI 的 AUTO_DISCOVERY (Recommended) 页面完成。用户无需逐个选择
+700 多个变量。
+
+2.1 启动
+
+1. 双击 U001_Workbench.exe。
+2. 等待 GUI 出现。
+3. 进入 AUTO_DISCOVERY (Recommended)。
+
+如果 GUI 没有出现，不要反复双击；转到第 7.2 节。
+
+2.2 新建或选择 Case
+
+新 Case：
+
+1. 进入 New Case / Workspace。
+2. 指定新的 Case 名称和位置。
+3. 分别选择 Raw CAN CSV、Channel 1 DBC、Channel 2 DBC。
+4. 让 GUI 建立 00_SOURCE-READONLY 和固定别名。
+5. 确认三个文件存在且非空。
+
+已有 Case：直接选择 CaseRoot。不要把 00_SOURCE-READONLY 本身当成 CaseRoot；
+CaseRoot 是它的上一级。
+
+2.3 AUTO_DISCOVERY 主要字段
+
+必须确认：
+
+- UDP001 Root：便携包中的 UDP001 根目录；
+- Case Root：包含 00_SOURCE-READONLY 的 Case 根目录；
+- Controller Path：应指向正式 u001_discovery_controller_v0_2.py；
+- Run ID：本次运行的唯一名称；
+- Source ID：默认 SOURCE_001；
+- Segment ID：默认 FULL_SOURCE；
+- Frame Key：只读显示应为 Channel 2 / 0x620 / FrameCount。
+
+建议第一次保持其他正式默认值：
+
+- Chunk Size = 10000
+- Batch Size = 32
+- Maximum Assignment Age Rows = 200
+- Maximum RSS MiB = 2048
+- Update Buffer Rows = 256
+- Frame Buffer Rows = 32
+- Memory Check Interval Rows = 1000
+- Minimum Free GiB = 25
+
+不要为了“更快”随意增大 buffer、batch 或 memory 参数。它们属于容量控制，不是
+分析精度参数。
+
+2.4 第一次先做 10k smoke run
+
+设置：
+
+  Maximum Source Rows = 10000
+
+选择一个从未使用过的 Run ID，例如：
+
+  RUN_001_SMOKE10K
+
+然后按：
+
+  Execute New Run
+
+GUI 会自动按固定顺序执行：
+
+1. Controller Self-test
+2. Create Request
+3. Preflight
+4. Run Request
+5. Validate Response
+
+不要在运行中手动启动内部程序，也不要同时重复按按钮。
+
+2.5 成功标准
+
+成功时 GUI 最终显示：
+
+  Ready for U002
+
+日志链应完成：
+
+  U001-G10C1R-SELFTEST-PASS-40
+  G10C1-REQUEST-CREATED C-0
+  G10C1-PREFLIGHT-PASS C-0
+  G10C1-RUN-PASS C-0
+  G10C1-VALIDATE-PASS C-0
+
+普通用户只需记住：最终必须是 Ready for U002 / C-0。仅看到某个 CSV 或某个
+中间 PASS，不等于标准运行完成。
+
+2.6 检查输出
+
+按 Open Response Folder。正式完成目录结构应包含：
+
+  <RunRoot>\00_REQUEST\
+  <RunRoot>\01_G1_CATALOG\
+  <RunRoot>\02_PROFILE_CONFIG\
+  <RunRoot>\03_DISCOVERY_DATA\
+  <RunRoot>\04_RESPONSE\
+
+04_RESPONSE 中应有：
+
+  u001_discovery_response_manifest.json
+  u001_discovery_completion_capsule.txt
+
+给 U002 的入口不是“最大的 CSV”，也不是“修改时间最新的文件”。U002 应从
+response manifest 开始，按其中声明的相对路径、hash、row count 读取数据。
+
+2.7 再做 full-source run
+
+10k smoke run 通过后：
+
+1. 保留 smoke run，不删除、不覆盖；
+2. 选择新的 Run ID，例如 RUN_002_FULL；
+3. 设置 Maximum Source Rows = 0；
+4. 0 表示读取完整 source；
+5. 再按 Execute New Run；
+6. 等待 Ready for U002；
+7. 记录运行耗时、warnings 和 Response 路径。
+
+绝对不要把 0 误解为“处理 0 行”。
+
+======================================================================
+3. Controlled Profile 模式什么时候用
+======================================================================
+
+AUTO_DISCOVERY 用于第一次面对大量信号时自动发现和批量筛查。
+
+Controlled Profile 用于：
+
+- U002 已筛出一组候选 signal；
+- 工程师已确认 signal 的角色、单位、validity 和 hold policy；
+- 需要稳定复现同一组数据；
+- 需要正式 baseline、event 或后续 dynamic analysis。
+
+正确闭环是：
+
+  AUTO_DISCOVERY
+  -> U002 自动筛查
+  -> 工程师批准 shortlist
+  -> 新的 versioned Controlled Profile
+  -> U001 重跑
+  -> 正式 U002 分析
+
+不要直接修改一个已接受 Profile，也不要让 U002 修改 U001 内部 control CSV。
+
+======================================================================
+4. U001 输出应该怎样理解
+======================================================================
+
+U001 同时服务机器分析和人工确认，因此有两种常见形状。
+
+4.1 广域 discovery 输出
+
+用于 700+ signal 自动筛查。信号按确定的 batch/shard 分开，避免生成一张超宽、
+占用巨大内存的表。U002 按 manifest 逐 shard 读取。
+
+4.2 标准六文件包
+
+Controlled Profile 或标准 Data Contract package 包含：
+
+D1 u001_decoded_updates.csv
+   真实 update 长表。用于追溯和未来 update-domain / SysID。
+
+D2 u001_frame_values.csv
+   一行一个 FrameCount 的机器分析主表。
+
+D3 u001_signal_catalog.csv
+   信号名称、CAN ID、单位、类型、validity、aggregation、hold 等定义。
+
+D4 u001_quality_report.csv
+   全局和逐信号质量检查；有 blocking error 时 U002 必须停止。
+
+D5 u001_run_manifest.json
+   运行身份、输入/配置 hash、版本、输出清单和 warnings。
+
+D6 u001_review_view.csv
+   人工查看用窄表；不是完整 U002 输入。
+
+普通用户不要用 Excel 打开所有大文件来判断是否成功。优先看 GUI 最终状态、
+completion capsule、response manifest 和 quality report。
+
+======================================================================
+5. 运行中可以做和不能做的事
+======================================================================
+
+可以：
+
+- 查看 GUI 日志和进度；
+- 使用 Cancel 中止明显错误的运行；
+- 中止后保留 incomplete 目录给维护人员；
+- 为下一次运行创建新的 Run ID；
+- 运行完成后打开 Response Folder；
+- 复制整个完成 Run 供 U002 只读使用。
+
+不能：
+
+- 修改 00_SOURCE-READONLY；
+- 覆盖已有 Run ID；
+- 删除失败证据后声称成功；
+- 手动把 blank/NaN 填成 0；
+- 对 measurement 使用无限 forward fill；
+- 按文件修改时间选择“最新输出”；
+- 把 partial output 给 U002；
+- 修改输出 CSV 后继续使用原 manifest；
+- 在 U001 中加入 Camera stitching、baseline 或 anomaly logic。
+
+======================================================================
+6. 如何向别人用一分钟解释 U001
+======================================================================
+
+可以这样说明：
+
+“U001 是 Camera–Radar 分析链的统一数据准备工作台。它读取原始 CAN dump 和
+两个 DBC，自动发现可解码的信号，把真实 update 解码后分配到可信的 FrameCount
+视频域，并显式记录单位、有效性、无更新、保持年龄和质量证据。它输出机器分析
+用的分片或标准六文件包。U001 不判断异常；U002 负责分析和候选生成，U003 负责
+视频联合复核。这样后续结果可以追溯到原始 update、配置和运行身份，而不是依赖
+Excel 手工清洗或无限 forward fill。”
+
+======================================================================
+7. 普通用户故障处理
+======================================================================
+
+7.1 Execute New Run 拒绝开始
+
+常见原因：Run ID 已存在，或 request/preflight/response/incomplete 路径已存在。
+
+处理：
+
+- 不要覆盖；
+- 使用新的 Run ID；
+- 如果旧运行需要保留，交给维护人员归档；
+- 不要为了继续而手工删除不明目录。
+
+7.2 双击后 GUI 不出现
+
+1. 等待一次，不要连续双击；
+2. 确认整个 portable folder 完整；
+3. 确认没有只移动 EXE；
+4. 用 CMD 运行：
+
+   .\U001_Portable_v0_2\UDP001\00_LAUNCHER\U001_Workbench.exe --self-test
+
+5. 把最后一条错误和 C-7 交给维护人员。
+
+不要自行安装 pandas 或复制 tkinter 文件到 release 中。
+
+7.3 Preflight 失败
+
+优先检查：
+
+- CaseRoot 是否选对；
+- 00_SOURCE-READONLY 下三个固定别名是否存在且非空；
+- DBC1 / DBC2 是否放对 Channel；
+- 磁盘空间是否达到 Minimum Free GiB；
+- Frame Key 是否仍是 CH2 / 0x620 / FrameCount；
+- Run ID 对应输出是否已经存在；
+- 文件是否在运行前被替换，导致 request fingerprint 不一致。
+
+7.4 Run Request 失败或被取消
+
+- 不要把 incomplete 目录交给 U002；
+- 不要删除 incomplete 证据；
+- 记录失败 stage、C-7 和最多三条短 memo；
+- 交给维护人员按“维护与故障排查手册”定位。
+
+7.5 Full run 太慢
+
+- 先确认 10k smoke 是否通过；
+- 不要随意开四个相同进程；
+- 不要任意扩大 buffer；
+- v0.2 优先正确性、可追溯性和有界内存；
+- 只有测量证明是实际瓶颈时才允许性能修改。
+
+7.6 输出有 CSV，但 GUI 没显示 Ready for U002
+
+视为失败。U002 不得消费。
+
+======================================================================
+8. 每次正式运行应留下的最小记录
+======================================================================
+
+- Dataset / Case 名称；
+- Run ID；
+- Processing Mode；
+- Maximum Source Rows；
+- Source ID / Segment ID；
+- Frame Key；
+- Controller / U001 version；
+- start/end time 和耗时；
+- 最终 C-0 / C-7；
+- Response Root；
+- warnings 摘要；
+- 是否交付 U002。
+
+成功记录示例：
+
+  U001_RUN_COMPLETE
+  Dataset=<CaseName>
+  RunId=RUN_002_FULL
+  Mode=AUTO_DISCOVERY
+  MaxSourceRows=0
+  FrameKey=CH2/0x620/FrameCount
+  ReadyForU002=1
+  CompletionCode=0
+
+======================================================================
+9. 当前正式状态
+======================================================================
+
+U001 Portable v0.2 已冻结为正式 baseline。
+
+接受证据：
+
+  UDP001-FINAL-ACCEPT P12-C4-H12-Z1-D1-N1-X0 C-0
+  UDP001-FINAL-GUI C-0
+
+只有以下情况允许重开 U001：
+
+1. 可复现的 U001 defect；
+2. U002 证明存在 Data Contract 接口阻塞；
+3. 经批准且证明语义等价的性能优化。
+
+END OF USER OPERATION MANUAL
