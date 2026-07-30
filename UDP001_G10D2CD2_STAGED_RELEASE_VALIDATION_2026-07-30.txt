@@ -1,0 +1,47 @@
+UDP001 G10D2C-D2 — VALIDATE COMPLETED STAGED RELEASE
+Date: 2026-07-30
+Status: READ-ONLY VALIDATION; NO REBUILD; NO PROMOTION
+
+Authoritative diagnostic:
+
+G10D2CD1 N-R1-S6-O0-E1-M1-Z1-W1-D1-A0-RO0-L257-Q1583402-P1-X0 C-0
+
+Interpretation:
+
+- newest PK04 workspace exists;
+- build reached Stage 6;
+- Runtime EXE, manifest and ZIP exist;
+- requested output was not promoted;
+- controlled file/directory write and rename are healthy;
+- no read-only file or permission-log clue was found;
+- the failure occurred after ZIP creation, at the final promote boundary.
+
+Do not rebuild. Do not patch Builder v0.7 or Host v0.5.
+
+Download these files if they are not already in UDP001\04_TEMP:
+
+1. u001_g10d2c_portable_release_acceptance_gate_v0_1.py.txt
+2. u001_g10d2cd2_staged_release_validator_v0_1.py.txt
+
+Remove only the final .txt. From C-CODE Windows CMD run:
+
+python .\UDP001\04_TEMP\u001_g10d2cd2_staged_release_validator_v0_1.py --udp001-root .\UDP001
+
+The wrapper automatically locates the newest completed PK04 release_stage and
+calls the original independent G10D2C Gate against it. The Gate will execute
+the frozen hosted self-tests, so it may take several minutes.
+
+The wrapper is read-only except for its own stdout/stderr evidence files under
+04_TEMP. It does not copy, rename, delete or promote the staged package.
+
+Success return:
+
+G10D2CD2 N-R1-S1-G1-E0-X0 C-0
+
+Failure return:
+
+G10D2CD2 N-R1-S1-G0-E<code>-X0 K-<reason> C-7
+
+Return only the single G10D2CD2 line. After C-0, ChatGPT will issue a separate
+safe-copy finalizer instead of repeating the full build.
+
