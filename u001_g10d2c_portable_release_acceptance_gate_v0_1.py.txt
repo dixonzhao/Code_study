@@ -1,0 +1,290 @@
+#!/usr/bin/env python3
+"""Read-only independent acceptance gate for a G10D2C portable release."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import subprocess
+import sys
+import zipfile
+from pathlib import Path, PurePosixPath
+
+
+GATE_NAME = "u001_g10d2c_portable_release_acceptance_gate_v0_1.py"
+GATE_VERSION = "0.1"
+SELFTEST_TOKEN = "UDP001-G10D2C-CG1-SELFTEST-PASS-20"
+PACKAGE_NAME = "U001_Portable_v0_2"
+MANIFEST_SCHEMA = "UDP001_PORTABLE_HOST_PACKAGE_V0_2"
+EXPECTED_CAPSULE_LINES = (
+    "U001PK04",
+    "N-R1-D1-P12-C4-H1-B1-E1-S12-Z1-M1-X0",
+    "C-0",
+)
+EXPECTED_PROGRAMS = (
+    "u001_foundation_core_v0_1.py",
+    "u001_selected_update_decoder_v0_1.py",
+    "u001_framecount_assignment_v0_1.py",
+    "u001_semantic_validity_classifier_v0_1.py",
+    "u001_framecount_view_builder_v0_1.py",
+    "u001_signal_cadence_bounded_hold_v0_1.py",
+    "u001_output_package_assembler_v0_3.py",
+    "u001_g8a_thin_orchestrator_v0_5.py",
+    "u001_auto_discovery_profile_builder_v0_2.py",
+    "u001_g10b_single_pass_discovery_engine_v0_5a.py",
+    "u001_discovery_controller_v0_2.py",
+    "u001_data_preparation_workbench_gui_v0_4a.py",
+)
+EXPECTED_CONTROLS = (
+    "u001_g2_selected_signals.csv",
+    "u001_g4_signal_policy.csv",
+    "u001_g5_frame_policy.csv",
+    "u001_g6_hold_policy.csv",
+)
+
+
+class GateFailure(RuntimeError):
+    pass
+
+
+def fail(code: str) -> None:
+    raise GateFailure(code)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def package_paths(release_root: Path) -> tuple[Path, Path]:
+    root = release_root.resolve()
+    if root.name == PACKAGE_NAME:
+        package = root
+        zip_path = root.parent / f"{PACKAGE_NAME}.zip"
+    else:
+        package = root / PACKAGE_NAME
+        zip_path = root / f"{PACKAGE_NAME}.zip"
+    return package, zip_path
+
+
+def exact_file_names(folder: Path, suffix: str) -> tuple[str, ...]:
+    if not folder.is_dir():
+        fail("FOLDER_MISSING_" + folder.name)
+    return tuple(sorted(path.name for path in folder.iterdir() if path.is_file() and path.suffix.lower() == suffix))
+
+
+def record_filename(record: dict) -> str:
+    for key in ("Filename", "FileName", "Name", "RelativePath", "Path"):
+        value = record.get(key)
+        if isinstance(value, str) and value:
+            return Path(value.replace("\\", "/")).name
+    return ""
+
+
+def record_sha(record: dict) -> str:
+    for key in ("SHA256", "Sha256", "sha256"):
+        value = record.get(key)
+        if isinstance(value, str):
+            return value.lower()
+    return ""
+
+
+def manifest_records(manifest: dict, key: str, expected: tuple[str, ...]) -> dict[str, dict]:
+    value = manifest.get(key)
+    if not isinstance(value, list):
+        fail("MANIFEST_" + key.upper())
+    result = {}
+    for record in value:
+        if not isinstance(record, dict):
+            fail("MANIFEST_RECORD_TYPE")
+        name = record_filename(record)
+        if not name or name in result:
+            fail("MANIFEST_RECORD_IDENTITY")
+        result[name] = record
+    if set(result) != set(expected):
+        fail("MANIFEST_" + key.upper() + "_INVENTORY")
+    return result
+
+
+def verify_record_hashes(records: dict[str, dict], folder: Path) -> None:
+    for name, record in records.items():
+        expected = record_sha(record)
+        if len(expected) != 64 or sha256_file(folder / name).lower() != expected:
+            fail("HASH_" + name)
+
+
+def hosted_test_count(manifest: dict) -> int:
+    values = manifest.get("HostedProgramSelftests")
+    if not isinstance(values, list):
+        fail("MANIFEST_HOSTED_TESTS")
+    names = set()
+    for item in values:
+        if not isinstance(item, dict):
+            fail("MANIFEST_HOSTED_TEST_TYPE")
+        name = record_filename(item)
+        if not name:
+            fail("MANIFEST_HOSTED_TEST_NAME")
+        return_code = item.get("ReturnCode", item.get("returncode", item.get("ExitCode")))
+        pass_value = item.get("PassTokenObserved", item.get("Passed", item.get("Pass")))
+        if return_code not in (0, "0") or pass_value is not True:
+            fail("MANIFEST_HOSTED_TEST_FAIL_" + name)
+        names.add(name)
+    if names != set(EXPECTED_PROGRAMS):
+        fail("MANIFEST_HOSTED_TEST_INVENTORY")
+    return len(names)
+
+
+def verify_zip(zip_path: Path) -> None:
+    if not zip_path.is_file() or zip_path.stat().st_size <= 0:
+        fail("ZIP_MISSING")
+    expected_program_entries = {
+        f"{PACKAGE_NAME}/UDP001/01_PROGRAMS/{name}" for name in EXPECTED_PROGRAMS
+    }
+    expected_control_entries = {
+        f"{PACKAGE_NAME}/UDP001/02_CONTROL/{name}" for name in EXPECTED_CONTROLS
+    }
+    with zipfile.ZipFile(zip_path, "r") as archive:
+        names = set()
+        for info in archive.infolist():
+            raw = info.filename.replace("\\", "/")
+            pure = PurePosixPath(raw)
+            if pure.is_absolute() or ".." in pure.parts:
+                fail("ZIP_UNSAFE_PATH")
+            if raw and pure.parts and pure.parts[0] != PACKAGE_NAME:
+                fail("ZIP_ROOT")
+            lowered = {part.lower() for part in pure.parts}
+            if "04_temp" in lowered or "arch" in lowered or "__pycache__" in lowered:
+                fail("ZIP_FORBIDDEN_PATH")
+            if not info.is_dir():
+                names.add(raw)
+        if not expected_program_entries.issubset(names):
+            fail("ZIP_PROGRAMS")
+        if not expected_control_entries.issubset(names):
+            fail("ZIP_CONTROLS")
+        if any(name.endswith("u001_data_preparation_workbench_gui_v0_3.py") for name in names):
+            fail("ZIP_GUI03")
+
+
+def verify_runtime(executable: Path, portable_root: Path) -> None:
+    if not executable.is_file() or executable.stat().st_size <= 0:
+        fail("RUNTIME_EXE")
+    result = subprocess.run(
+        [str(executable.resolve()), "--hosted-self-test-all", "--portable-root", str(portable_root.resolve())],
+        cwd=str(executable.parent),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=1800,
+        shell=False,
+    )
+    if result.returncode != 0:
+        fail("RUNTIME_HOSTED_SELFTEST")
+
+
+def validate_release(release_root: Path) -> None:
+    package, zip_path = package_paths(release_root)
+    if not package.is_dir():
+        fail("PACKAGE_FOLDER")
+    portable = package / "UDP001"
+    launcher = portable / "00_LAUNCHER"
+    programs = portable / "01_PROGRAMS"
+    controls = portable / "02_CONTROL"
+    cases = portable / "03_CASES"
+    evidence = package / "_internal" / "evidence"
+    if exact_file_names(programs, ".py") != tuple(sorted(EXPECTED_PROGRAMS)):
+        fail("PROGRAM_INVENTORY")
+    if exact_file_names(controls, ".csv") != tuple(sorted(EXPECTED_CONTROLS)):
+        fail("CONTROL_INVENTORY")
+    if any(path.name == "__pycache__" for path in package.rglob("__pycache__")):
+        fail("PYCACHE_PRESENT")
+    if not cases.is_dir() or any(cases.iterdir()):
+        fail("CASES_NOT_EMPTY")
+    executable = launcher / "U001_Workbench.exe"
+    manifest_path = evidence / "u001_portable_host_package_manifest.json"
+    capsule_path = evidence / "u001_portable_host_package_capsule.txt"
+    if not manifest_path.is_file() or not capsule_path.is_file():
+        fail("EVIDENCE_MISSING")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        fail("MANIFEST_PARSE")
+    if manifest.get("Schema") != MANIFEST_SCHEMA:
+        fail("MANIFEST_SCHEMA")
+    if manifest.get("PackageName") != PACKAGE_NAME:
+        fail("MANIFEST_PACKAGE")
+    if manifest.get("CompanyDataIncluded") is not False:
+        fail("MANIFEST_COMPANY_DATA")
+    serialized = json.dumps(manifest, ensure_ascii=False, sort_keys=True)
+    if "/Users/" in serialized or ":\\Users\\" in serialized or ":/Users/" in serialized:
+        fail("MANIFEST_ABSOLUTE_USER_PATH")
+    program_records = manifest_records(manifest, "Programs", EXPECTED_PROGRAMS)
+    control_records = manifest_records(manifest, "Controls", EXPECTED_CONTROLS)
+    verify_record_hashes(program_records, programs)
+    verify_record_hashes(control_records, controls)
+    if hosted_test_count(manifest) != 12:
+        fail("HOSTED_TEST_COUNT")
+    capsule_lines = tuple(
+        line.strip() for line in capsule_path.read_text(encoding="utf-8-sig").splitlines() if line.strip()
+    )
+    if capsule_lines != EXPECTED_CAPSULE_LINES:
+        fail("CAPSULE")
+    verify_zip(zip_path)
+    verify_runtime(executable, portable)
+
+
+def run_self_test() -> None:
+    checks = (
+        GATE_VERSION == "0.1",
+        GATE_NAME.endswith("v0_1.py"),
+        SELFTEST_TOKEN.endswith("PASS-20"),
+        PACKAGE_NAME == "U001_Portable_v0_2",
+        MANIFEST_SCHEMA.endswith("V0_2"),
+        len(EXPECTED_PROGRAMS) == 12,
+        len(set(EXPECTED_PROGRAMS)) == 12,
+        EXPECTED_PROGRAMS[-1].endswith("gui_v0_4a.py"),
+        "u001_data_preparation_workbench_gui_v0_3.py" not in EXPECTED_PROGRAMS,
+        len(EXPECTED_CONTROLS) == 4,
+        len(set(EXPECTED_CONTROLS)) == 4,
+        all(name.endswith(".csv") for name in EXPECTED_CONTROLS),
+        len(EXPECTED_CAPSULE_LINES) == 3,
+        EXPECTED_CAPSULE_LINES[-1] == "C-0",
+        record_filename({"Filename": "a.py"}) == "a.py",
+        record_filename({"RelativePath": "x/y/b.py"}) == "b.py",
+        record_sha({"SHA256": "A" * 64}) == "a" * 64,
+        package_paths(Path("X:/OUT"))[0].name == PACKAGE_NAME,
+        package_paths(Path("X:/OUT") / PACKAGE_NAME)[0].name == PACKAGE_NAME,
+        PurePosixPath(f"{PACKAGE_NAME}/UDP001").parts[0] == PACKAGE_NAME,
+    )
+    if sum(bool(item) for item in checks) != 20:
+        raise AssertionError("SELFTEST_COUNT")
+    print(SELFTEST_TOKEN)
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="G10D2C independent portable-release acceptance gate")
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--release-root")
+    args = parser.parse_args(argv)
+    if args.self_test:
+        run_self_test()
+        return 0
+    if not args.release_root:
+        parser.error("--release-root is required")
+    try:
+        validate_release(Path(args.release_root))
+    except GateFailure as exc:
+        print(f"G10D2CCG1-FAIL:{exc.args[0]} C-7")
+        return 7
+    except Exception as exc:
+        print(f"G10D2CCG1-FAIL:UNHANDLED-{type(exc).__name__} C-7")
+        return 7
+    print("G10D2CCG1-PASS P12-C4-H12-Z1-R1-X0 C-0")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
