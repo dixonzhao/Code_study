@@ -1,0 +1,166 @@
+UDP001 G10D2C — REAL PORTABLE BUILD AND INDEPENDENT ACCEPTANCE
+Date: 2026-07-30
+Status: REAL BUILD AUTHORIZED; PROMOTION FORBIDDEN UNTIL CG1 AND MANUAL GUI PASS
+
+======================================================================
+1. ACCEPTED INPUT STATE
+======================================================================
+
+G10D2A runtime host gate:
+
+G10D2ACG1-PASS A12-E2-R2-X0 C-0
+
+G10D2B builder gate:
+
+G10D2BCG1-PASS P12-C4-O1-M1-X0 C-0
+
+The manually transcribed builder self-test token may contain keyboard-symbol
+errors. CG1 executed and compared the actual token, so CG1 C-0 is authoritative.
+
+This node performs the first real v0.2 portable build. It does not change U001
+algorithms, Data Contract, 12 formal programs, 4 controls or existing launcher.
+
+======================================================================
+2. REQUIRED FILES BEFORE START
+======================================================================
+
+Run from the C-CODE directory in Windows CMD.
+
+Required candidates in:
+
+C-CODE\UDP001\04_TEMP\
+
+- u001_portable_runtime_host_v0_5.py
+- u001_portable_host_package_builder_v0_7.py
+- u001_g10d2c_portable_release_acceptance_gate_v0_1.py
+
+Required accepted development files:
+
+C-CODE\UDP001\01_PROGRAMS\  exact 12 formal programs
+C-CODE\UDP001\02_CONTROL\   exact 4 control CSV files
+
+Use the same Python interpreter/venv that has already run U001 and can import
+both pandas and PyInstaller. Do not use --user inside the venv.
+
+======================================================================
+3. PRE-BUILD COMMANDS — WINDOWS CMD
+======================================================================
+
+From C-CODE:
+
+python .\UDP001\04_TEMP\u001_portable_runtime_host_v0_5.py --self-test
+
+python .\UDP001\04_TEMP\u001_portable_host_package_builder_v0_7.py --self-test
+
+python -c "import pandas, PyInstaller; print('G10D2C-ENV-PASS')"
+
+All three must return zero. Stop on any error.
+
+The output path below must not already exist:
+
+.\UDP001\04_TEMP\G10D2C_RELEASE_01
+
+Check in CMD:
+
+if exist .\UDP001\04_TEMP\G10D2C_RELEASE_01 (echo G10D2C-STOP-OUTPUT-EXISTS) else (echo G10D2C-OUTPUT-READY)
+
+Continue only when G10D2C-OUTPUT-READY is printed. Do not delete an existing
+folder automatically; preserve it and ask ChatGPT for a new sequence number.
+
+======================================================================
+4. REAL BUILD COMMAND — WINDOWS CMD
+======================================================================
+
+Run this as one CMD line from C-CODE:
+
+python .\UDP001\04_TEMP\u001_portable_host_package_builder_v0_7.py --build --udp001-root .\UDP001 --host-source .\UDP001\04_TEMP\u001_portable_runtime_host_v0_5.py --out .\UDP001\04_TEMP\G10D2C_RELEASE_01
+
+The build may take time. Do not start another build in parallel. Do not move or
+edit any source/control file while it is running.
+
+Expected successful builder capsule:
+
+U001PK04
+N-R1-D1-P12-C4-H1-B1-E1-S12-Z1-M1-X0
+C-0
+
+If it fails, return only the complete U001PK04-ERROR line plus C-7. Do not let
+Copilot patch the accepted builder automatically.
+
+======================================================================
+5. INDEPENDENT RELEASE GATE
+======================================================================
+
+After the builder returns C-0, run:
+
+python .\UDP001\04_TEMP\u001_g10d2c_portable_release_acceptance_gate_v0_1.py --release-root .\UDP001\04_TEMP\G10D2C_RELEASE_01
+
+The Gate is read-only. It verifies:
+
+- package folder and ZIP exist;
+- exact 12 external formal programs;
+- exact 4 immutable controls;
+- no GUI v0.3 packaged;
+- empty 03_CASES;
+- manifest schema/identity/counts/hashes;
+- capsule identity;
+- safe ZIP paths and expected ZIP content;
+- Runtime Host EXE exists;
+- frozen host can execute all 12 hosted self-tests.
+
+Expected success:
+
+G10D2CCG1-PASS P12-C4-H12-Z1-R1-X0 C-0
+
+On failure, return the exact G10D2CCG1-FAIL line only. Do not modify the Gate.
+
+======================================================================
+6. MANUAL GUI SMOKE TEST — ONLY AFTER CG1 C-0
+======================================================================
+
+Run from C-CODE CMD:
+
+start "" ".\UDP001\04_TEMP\G10D2C_RELEASE_01\U001_Portable_v0_2\UDP001\00_LAUNCHER\U001_Workbench.exe"
+
+Confirm only these items; do not run company data in this smoke test:
+
+1. GUI opens without traceback or missing-module dialog.
+2. GUI title/version corresponds to current U001 Workbench v0.4a.
+3. Auto-discovery controls are visible.
+4. Execute New Run controls are visible.
+5. Closing the GUI terminates normally.
+
+Return:
+
+G10D2CM1-GUI-OPEN-OK C-0
+
+or:
+
+G10D2CM1-GUI-FAIL-<short_reason> C-7
+
+======================================================================
+7. STOP BOUNDARY
+======================================================================
+
+After CG1 and manual GUI results are returned, stop. Do not yet:
+
+- overwrite UDP001\00_LAUNCHER;
+- move builder/host into 01_PROGRAMS;
+- delete G10D2C_RELEASE_01;
+- delete old portable release;
+- distribute the ZIP to another PC;
+- run TC001 company data through the portable copy.
+
+ChatGPT will issue a separate G10D2D promotion and second-PC acceptance node.
+
+======================================================================
+8. LOW-BANDWIDTH RETURN
+======================================================================
+
+Success: return exactly two lines:
+
+G10D2CCG1-PASS P12-C4-H12-Z1-R1-X0 C-0
+G10D2CM1-GUI-OPEN-OK C-0
+
+Failure: return only the first complete ERROR/FAIL line and C-7.
+
