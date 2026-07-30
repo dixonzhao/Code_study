@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""Read-only locator for the D5 release root and acceptance Gate."""
+
+from __future__ import annotations
+
+import argparse
+import tempfile
+from pathlib import Path
+
+
+PROGRAM_NAME = "u001_g10d2cd5d1_release_locator_v0_1.py"
+PROGRAM_VERSION = "0.1"
+SELFTEST_TOKEN = "UDP001-G10D2CD5D1-SELFTEST-PASS-16"
+PACKAGE_NAME = "U001_Portable_v0_2"
+GATE_NAME = "u001_g10d2c_portable_release_acceptance_gate_v0_1.py"
+INCOMPLETE_MARKER = ".G10D2C_INCOMPLETE"
+
+
+def safe_token(value: str, limit: int = 100) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value)
+    return cleaned[:limit] or "EMPTY"
+
+
+def rel_token(path: Path, root: Path) -> str:
+    try:
+        value = path.resolve().relative_to(root.resolve()).as_posix()
+    except (OSError, ValueError):
+        value = path.name
+    return safe_token(value)
+
+
+def candidates(temp_root: Path, pattern: str, limit: int = 20) -> list[Path]:
+    if not temp_root.is_dir():
+        return []
+    try:
+        return sorted((p for p in temp_root.rglob(pattern) if p.exists()), key=lambda p: p.as_posix())[:limit]
+    except OSError:
+        return []
+
+
+def locate(udp001_root: Path, out: Path) -> int:
+    root = udp001_root.resolve()
+    temp_root = root / "04_TEMP"
+    out = out.resolve()
+    package = out / PACKAGE_NAME
+    portable = package / "UDP001"
+    cases = portable / "03_CASES"
+    gate = temp_root / GATE_NAME
+    marker = out / INCOMPLETE_MARKER
+    gate_alternatives = candidates(temp_root, "*portable_release_acceptance_gate*")
+    release_alternatives = candidates(temp_root, PACKAGE_NAME)
+    values = {
+        "R": int(root.is_dir()),
+        "T": int(temp_root.is_dir()),
+        "O": int(out.is_dir()),
+        "P": int(package.is_dir()),
+        "U": int(portable.is_dir()),
+        "C": int(cases.is_dir()),
+        "M": int(marker.is_file()),
+        "G": int(gate.is_file()),
+        "A": len(gate_alternatives),
+        "D": len(release_alternatives),
+    }
+    print(
+        "G10D2CD5D1 N-"
+        + "-".join(f"{key}{value}" for key, value in values.items())
+        + "-X0 C-0"
+    )
+    memos = []
+    if gate_alternatives:
+        memos.append("GATE_" + rel_token(gate_alternatives[0], root))
+    if release_alternatives:
+        memos.append("REL_" + rel_token(release_alternatives[0], root))
+    if out.exists():
+        try:
+            children = sorted(p.name for p in out.iterdir())[:8]
+        except OSError:
+            children = []
+        memos.append("OUT_" + safe_token("+".join(children), 100))
+    for index, memo in enumerate(memos[:3], 1):
+        print(f"M{index}-{memo}")
+    return 0
+
+
+def run_self_test() -> None:
+    checks = 0
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "UDP001"
+        temp_root = root / "04_TEMP"
+        out = temp_root / "G10D2C_RELEASE_01"
+        cases = out / PACKAGE_NAME / "UDP001" / "03_CASES"
+        cases.mkdir(parents=True)
+        gate = temp_root / GATE_NAME
+        gate.write_text("gate", encoding="utf-8")
+        (out / INCOMPLETE_MARKER).write_text("incomplete", encoding="utf-8")
+        checks += int(root.is_dir())
+        checks += int(temp_root.is_dir())
+        checks += int(out.is_dir())
+        checks += int((out / PACKAGE_NAME).is_dir())
+        checks += int((out / PACKAGE_NAME / "UDP001").is_dir())
+        checks += int(cases.is_dir())
+        checks += int(gate.is_file())
+        checks += int((out / INCOMPLETE_MARKER).is_file())
+        checks += int(len(candidates(temp_root, "*portable_release_acceptance_gate*")) == 1)
+        checks += int(len(candidates(temp_root, PACKAGE_NAME)) == 1)
+        checks += int(rel_token(gate, root).startswith("04_TEMP"))
+        checks += int(safe_token("a/b c") == "a_b_c")
+        checks += int(PROGRAM_VERSION == "0.1")
+        checks += int(PROGRAM_NAME.endswith("v0_1.py"))
+        checks += int(SELFTEST_TOKEN.endswith("PASS-16"))
+        checks += int(PACKAGE_NAME.endswith("v0_2"))
+    if checks != 16:
+        raise AssertionError(f"SELFTEST_COUNT:{checks}")
+    print(SELFTEST_TOKEN)
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="Locate D5 release and Gate paths without modification")
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--udp001-root")
+    parser.add_argument("--out")
+    args = parser.parse_args(argv)
+    if args.self_test:
+        run_self_test()
+        return 0
+    if not args.udp001_root or not args.out:
+        parser.error("--udp001-root and --out are required")
+    return locate(Path(args.udp001_root), Path(args.out))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
