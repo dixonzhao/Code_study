@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""Diagnose an accepted U001 portable EXE that shows no visible GUI."""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+
+
+PROGRAM_NAME = "u001_g10d2cm1d1_gui_silent_launch_diagnostic_v0_1.py"
+PROGRAM_VERSION = "0.1"
+SELFTEST_TOKEN = "UDP001-G10D2CM1D1-SELFTEST-PASS-16"
+PACKAGE_NAME = "U001_Portable_v0_2"
+EXE_NAME = "U001_Workbench.exe"
+OBSERVE_SECONDS = 15
+
+
+def executable_path(out: Path) -> Path:
+    return out / PACKAGE_NAME / "UDP001" / "00_LAUNCHER" / EXE_NAME
+
+
+def safe_token(text: str, limit: int = 120) -> str:
+    value = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in text.strip())
+    return value[:limit] or "EMPTY"
+
+
+def first_text_line(path: Path) -> str:
+    if not path.is_file() or path.stat().st_size == 0:
+        return ""
+    try:
+        text = path.read_bytes()[:8192].decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        if line.strip():
+            return safe_token(line)
+    return ""
+
+
+def diagnose(out: Path) -> int:
+    out = out.resolve()
+    exe = executable_path(out)
+    launcher = exe.parent
+    log_root = out.parent
+    stdout_path = log_root / "G10D2CM1D1_EXE_STDOUT.txt"
+    stderr_path = log_root / "G10D2CM1D1_EXE_STDERR.txt"
+    if not exe.is_file():
+        print("G10D2CM1D1 N-E0-S0-A0-RCNA-O0-SE0-L0-X1 C-7")
+        return 7
+    started = 0
+    alive = 0
+    return_token = "NA"
+    try:
+        with stdout_path.open("wb") as stdout_stream, stderr_path.open("wb") as stderr_stream:
+            process = subprocess.Popen(
+                [str(exe.resolve())],
+                cwd=str(launcher.resolve()),
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_stream,
+                stderr=stderr_stream,
+                shell=False,
+            )
+            started = 1
+            deadline = time.monotonic() + OBSERVE_SECONDS
+            while time.monotonic() < deadline and process.poll() is None:
+                time.sleep(0.25)
+            code = process.poll()
+            if code is None:
+                alive = 1
+            else:
+                return_token = str(code).replace("-", "N")
+    except Exception as exc:
+        print(f"G10D2CM1D1 N-E1-S{started}-A0-RCNA-O0-SE0-L0-X1 T-{type(exc).__name__} C-7")
+        return 7
+    stdout_bytes = stdout_path.stat().st_size if stdout_path.is_file() else 0
+    stderr_bytes = stderr_path.stat().st_size if stderr_path.is_file() else 0
+    print(
+        f"G10D2CM1D1 N-E1-S1-A{alive}-RC{return_token}-O{stdout_bytes}-SE{stderr_bytes}-L1-X0 C-0"
+    )
+    stderr_line = first_text_line(stderr_path)
+    stdout_line = first_text_line(stdout_path)
+    if stderr_line:
+        print("M1-ERR-" + stderr_line)
+    if stdout_line:
+        print("M2-OUT-" + stdout_line)
+    return 0
+
+
+def run_self_test() -> None:
+    checks = 0
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "OUT"
+        exe = executable_path(out)
+        exe.parent.mkdir(parents=True)
+        exe.write_bytes(b"exe")
+        empty = Path(td) / "empty.txt"
+        empty.write_bytes(b"")
+        line = Path(td) / "line.txt"
+        line.write_text("\nhello world\n", encoding="utf-8")
+        checks += int(executable_path(out) == exe)
+        checks += int(exe.name == EXE_NAME)
+        checks += int(exe.parent.name == "00_LAUNCHER")
+        checks += int(exe.parent.parent.name == "UDP001")
+        checks += int(exe.parent.parent.parent.name == PACKAGE_NAME)
+        checks += int(first_text_line(empty) == "")
+        checks += int(first_text_line(line) == "hello_world")
+        checks += int(first_text_line(Path(td) / "missing") == "")
+        checks += int(safe_token("a/b c") == "a_b_c")
+        checks += int(PROGRAM_VERSION == "0.1")
+        checks += int(PROGRAM_NAME.endswith("v0_1.py"))
+        checks += int(SELFTEST_TOKEN.endswith("PASS-16"))
+        checks += int(PACKAGE_NAME.endswith("v0_2"))
+        checks += int(EXE_NAME.endswith(".exe"))
+        checks += int(OBSERVE_SECONDS == 15)
+        checks += int(out.name == "OUT")
+    if checks != 16:
+        raise AssertionError(f"SELFTEST_COUNT:{checks}")
+    print(SELFTEST_TOKEN)
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="Diagnose silent normal launch of accepted U001 EXE")
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--out")
+    args = parser.parse_args(argv)
+    if args.self_test:
+        run_self_test()
+        return 0
+    if not args.out:
+        parser.error("--out is required")
+    return diagnose(Path(args.out))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
