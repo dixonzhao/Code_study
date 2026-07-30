@@ -1,0 +1,22 @@
+UDP001 FINAL-BUILD — MANIFEST IDENTITY CHECK
+Date: 2026-07-30
+Status: BUILD ACCEPTED; READ-ONLY ACCEPTANCE-COMPATIBILITY CHECK
+
+Observed:
+
+U001PK05 N-R1-D1-P12-C4-H1-B1-E1-S12-Z1-M1-Q1-X0 C-0
+UDP001-FINAL-FAIL-MANIFEST-TOOL-IDENTITY C-7
+
+The real build succeeded. Do not rebuild, delete, rename or patch the release.
+The failure comes from the independent acceptance script requiring literal
+Builder/Host filenames in a Manifest that may encode identity as version and
+SHA fields instead.
+
+Download u001_final_manifest_identity_probe_v0_1.py.txt, remove only the final
+.txt and place it in UDP001\04_TEMP. From C-CODE Windows CMD run:
+
+python .\UDP001\04_TEMP\u001_final_manifest_identity_probe_v0_1.py --release-root .\UDP001\04_TEMP\U001_FINAL_RELEASE
+
+Return the FINAL-MANIFEST line and every printed M1/M2/M3 line. The probe only
+reads the Manifest and writes a local diagnostic report beside the release.
+
