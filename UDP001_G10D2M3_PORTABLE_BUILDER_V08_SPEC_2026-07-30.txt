@@ -1,0 +1,168 @@
+UDP001 G10D2-M3 — PORTABLE PACKAGE BUILDER v0.8 SPECIFICATION
+Date: 2026-07-30
+Status: BUILDER CORRECTION ONLY; NO REAL BUILD IN THIS NODE
+
+1. ACCEPTED INPUTS AND PURPOSE
+
+Accepted Runtime Host evidence:
+
+G10D2M2CG1-PASS A12-N1-E1-R2-X0 C-0
+
+Upgrade company-side:
+
+u001_portable_host_package_builder_v0_7.py
+
+to:
+
+u001_portable_host_package_builder_v0_8.py
+
+v0.8 has exactly three purposes:
+
+1. accept the approved Runtime Host v0.6 and its new token;
+2. preserve required empty release directories such as 03_CASES;
+3. replace final whole-directory move/rename with verified file-copy promotion.
+
+Do not alter U001 data preparation, discovery, decoding, policies, GUI or
+analysis logic. Do not perform a real PyInstaller build in this node.
+
+2. COPILOT INPUT — EXACTLY THREE FILES
+
+1. company-side u001_portable_host_package_builder_v0_7.py
+2. accepted u001_portable_runtime_host_v0_6.py
+3. this specification
+
+Copilot must return exactly one complete downloadable file:
+
+u001_portable_host_package_builder_v0_8.py.txt
+
+Do not return a patch or prose-only answer. Do not add a download suffix.
+Preserve v0.7 and create v0.8 as a new file.
+
+3. FIXED IDENTITY
+
+PROGRAM_NAME = "u001_portable_host_package_builder_v0_8.py"
+PROGRAM_VERSION = "0.8"
+SELFTEST_TOKEN = "U001-PORTABLE-HOST-PACKAGE-BUILDER-V08-SELFTEST-PASS-44"
+PACKAGE_NAME = "U001_Portable_v0_2"
+MANIFEST_SCHEMA = "UDP001_PORTABLE_HOST_PACKAGE_V0_2"
+EXPECTED_RUNTIME_HOST_VERSION = "0.6"
+EXPECTED_RUNTIME_HOST_TOKEN = "U001-PORTABLE-HOST-V06-SELFTEST-PASS-26"
+
+The exact 12-program inventory, exact 4-control inventory, pandas dependency,
+PyInstaller onedir/windowed policy, hidden imports, excludes, manifest schema,
+README, ZIP and company-data exclusion remain identical to accepted v0.7.
+
+4. RUNTIME HOST UPDATE
+
+Before PyInstaller, require:
+
+- PROGRAM_NAME == u001_portable_runtime_host_v0_6.py
+- PROGRAM_VERSION == 0.6
+- approved programs exactly equal the builder inventory;
+- DEFAULT_GUI_NAME remains GUI v0.4a;
+- source self-test returns zero and prints the v0.6 PASS-26 token.
+
+Hosted frozen tests remain:
+
+U001_Workbench.exe <absolute-approved-program.py> --self-test
+
+README_FIRST.txt continues to instruct double-clicking U001_Workbench.exe.
+
+5. REQUIRED PUBLICATION API
+
+Add import-safe functions:
+
+directory_inventory(root: Path) -> sequence
+publish_staged_release(stage: Path, out: Path) -> dict
+
+directory_inventory must include relative directory paths and relative file
+paths/sizes. It must therefore distinguish a missing 03_CASES directory from
+an existing empty 03_CASES directory.
+
+publish_staged_release requirements:
+
+- stage contains U001_Portable_v0_2 folder and U001_Portable_v0_2.zip;
+- out must not already exist;
+- create out and immediately write .G10D2M3_INCOMPLETE;
+- create every staged directory first, including empty directories;
+- copy every staged file with shutil.copy2 and bounded retry;
+- do not use shutil.move, Path.replace, os.rename or whole-tree rename;
+- compare directory inventory, file relative paths, sizes and SHA-256 after copy;
+- require output U001_Portable_v0_2\UDP001\03_CASES to exist and be empty;
+- remove the incomplete marker only after all comparisons pass;
+- return statistics including DirectoryCount, FileCount, TotalBytes,
+  HashVerified and EmptyCasesPreserved;
+- if copying fails, leave the output marked incomplete for diagnosis;
+- never overwrite, merge with or delete an existing output.
+
+The incomplete marker is outside staged inventory and is ignored only during
+the controlled comparison.
+
+6. REAL BUILD FLOW
+
+All build work remains below a unique:
+
+UDP001\04_TEMP\PK05_<timestamp>\
+
+Complete source tests, PyInstaller, 12 hosted tests, manifest, evidence and ZIP
+inside release_stage first. Explicitly create the staged empty 03_CASES before
+inventory and ZIP creation. Only then call publish_staged_release.
+
+Successful real-build capsule becomes:
+
+U001PK05
+N-R1-D1-P12-C4-H1-B1-E1-S12-Z1-M1-Q1-X0
+C-0
+
+Q1 means verified copy publication including required empty directories.
+
+7. CONTRACT UPDATE
+
+get_portable_builder_contract must report:
+
+- ProgramVersion 0.8;
+- ExpectedRuntimeHostVersion 0.6;
+- PublicationMode VERIFIED_FILE_COPY_WITH_EMPTY_DIRECTORY_PRESERVATION;
+- RequiredEmptyDirectories containing UDP001/03_CASES;
+- all existing v0.7 architecture and inventory fields unchanged.
+
+8. SELF-TEST
+
+Increase deterministic self-test to exactly 44 assertions and print only:
+
+U001-PORTABLE-HOST-PACKAGE-BUILDER-V08-SELFTEST-PASS-44
+
+In addition to retained v0.7 checks, create a synthetic staged release and
+prove:
+
+- directory_inventory contains empty 03_CASES;
+- publish_staged_release creates that empty directory;
+- file bytes and hashes match;
+- incomplete marker is removed after success;
+- existing output is rejected;
+- no move/rename promotion is used;
+- Runtime Host v0.6 identity/token are required.
+
+No Windows-only build, PyInstaller execution, pandas operation or GUI launch
+may occur during --self-test.
+
+9. COMPANY EXECUTION
+
+Save Copilot output after removing only final .txt as:
+
+UDP001\04_TEMP\u001_portable_host_package_builder_v0_8.py
+
+Keep the independent Gate downloaded with this specification as:
+
+UDP001\04_TEMP\u001_g10d2m3_builder_v08_conformance_gate_v0_1.py
+
+From C-CODE Windows CMD:
+
+python .\UDP001\04_TEMP\u001_portable_host_package_builder_v0_8.py --self-test
+
+python .\UDP001\04_TEMP\u001_g10d2m3_builder_v08_conformance_gate_v0_1.py --self-test
+
+python .\UDP001\04_TEMP\u001_g10d2m3_builder_v08_conformance_gate_v0_1.py --builder .\UDP001\04_TEMP\u001_portable_host_package_builder_v0_8.py --host .\UDP001\04_TEMP\u001_portable_runtime_host_v0_6.py
+
+Return only the final G10D2M3CG1 line. Do not run a real build until C-0.
+
