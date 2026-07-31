@@ -1,0 +1,75 @@
+UDP003 PK01 - ONEFILE PACKAGE START HERE
+Date: 2026-07-31
+Status: COMPANY EXECUTION READY
+
+PURPOSE
+Build one shareable Windows EXE containing Python, Tkinter and OpenCV while
+preserving the accepted FrameCount Video Reviewer v0.5 core unchanged.
+
+FILES TO DOWNLOAD INTO C-CODE\U-UDP003\04_TEMP
+  u003_onefile_entry_v0_1.py.txt
+  u003_onefile_package_builder_v0_1.py.txt
+
+Remove only the final .txt suffix from both files.
+
+PRECONDITION
+Use the same activated venv that can run Reviewer v0.5 with OpenCV.
+PyInstaller must also be installed in that venv.
+
+Quick dependency check:
+  python -c "import cv2, tkinter, PyInstaller; print('UDP003PK01-DEP-OK', cv2.__version__)"
+
+If only PyInstaller is missing while the venv is active:
+  python -m pip install pyinstaller
+
+Do not use --user inside the venv. Install packages only if company policy
+permits it. If OpenCV is missing, switch to the Python/venv that passed A2.
+
+RUN FROM WINDOWS CMD AT C-CODE ROOT
+
+1. Builder self-test
+
+python U-UDP003\04_TEMP\u003_onefile_package_builder_v0_1.py --self-test
+
+Expected:
+  UDP003-PK01-SELFTEST-PASS-19
+
+Normal self-test success does not need to be returned.
+
+2. Build onefile EXE
+
+python U-UDP003\04_TEMP\u003_onefile_package_builder_v0_1.py --source U-UDP003\01_PROGRAMS\framecount_video_reviewer_v0_5.py --entry U-UDP003\04_TEMP\u003_onefile_entry_v0_1.py --dist U-UDP003\03_CASES\TC001_20260422\02_OUTPUT\UDP003PK01_RELEASE --evidence U-UDP003\05_TESTS\03_RUNS\UDP003PK01 --build-root U-UDP003\04_TEMP\UDP003PK01_BUILD
+
+Expected build capsule:
+  UDP003PK01B N-S1-E1-P1-T1-C1-O1-X0 Z-B...-H... C-0
+
+3. Runtime acceptance
+
+Close VS Code/Python Reviewer processes. From Windows Explorer, double-click:
+  U-UDP003\03_CASES\TC001_20260422\02_OUTPUT\UDP003PK01_RELEASE\U003_Evidence_Review_Workbench_v0_1.exe
+
+Allow additional time on the first launch for antivirus scanning and onefile
+temporary extraction.
+
+Confirm:
+  E - the single EXE launches without Python or OpenCV errors
+  W - U003_Workspace is created beside the EXE with five subfolders and README
+  G - both GUI windows appear and close normally
+  V - one video and known FrameCount mapping work
+  T - one Review Data CSV loads with all supplied columns
+  P - one plot-window CSV exports
+  R - one review result exports
+  S - one screenshot exports
+
+If all runtime checks pass, return:
+  UDP003PK01R N-E1-W1-G1-V1-T1-P1-R1-S1-X0 C-0
+
+RETURN TO CHATGPT
+Return the build capsule and runtime capsule only. For C-7, add at most three
+short MEMO lines. Do not let Copilot modify the accepted v0.5 core, entry or
+builder while diagnosing a failure.
+
+SHARING RULE
+After final acceptance, only U003_Evidence_Review_Workbench_v0_1.exe is needed
+for transfer. The destination user runs it in a writable folder; U003_Workspace
+is created automatically beside the EXE.
