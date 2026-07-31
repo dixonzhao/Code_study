@@ -1,0 +1,181 @@
+U003 EVIDENCE REVIEW WORKBENCH MVP v0.1
+MAINTENANCE AND REBUILD MANUAL
+Date: 2026-07-31
+
+1. FROZEN BASELINE
+
+Core source:
+  framecount_video_reviewer_v0_5.py
+  Canonical SHA-256:
+  eb710fda7aeb59d0f59b251d9cd00aad4814ca4cd484e684a35eca8cf9a862e5
+
+Onefile entry:
+  u003_onefile_entry_v0_1.py
+  Canonical SHA-256:
+  5a6d1c2695c1d74aff158523971d959d607037bc9b49a106b8f32a106fbe595b
+
+Acceptance Gate:
+  u003_acceptance_gate_v0_1.py
+
+Package builder:
+  u003_onefile_package_builder_v0_1.py
+
+Accepted EXE:
+  U003_Evidence_Review_Workbench_v0_1.exe
+  Size: 67,631,858 bytes
+  SHA-256 prefix: 460ad3f3fa22
+  Complete SHA-256: company-side UDP003PK01_BUILD_RESULT.json
+
+2. ARCHITECTURE
+
+  onefile EXE
+    -> PyInstaller temporary runtime
+    -> u003_onefile_entry_v0_1
+       -> create U003_Workspace beside EXE
+       -> write startup diagnostics
+       -> launch unchanged framecount_video_reviewer_v0_5 core
+
+The entry and builder are packaging/operation layers. They do not redefine
+FrameCount mapping, Event semantics, lag direction or review output schema.
+
+3. SOURCE RESPONSIBILITIES
+
+framecount_video_reviewer_v0_5.py:
+  GUI, video decode, mapping, Event handling, synchronized table, lag display,
+  review/export and screenshots.
+
+u003_onefile_entry_v0_1.py:
+  executable location, persistent workspace creation, startup log and controlled
+  launch of the core.
+
+u003_onefile_package_builder_v0_1.py:
+  immutable source/entry verification, dependency preflight, owned build paths,
+  PyInstaller command, hash/size evidence and compact capsule.
+
+u003_acceptance_gate_v0_1.py:
+  non-GUI source identity, syntax, interface and deterministic helper behavior.
+
+4. NORMAL SELF-TESTS
+
+A1 Gate:
+  python u003_acceptance_gate_v0_1.py --self-test
+  Expected: UDP003-A1-SELFTEST-PASS-16
+
+PK01 builder:
+  python u003_onefile_package_builder_v0_1.py --self-test
+  Expected: UDP003-PK01-SELFTEST-PASS-19
+
+Self-tests confirm the test tools themselves; they do not replace A1, A2 or
+packaged runtime acceptance.
+
+5. REBUILD ENVIRONMENT
+
+Required Windows build environment:
+  - Python environment with working Tkinter;
+  - opencv-python/cv2 used by the accepted Reviewer;
+  - PyInstaller;
+  - write access to U-UDP003\04_TEMP and the designated output/evidence paths.
+
+Use:
+  python -c "import cv2, tkinter, PyInstaller; print(cv2.__version__)"
+
+Inside an activated venv, install PyInstaller without --user if installation is
+permitted. Build from the same Python environment that runs the source Reviewer.
+
+6. GOVERNED REBUILD
+
+Run the PK01 builder with explicit paths for:
+  --source       accepted core source
+  --entry        accepted onefile entry
+  --dist         new empty release directory
+  --evidence     new evidence directory
+  --build-root   builder-owned temporary directory
+
+The builder refuses:
+  - wrong source/entry names or canonical hashes;
+  - missing PyInstaller, Tkinter or cv2;
+  - non-Windows build hosts;
+  - foreign/non-owned non-empty build directories;
+  - overwriting an existing release EXE.
+
+Retain:
+  UDP003PK01_BUILD_RESULT.json
+  UDP003PK01_BUILD_STDOUT.txt
+  UDP003PK01_BUILD_STDERR.txt
+  UDP003PK01_RETURN_CAPSULE.txt
+
+7. REQUIRED POST-BUILD ACCEPTANCE
+
+Never accept an EXE from build success alone. On a plain company Windows launch:
+  1. confirm no Python/OpenCV error;
+  2. confirm U003_Workspace creation;
+  3. confirm both GUI windows;
+  4. open one video and known FrameCount;
+  5. load Review Data;
+  6. export one plot CSV, review result and screenshot;
+  7. close normally.
+
+Record executable byte size and complete SHA-256 in build evidence.
+
+8. CHANGE CLASSIFICATION
+
+Documentation-only change:
+  No rebuild unless executable behavior or bundled files change.
+
+Entry/workspace change:
+  Rebuild PK01 and repeat packaged runtime acceptance.
+
+Core GUI/layout change without semantic change:
+  New source version, repeated A1, visible A2 and packaged runtime acceptance.
+
+Mapping/Event/lag/schema/output semantic change:
+  New Experiment and Decision Log entry, updated contract, A1/A2/PK acceptance.
+
+Dependency/PyInstaller/Python version change:
+  Treat as a new package build. Record tool versions, EXE hash and runtime test.
+
+9. COMMON FAILURES
+
+ModuleNotFoundError cv2 during source run:
+  Wrong Python environment or OpenCV missing. This is a build-host issue.
+
+ModuleNotFoundError cv2 in packaged EXE:
+  PyInstaller did not collect cv2. Confirm builder command included hidden-import
+  and collect-all cv2, then rebuild through a new evidence directory.
+
+Tkinter filedialog/messagebox failure:
+  Confirm the build host Python includes Tkinter and builder hidden imports.
+
+Onefile extraction or archive error:
+  Test a writable local path, sufficient disk space and endpoint-protection
+  policy. Do not mask the failure by copying random DLLs beside the EXE.
+
+Workspace permission error:
+  Move the EXE to a writable local folder. The entry intentionally fails visibly
+  rather than silently running without logs/workspace.
+
+Wrong M37/M38 validation:
+  The authoritative A1 required-method count is M38. M37 is a rejected
+  validator-contract defect.
+
+Output appears beside input instead of 04_OUTPUT:
+  This is accepted v0.5 behavior, not a packaging defect. Use workspace input
+  copies when one-folder evidence retention is required.
+
+10. RELEASE AND SHARING
+
+Share only the accepted EXE for normal use. Do not share build directories,
+temporary _MEI content, source code or company test data as part of the user
+package. Verify the EXE hash against the release record when provenance matters.
+
+11. BASELINE FREEZE
+
+The current baseline is frozen after:
+  A1 C-0
+  A2 C-0
+  PK01 build C-0
+  PK01 runtime C-0
+
+Do not apply opportunistic Copilot changes directly to the frozen files. Create
+a new version, isolated test evidence and explicit Project decision first.
+
