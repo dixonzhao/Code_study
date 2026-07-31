@@ -1,0 +1,31 @@
+C-CODE DIRECTORY NAMING CONVENTION v1.0
+Date: 2026-07-31
+Status: ACTIVE
+
+Company C-CODE workspace task directories use an alphabetic navigation prefix:
+
+  U-UDP001
+  U-UDP002
+  U-UDP003
+
+Every task-local archive and the C-CODE root archive use:
+
+  A-Archive
+
+The prefix is an operator-facing directory convention. Formal task identities
+remain UDP001, UDP002 and UDP003. Product identities remain U001, U002 and U003.
+
+Scope of the first migration:
+
+  C-CODE\UDP001       -> C-CODE\U-UDP001
+  C-CODE\UDP002       -> C-CODE\U-UDP002
+  C-CODE\UDP003       -> C-CODE\U-UDP003
+  C-CODE\ARCH         -> C-CODE\A-Archive
+  each task\ARCH       -> each task\A-Archive
+
+The migration must not recursively rename internal portable-package directories.
+In particular, U001_Portable_v0_2\UDP001 remains unchanged because it is part of
+the accepted product layout and manifest.
+
+All future company-side CMD instructions start from C-CODE and use the prefixed
+task paths. Local archive Task IDs remain unchanged for stable indexing.
