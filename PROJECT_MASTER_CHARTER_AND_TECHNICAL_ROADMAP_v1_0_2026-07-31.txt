@@ -5,7 +5,7 @@ Date: 2026-07-31
 Status: CANONICAL PROJECT OVERVIEW
 Audience: new engineers, analysts, software developers, reviewers and managers
 Project owner and principal developer: Zhao Zhili
-Implementation assistance: GitHub Copilot
+Permitted implementation assistance: Office 365 Copilot
 
 ======================================================================
 0. READ THIS FIRST
@@ -1024,7 +1024,7 @@ statistical design, experiments, engineering interpretation, program
 integration, verification and project records. All formal project decisions
 and deliverables are attributed to Zhao Zhili.
 
-13.2 Implementation assistance - GitHub Copilot
+13.2 Permitted implementation assistance - Office 365 Copilot
 
 Responsibilities:
 
@@ -1035,9 +1035,10 @@ Responsibilities:
 - optimize performance without changing semantics;
 - generate the exact requested files.
 
-Copilot is used as a code-implementation assistant. It is not a project owner
-or technical decision authority and does not independently change the formal
-algorithm, Data Contract, Pipeline, anomaly definition or Decision Log.
+Office 365 Copilot may be used as a code-implementation assistant. It is not a
+project owner or technical decision authority and does not independently
+change the formal algorithm, Data Contract, Pipeline, anomaly definition or
+Decision Log.
 
 13.3 Engineering stakeholders
 
@@ -1639,7 +1640,7 @@ Level 6 - Historical implementation evidence
 - archived implementation-tool conversations.
 
 New members should read top-down. They should not infer current architecture
-from historical code or one old Copilot conversation.
+from historical code or one old Office 365 Copilot conversation.
 
 ======================================================================
 23. CURRENT DECISIONS
