@@ -1,0 +1,208 @@
+UDP003 NODE REPORT
+U003 Evidence Review Workbench MVP v0.1
+Date: 2026-07-31
+Final status: COMPLETE_RELEASE_ACCEPTED_BASELINE_FROZEN
+
+1. EXECUTIVE SUMMARY
+
+UDP003 formalized the previously developed FrameCount Video Reviewer into the
+human-evidence endpoint of the Camera-Radar analysis chain. The product connects
+video position, CAN FrameCount, Event candidates and a narrow review-data table
+inside one review workflow. It allows an engineer to navigate directly to a
+candidate interval, compare synchronized signal rows, apply an explicit display
+lag, record a disposition, export plotting data and save screenshots.
+
+The accepted product is distributed as one Windows executable:
+  U003_Evidence_Review_Workbench_v0_1.exe
+
+The executable contains the required Python runtime, Tkinter and OpenCV. It was
+built and successfully launched on the company computer without relying on the
+active Python environment. At first launch it creates U003_Workspace beside the
+EXE.
+
+2. PROBLEM AND ROLE
+
+The original engineering workflow required manual review of a long vehicle test
+video. Coarse time-based video navigation was too slow and did not provide a
+repeatable connection to CAN observations. U003 reduces the final verification
+cost after U002 has compressed a large dataset into a short Event Queue.
+
+Formal chain:
+  U001 - traceable CAN preparation and FrameCount-domain data products
+  U002 - discrepancy/residual analysis and anomaly-candidate generation
+  U003 - synchronized video/CAN evidence review and engineering disposition
+
+U003 can also inspect a known FrameCount window before U002 processing, but it
+does not become a detector or root-cause engine when used in that direction.
+
+3. ACCEPTED IMPLEMENTATION
+
+Functional core:
+  framecount_video_reviewer_v0_5.py
+  Displayed version: 0.5
+  Canonical SHA-256:
+  eb710fda7aeb59d0f59b251d9cd00aad4814ca4cd484e684a35eca8cf9a862e5
+
+Frozen entry:
+  u003_onefile_entry_v0_1.py
+  Purpose: create the persistent workspace, record startup diagnostics and
+  launch the unchanged v0.5 core.
+
+Governed builder:
+  u003_onefile_package_builder_v0_1.py
+  Purpose: validate source/entry identity, check build dependencies, run a
+  controlled PyInstaller onefile build and write evidence.
+
+Accepted Windows EXE evidence:
+  Size: 67,631,858 bytes
+  SHA-256 prefix: 460ad3f3fa22
+  The complete SHA-256 is retained in the company-side
+  UDP003PK01_BUILD_RESULT.json.
+
+4. ACCEPTANCE EVIDENCE
+
+4.1 A1 - independent non-GUI acceptance
+
+Accepted capsule:
+  UDP003A1 N-I1-S1-A1-D12-M38-F6-X0 C-0
+
+Evidence:
+  - canonical source identity accepted;
+  - Python syntax accepted;
+  - required class/function/method surface accepted;
+  - twelve helper, mapping and review-table behaviors passed;
+  - thirty-eight required Reviewer methods were present;
+  - no A1 failures remained.
+
+A later outer check expected M37 and returned C-7. The authoritative Gate
+enumerated thirty-eight required methods. The M37 expectation was classified as
+a validator-contract defect and did not invalidate A1.
+
+4.2 A2 - visible GUI acceptance
+
+Accepted capsule:
+  UDP003A2 N-G1-V1-E1-T1-L1-P1-R1-S1-X0 C-0
+
+Accepted behaviors:
+  - both GUI windows opened;
+  - real video and FrameCount mapping worked;
+  - Event navigation worked;
+  - synchronized CAN review data worked;
+  - lag-adjusted yellow-row selection worked;
+  - asymmetric plot CSV export worked;
+  - review-result export worked;
+  - screenshot output worked.
+
+4.3 PK01 - onefile build and runtime acceptance
+
+Build capsule:
+  UDP003PK01B N-S1-E1-P1-T1-C1-O1-X0
+  Z-B67631858-H460ad3f3fa22 C-0
+
+Runtime capsule:
+  UDP003PK01R N-E1-W1-G1-V1-T1-P1-R1-S1-X0 C-0
+
+Evidence:
+  - source and entry identities matched;
+  - PyInstaller, Tkinter and OpenCV were available to the builder;
+  - onefile output was produced;
+  - the EXE launched without Python/OpenCV dependency errors;
+  - U003_Workspace was created;
+  - packaged video, table, plot, review and screenshot functions worked.
+
+5. ACCEPTED CAPABILITIES
+
+  1. Open common local video formats supported by the bundled OpenCV backend.
+  2. Define a video-frame/FrameCount anchor.
+  3. Use 1:1 or rate-based mapping.
+  4. Jump to an absolute FrameCount and step by precise intervals.
+  5. Seek, change playback speed and loop the selected Event.
+  6. Load, filter, navigate and extend an Event Queue.
+  7. Load a dynamic-column narrow Review Data CSV.
+  8. Display all supplied review columns with FrameCount first.
+  9. Highlight the exact or nearest CAN row with an explicit lag setting.
+ 10. Export one asymmetric plotting interval around the yellow row.
+ 11. Save one review code and a multi-line memo for each Event.
+ 12. Export full review results and a compact return capsule.
+ 13. Save the displayed video frame as a PNG.
+
+6. INPUT AND OUTPUT CONTRACT
+
+Inputs:
+  - local test video;
+  - manual FrameCount mapping anchor;
+  - optional Event Queue CSV with start/end FrameCount;
+  - optional narrow Review Data CSV containing FrameCount and human-visible
+    comparison columns.
+
+Outputs:
+  - screenshot PNG;
+  - plot-ready CSV;
+  - full review-result CSV;
+  - compact review return-code TXT;
+  - startup/error log and workspace manifest.
+
+The accepted v0.5 core writes screenshots and CSV/TXT artifacts beside the
+selected input file. To keep a shared investigation self-contained, place
+working copies under the automatically created U003_Workspace before review.
+
+7. NON-RESPONSIBILITIES
+
+U003 does not decode CAN, apply DBC, impute signals, select the active Camera
+target, calculate discrepancy/baseline/residual, generate anomaly candidates,
+estimate the correct lag, identify root cause or determine which sensor is
+ground truth. These boundaries prevent the final evidence tool from silently
+changing U001 or U002 analysis semantics.
+
+8. KNOWN LIMITATIONS AND RISKS
+
+  - Video/CAN mapping still requires a user-confirmed anchor.
+  - Lag is a review parameter and not an estimated physical truth.
+  - Missing exact FrameCounts cause nearest-row highlighting.
+  - Duplicate Review Data FrameCounts retain the final row.
+  - Codec support remains dependent on the bundled OpenCV backend.
+  - PyInstaller onefile extracts to a temporary directory at startup and may be
+    delayed or blocked by endpoint protection on some computers.
+  - The EXE must run from a writable directory to create U003_Workspace.
+
+9. DECISIONS
+
+D-UDP003-01 KEEP
+Retain the proven v0.5 GUI core without adding self-test code to it.
+
+D-UDP003-02 KEEP
+Use an independent Acceptance Gate for structural and non-GUI checks.
+
+D-UDP003-03 KEEP
+Treat the Review Data CSV as the owner of the human-visible table schema.
+
+D-UDP003-04 KEEP
+Keep lag explicit and visible; do not disguise it as automatic synchronization.
+
+D-UDP003-05 MODIFY/KEEP
+Replace the initial onedir recommendation with onefile because UDP003 is shared
+frequently and A2 exposed a missing-OpenCV environment. Accept onefile risk only
+after company-computer runtime validation.
+
+D-UDP003-06 FREEZE
+Freeze the accepted product as U003 Evidence Review Workbench MVP v0.1.
+
+10. HANDOFF AND CHANGE CONTROL
+
+Shareable artifact:
+  U003_Evidence_Review_Workbench_v0_1.exe
+
+Company-side build evidence:
+  U-UDP003\05_TESTS\03_RUNS\UDP003PK01
+
+Any change to mapping equations, Event semantics, lag direction, duplicate-row
+policy, review export schema or output location requires a new UDP003 experiment
+and a repeated A1/A2/runtime acceptance sequence. Pure documentation changes do
+not require rebuilding the EXE.
+
+11. NEXT PROJECT STEP
+
+UDP003 is closed. Development attention returns to UDP002, which will consume
+immutable U001 products and generate traceable anomaly candidates and narrow
+Review Data/Event Queue inputs for this frozen U003 endpoint.
+
