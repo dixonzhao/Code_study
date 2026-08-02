@@ -1,0 +1,1214 @@
+U002 ARTIFACT MANIFEST中文说明书
+
+版本：1.0
+日期：2026-08-03
+Owner：Zhao Zhili
+适用对象：第一次接触可追溯数据分析系统的开发者、维护者和分析工程师
+
+
+一、读完后应该会什么
+
+读完后，你应该能够：
+
+1. 用一句话解释Artifact与Artifact Manifest分别是什么；
+2. 判断一个CSV、JSON、模型或候选表属于哪个Stage、哪次Run和哪个Case；
+3. 沿Parents追溯结果是由哪些上游Artifact生成的；
+4. 区分文件身份一致、计算过程可追溯和工程结论正确这三件事；
+5. 判断一个Artifact是COMPLETE、PARTIAL还是FAILED；
+6. 解释Payload、Scope、ClockDomain和SourceReferences的现实意义；
+7. 在不打开大文件的情况下，先判断一个Artifact能否安全交给下游Module；
+8. 理解为什么未来CSV、JSON、模型、点云和视频引用仍可使用同一套契约。
+
+
+二、一句话定义
+
+Artifact是U002运行过程中产生的一份“可交付中间结果或最终结果”。
+
+Artifact Manifest是这份结果的“产品标签、来源证明、范围说明和内容校验单”。
+
+两者必须区分：
+
+  Artifact
+    = Manifest
+    + 一个或多个Payload文件
+
+例如：
+
+  canonical_camera_target.csv
+
+是Payload；
+
+  canonical_camera_target_manifest.json
+
+是Artifact Manifest。
+
+只有CSV而没有Manifest，U002虽然可能读得到数据，却无法可靠回答：
+
+- 谁生成了它；
+- 用了哪个Module版本；
+- 属于哪次运行；
+- 对应哪些FrameCount；
+- 上游数据是谁；
+- 文件后来是否被改过；
+- 是否可以作为正式输入继续向下分析。
+
+
+三、它在U002架构中的位置
+
+U002固定Stage：
+
+  S0 Intake and Contract Gate
+  S1 Semantic Reconstruction and Analysis Preprocessing
+  S2 Analysis View and Population Construction
+  S3 Primary Outcome Construction
+  S4 Baseline and Residual
+  S5 Evidence Engines
+  S6 Candidate Synthesis
+  S7 Handoff and Export
+
+Module负责“做事”，Artifact负责“承载做完后得到的结果”。
+
+最小关系是：
+
+  上游Artifact
+      ↓
+  Module读取并处理
+      ↓
+  新Artifact
+
+例如：
+
+  S0 Accepted Input Artifact
+      ↓
+  S1 Camera Target Selector Module
+      ↓
+  S1 Canonical Camera Target Artifact
+      ↓
+  S2 Analysis View Builder Module
+      ↓
+  S2 Analysis View Artifact
+
+因此，U002不是靠“某个DataFrame一直被原地修改”运行，而是通过一系列有身份、有父子关系的Artifact逐层推进。
+
+
+四、现实工程意义
+
+如果没有Artifact Manifest，常见做法是：
+
+  output.csv
+  output_new.csv
+  output_final.csv
+  output_final2.csv
+
+几天后就无法确认：
+
+- 哪个才是正式版本；
+- 是否使用了同一段FrameCount；
+- Camera Target Selector是否已经启用；
+- invalid value是否已处理；
+- 这个结果是不是从旧数据复制来的；
+- 文件内容是否在Excel中被人工修改过；
+- 为什么同一个程序跑出的结果不同。
+
+Artifact Manifest把这些问题转成机器可以验证的字段和Hash。
+
+它的现实价值不是让文件“看起来更正规”，而是建立数据分析的Chain of Custody：
+
+  原始输入身份
+      ↓
+  S0接收结果
+      ↓
+  S1语义重建结果
+      ↓
+  S2分析母表
+      ↓
+  S3主结果
+      ↓
+  S4 Residual
+      ↓
+  S5 Evidence
+      ↓
+  S6 Candidate
+      ↓
+  S7交付
+
+以后看到一个异常Candidate，可以沿着Artifact链回答：
+
+- 它来自哪一段测试；
+- 用了哪一个Camera选择结果；
+- 用了哪个Radar有效性规则；
+- 使用哪个Baseline；
+- 哪些Evidence支持它；
+- 最终由哪个Run生成。
+
+这就是可追溯性在本项目中的具体实现。
+
+
+五、Artifact Manifest不是什么
+
+1. 它不是数据本身
+
+Manifest描述Payload，但不替代Payload。
+
+
+2. 它不是Algorithm Card
+
+Manifest说明谁生成、生成了什么；Algorithm Card说明为什么采用该算法、假设是什么、如何验证。
+
+
+3. 它不是Run Manifest
+
+Artifact Manifest只描述一个结果；Run Manifest描述整次运行。
+
+
+4. 它不是正确性证明
+
+Hash一致只证明“文件与登记内容一致”，不证明：
+
+- Camera Target一定选对；
+- Radar一定可信；
+- Baseline一定合理；
+- Candidate一定是真异常。
+
+算法正确性仍需Experiment、人工复核和Decision Log支持。
+
+
+六、实际阅读文件
+
+打开：
+
+  .\U-UDP002\05_TESTS\01_FIXTURES\U20A_v0_1\valid_artifact_manifest.json
+
+本Fixture描述的是一个S1 Camera Target语义重建结果。
+
+不要按JSON显示顺序机械背字段。按照以下八步阅读。
+
+
+STEP A1：确认Artifact身份
+
+字段：
+
+  ContractType
+  ContractVersion
+  ArtifactId
+  ArtifactType
+  ArtifactSchemaId
+  ArtifactSchemaVersion
+
+
+1. ContractType
+
+本例：
+
+  U002_ARTIFACT_MANIFEST
+
+意义：
+
+告诉Validator这是一份Artifact Manifest，应按Artifact规则检查。
+
+
+2. ContractVersion
+
+本例：
+
+  0.1
+
+意义：
+
+表示Manifest本身采用U002 Core Contract 0.1。
+
+它不是Payload表格版本，也不是算法版本。
+
+
+3. ArtifactId
+
+本例：
+
+  ART_TC001_S1_CAMERA_TARGET_001
+
+意义：
+
+这是该Artifact的唯一逻辑身份。
+
+推荐命名包含：
+
+  ART_<Case或范围>_<Stage>_<功能>_<序号>
+
+ArtifactId用于：
+
+- Run Manifest登记；
+- Stage输入输出关联；
+- 下游Artifact的Parents引用；
+- Resume定位；
+- 故障和报告追溯。
+
+ArtifactId不是文件名。文件可以移动到包内其他相对位置，但身份不能随意改变。
+
+
+4. ArtifactType
+
+本例：
+
+  CANONICAL_CAMERA_TARGET
+
+意义：
+
+说明这个结果在工程上是什么。
+
+它回答“这是什么类型的产品”，例如：
+
+  ACCEPTED_INPUT
+  CANONICAL_CAMERA_TARGET
+  RADAR_VALIDITY_MASK
+  ANALYSIS_VIEW
+  PRIMARY_DISCREPANCY
+  BASELINE_MODEL
+  RESIDUAL_SERIES
+  EVIDENCE_RESULT
+  CANDIDATE_QUEUE
+  REVIEW_HANDOFF
+
+
+5. ArtifactSchemaId与ArtifactSchemaVersion
+
+本例：
+
+  ArtifactSchemaId      = u002.canonical_camera_target
+  ArtifactSchemaVersion = 0.1.0
+
+意义：
+
+ArtifactType说明业务种类；ArtifactSchemaId说明Payload遵守哪套结构。
+
+必须区分：
+
+  ArtifactType
+    给工程师和Module说明业务意义。
+
+  ArtifactSchemaId / Version
+    给程序说明字段、类型和语义版本。
+
+同一个ArtifactType未来可以升级Schema。例如新增：
+
+  CanonicalCameraDistance
+  SelectedSource
+  SelectionConfidence
+  SelectionReason
+  SignalAge
+
+Schema从0.1.0升级后，下游Module可以据此决定是否兼容。
+
+
+STEP A2：确认状态、Stage和Run归属
+
+字段：
+
+  ArtifactStatus
+  Stage
+  RunId
+  CreatedAtUtc
+
+
+1. ArtifactStatus
+
+允许：
+
+  COMPLETE
+  PARTIAL
+  FAILED
+
+COMPLETE：
+
+预定输出完整产生，至少有一个Payload。
+
+PARTIAL：
+
+产生了部分可保留结果，但不能假装完整成功。例如：
+
+- 一部分Frame可处理，另一部分因信号缺失被排除；
+- Optional分析失败，但已有诊断和中间表可供调查；
+- 输出只覆盖声明的部分范围。
+
+FAILED：
+
+模块执行失败，Manifest用于保存失败证据。FAILED必须在Metadata中登记ErrorCode。
+
+关键原则：
+
+> 失败的Artifact Manifest可以是结构上完全有效的Manifest。
+
+“运行失败”和“记录格式无效”不是一回事。
+
+
+2. Stage
+
+本例：
+
+  S1
+
+意义：
+
+表示该Artifact在架构中的产生位置。
+
+Stage帮助Registry和Engine防止错误连接，例如S5 Evidence不能被伪装成S0 Accepted Input。
+
+
+3. RunId
+
+本例：
+
+  RUN_TC001_20260803_001
+
+意义：
+
+表明该Artifact属于哪次具体运行。
+
+同一个Case可以运行多次：
+
+  RUN_TC001_20260803_001
+  RUN_TC001_20260803_002
+
+两次可能使用不同Module版本、Frame范围或配置，因此必须区分。
+
+
+4. CreatedAtUtc
+
+意义：
+
+记录Artifact Manifest完成创建的UTC时间。
+
+使用UTC避免公司电脑、个人电脑和未来Cloud环境的时区差异。
+
+
+STEP A3：确认Producer——是谁制造了它
+
+字段：
+
+  Producer.ModuleId
+  Producer.ModuleVersion
+  Producer.ModuleManifestSha256
+
+Producer不是只写一个程序名，而是同时锁定：
+
+- 稳定Module身份；
+- Module版本；
+- 当时实际使用的Module Manifest内容。
+
+为什么需要ModuleManifestSha256？
+
+因为即使ModuleId和Version没改，文件也可能被误改。Hash可以发现：
+
+  名称还是0.1.0
+  但Manifest内容已经变化
+
+这是配置和实现身份管理的一道防线。
+
+注意：
+
+Producer的Module Manifest Hash不是Payload Hash，也不是Python源码Hash。Python源码身份由Module Manifest中的ImplementationSha256进一步锁定。
+
+完整关系：
+
+  Artifact Manifest
+      Producer.ModuleManifestSha256
+          ↓
+  Module Manifest
+      ImplementationSha256
+          ↓
+  实际Module代码
+
+
+STEP A4：确认Parents——它从哪里来
+
+字段：
+
+  Parents[].ArtifactId
+  Parents[].ManifestSha256
+  Parents[].ContentSha256
+
+Parents建立Artifact之间的血缘关系。
+
+例如：
+
+  ART_TC001_S0_ACCEPTED_INPUT_001
+      ↓
+  ART_TC001_S1_CAMERA_TARGET_001
+
+本例中的S1 Camera Target Artifact应该引用S0 Accepted Input Artifact作为Parent。
+
+
+1. Parent ArtifactId
+
+说明依赖的是哪一个上游Artifact。
+
+
+2. ManifestSha256
+
+锁定上游Artifact Manifest的具体内容。
+
+
+3. ContentSha256
+
+锁定上游Artifact实际内容身份。
+
+为什么需要两个Hash？
+
+因为可能出现：
+
+- Payload未变，但Metadata或Scope被改；
+- Manifest未被替换，但Payload文件被改；
+- 文件名相同，但内容来自另一次运行。
+
+双重身份可以把“说明书”和“实物”同时锁住。
+
+Parents数组中的ArtifactId必须唯一。一个Module可以有多个Parent，例如：
+
+  S3 Primary Discrepancy
+    Parent 1 = Canonical Camera Target
+    Parent 2 = Valid Radar Target
+    Parent 3 = Analysis Population Mask
+
+这样以后看到Discrepancy就知道它究竟使用了哪三份上游结果。
+
+
+STEP A5：确认Payloads——Artifact实际装了什么
+
+字段：
+
+  PayloadId
+  Role
+  RelativePath
+  MediaType
+  ByteSize
+  Sha256
+  RowCount
+  PayloadKind
+
+一个Artifact可以包含一个或多个Payload。
+
+例如Candidate Artifact可以同时包含：
+
+  candidate_queue.csv        PRIMARY
+  candidate_summary.json     INDEX
+  threshold_diagnostics.csv  DIAGNOSTIC
+  candidate_plot.png         PRESENTATION
+
+
+1. PayloadId
+
+Artifact内部的Payload唯一身份。
+
+
+2. Role
+
+允许：
+
+  PRIMARY
+    下游计算主要读取的内容。
+
+  INDEX
+    索引、目录、概要或快速定位表。
+
+  DIAGNOSTIC
+    质量检查、错误、统计或调试证据。
+
+  PRESENTATION
+    给人查看的图、说明或报告材料。
+
+Role可以防止下游误把截图当数据，或误把诊断表当正式结果。
+
+
+3. RelativePath
+
+本例类似：
+
+  03_ARTIFACTS/S1/canonical_camera_target.csv
+
+必须是包内相对路径。
+
+不允许：
+
+  C:\Users\...\file.csv
+  ..\..\outside.csv
+
+现实意义：
+
+整个Case目录复制到另一台Windows电脑后，Manifest仍能找到Payload。
+
+
+4. MediaType
+
+说明文件内容格式，例如：
+
+  text/csv
+  application/json
+  application/octet-stream
+  image/png
+
+
+5. ByteSize与Sha256
+
+ByteSize用于快速发现缺失、截断或替换。
+
+Sha256用于确认内容完全一致。
+
+读取前可以先验证：
+
+  文件存在
+  -> 大小一致
+  -> Hash一致
+  -> 再交给下游Module
+
+
+6. RowCount
+
+对于表格Payload，可记录行数。
+
+RowCount不是所有Payload都适用，因此允许为null。
+
+它适合快速发现：
+
+- 导出为空；
+- 少了一大段Frame；
+- 程序意外重复行；
+- 只输出了Preview而不是Full Case。
+
+
+7. PayloadKind
+
+允许：
+
+  TABLE
+  JSON
+  MODEL
+  POINT_CLOUD_REFERENCE
+  VIDEO_REFERENCE
+  OTHER
+
+这说明U002 Artifact Contract不是只为CSV设计。
+
+未来接入LiDAR时，可以保存点云索引或外部数据引用；接入SysID时，可以保存模型参数或模型文件；接入视频时，可以保存视频引用和Frame映射，而不需要把所有东西强行塞进DataFrame。
+
+PayloadId必须唯一。
+
+
+STEP A6：确认Scope与ClockDomain——它覆盖哪里、用什么时间轴
+
+字段：
+
+  Scope.ScopeType
+  Scope.CaseId
+  Scope.FrameStart
+  Scope.FrameEnd
+
+  ClockDomain.ClockDomainId
+  ClockDomain.ClockKind
+  ClockDomain.FrameRateHz
+  ClockDomain.TimeUnit
+
+
+1. ScopeType
+
+允许：
+
+  FULL_CASE
+  FRAME_RANGE
+
+本例：
+
+  FRAME_RANGE
+  FrameStart = 7400
+  FrameEnd   = 17400
+
+现实意义：
+
+这份Artifact只对7400至17400的FrameCount负责。它不能被误解成整个视频的完整结果。
+
+如果ScopeType为FULL_CASE，当前Contract要求FrameStart和FrameEnd均为null，完整范围由Case定义解释；如果是FRAME_RANGE，则两个边界必须为非负整数，且FrameEnd不得小于FrameStart。
+
+
+2. CaseId
+
+本例：
+
+  TC001_20260422
+
+Artifact Scope中的CaseId应与Run的CaseId一致。
+
+
+3. ClockDomainId
+
+本例类似：
+
+  TC001_FRAMECOUNT
+
+它表示“这一列数值属于哪一个时钟域”，不是简单写列名FrameCount。
+
+
+4. ClockKind
+
+允许：
+
+  FRAMECOUNT
+  TIMESTAMP
+  HYBRID
+
+当前项目使用FRAMECOUNT，因为已确认原始CAN时间不可信，视频左下角FrameCount是主要对齐基准。
+
+
+5. FrameRateHz与TimeUnit
+
+当前视频映射通常使用20 Hz。
+
+因此：
+
+  20 FrameCount约等于1秒
+
+FrameRateHz用于视频时间换算，但不能替代同步验证。
+
+TimeUnit适用于Timestamp或Hybrid时钟域，例如us、ms、s。
+
+核心原则：
+
+> 数据值相同但ClockDomain不同，不能直接按行比较。
+
+
+STEP A7：确认SourceReferences、坐标和不确定性
+
+字段：
+
+  SourceReferences[]
+  CoordinateFrame
+  UncertaintyReference
+
+
+1. SourceReferences
+
+每项包括：
+
+  SourceId
+  SourceType
+  IdentitySha256
+
+本例可引用：
+
+  U001_PACKAGE_TC001
+
+意义：
+
+说明这条Artifact血缘最终来自哪份U001输入包。
+
+Parent回答“直接上游是谁”；SourceReferences回答“根源数据是谁”。
+
+这两者不重复：
+
+  Parent
+    适合逐级追溯。
+
+  SourceReference
+    适合快速确认原始数据身份。
+
+
+2. CoordinateFrame
+
+用于明确空间量的参考坐标系，例如：
+
+  VEHICLE_BODY
+  CAMERA_SENSOR
+  RADAR_SENSOR
+  MAP
+
+当前某些一维距离Artifact可以为null，但未来加入Lateral Position、LiDAR或GNSS后必须认真使用。
+
+同一个数值如果坐标系不同，不能直接比较。
+
+
+3. UncertaintyReference
+
+用于指向不确定性定义、置信区间或质量模型。
+
+MVP可以为null，但接口提前保留，避免未来加入传感器置信度时破坏Artifact结构。
+
+
+STEP A8：确认Metadata与Extensions
+
+字段：
+
+  Metadata
+  Extensions
+
+
+1. Metadata
+
+Metadata保存该Artifact需要携带但未进入公共核心Schema的工程信息。
+
+本例可能包含：
+
+  Eligibility = INVESTIGATION_ONLY
+  Reason      = PROVISIONAL_SELECTOR
+
+意义：
+
+Camera Target Selector当前仍是暂定算法，因此结果可以用于调查候选，但不能被包装成已认证目标关联。
+
+FAILED Artifact还必须在Metadata中包含：
+
+  ErrorCode
+
+Metadata适合保存：
+
+- Eligibility；
+- Algorithm limitation；
+- Quality summary；
+- ErrorCode；
+- Review requirement；
+- Domain-specific annotations。
+
+但不要把所有关键契约字段都塞进Metadata。只要下游连接必须依赖，就应该进入正式Schema。
+
+
+2. Extensions
+
+Extensions用于未来兼容扩展。
+
+扩展字段名必须遵守命名规则，并且不能覆盖核心字段语义。
+
+使用原则：
+
+- 当前公共Contract能表达的，不放Extensions；
+- 临时实验性附加信息可以放；
+- 一旦多个正式Module都依赖该字段，应升级Contract或Artifact Schema。
+
+
+七、Artifact从产生到被下游使用的完整生命周期
+
+推荐顺序：
+
+STEP L1：Module在临时目录生成Payload
+
+不要直接覆盖已接受的正式Artifact。
+
+
+STEP L2：检查Payload
+
+至少确认：
+
+- 文件存在；
+- 格式可读；
+- 行数或对象数量合理；
+- 必需列存在；
+- Scope正确；
+- ClockDomain正确。
+
+
+STEP L3：计算Payload身份
+
+计算：
+
+  ByteSize
+  Sha256
+  可选RowCount
+
+
+STEP L4：创建Artifact Manifest
+
+登记：
+
+- Artifact身份；
+- Producer；
+- Parents；
+- Payloads；
+- Scope；
+- ClockDomain；
+- SourceReferences；
+- Metadata。
+
+
+STEP L5：运行Core Contract Validator
+
+Validator检查两层：
+
+  Schema validation
+    字段、类型、枚举和必填项。
+
+  Semantic validation
+    COMPLETE是否有Payload、FAILED是否有ErrorCode、路径是否安全、ID是否重复等。
+
+
+STEP L6：验证Payload文件
+
+Contract Validator验证Manifest结构；运行引擎还应进一步确认实际Payload：
+
+- 路径存在；
+- ByteSize一致；
+- Sha256一致；
+- 表格Schema与ArtifactSchemaId一致。
+
+
+STEP L7：注册到Run Manifest
+
+Run Manifest的Artifacts加入：
+
+  ArtifactId
+  ManifestRelativePath
+  ManifestSha256
+
+对应Stage登记OutputArtifactIds。
+
+
+STEP L8：下游Module消费
+
+下游不能只凭文件名读取。应该：
+
+1. 根据RequiresArtifacts匹配ArtifactType和Schema；
+2. 检查Schema版本；
+3. 检查ArtifactStatus；
+4. 检查Scope和ClockDomain；
+5. 验证Manifest/Payload Hash；
+6. 再读取PRIMARY Payload。
+
+
+STEP L9：接受后保持不可变
+
+Artifact一旦被Run登记并被下游引用，不应原地修改。
+
+如果需要更正：
+
+  生成新ArtifactId
+  -> 保留旧Artifact
+  -> 新Run或受控重算
+
+否则Parents中的Hash和历史Run会失去意义。
+
+
+八、三个状态怎样使用
+
+1. COMPLETE
+
+适用：
+
+- 所声明Scope的预定输出完整；
+- 至少一个Payload；
+- Payload通过结构和身份检查；
+- 不等于算法已被证明绝对正确。
+
+
+2. PARTIAL
+
+适用：
+
+- 结果只覆盖一部分范围；
+- 某些分支失败但中间结果仍有价值；
+- 需要人工复核后才可继续；
+- 下游必须明确允许PARTIAL输入。
+
+不要为了让Pipeline继续而把PARTIAL改写成COMPLETE。
+
+
+3. FAILED
+
+适用：
+
+- Module没有产生可作为预定结果使用的输出；
+- 仍需要保存诊断、错误和失败范围；
+- Metadata.ErrorCode必填；
+- 可以包含DIAGNOSTIC Payload。
+
+FAILED Artifact的价值是让失败也可追溯，而不是让失败消失。
+
+
+九、结合当前Camera–Radar项目理解
+
+例1：Camera Target Selector
+
+问题：
+
+Camera目标在0x221与0x251等Target槽位之间变化，不能直接把某一列当作连续目标。
+
+Module输出：
+
+  CANONICAL_CAMERA_TARGET Artifact
+
+Payload可以包含：
+
+  FrameCount
+  CanonicalCameraDistance
+  SelectedCameraSource
+  SelectionConfidence
+  SelectionStatus
+  SignalAge
+
+Manifest告诉下游：
+
+- 由哪个Selector版本生成；
+- 覆盖哪些FrameCount；
+- 使用哪个U001包；
+- 算法仍是PROVISIONAL还是FORMAL；
+- 是否只可用于INVESTIGATION。
+
+
+例2：Radar Validity
+
+问题：
+
+Radar在目标角度偏离后可能丢失目标，Distance出现0或其他失效值。
+
+可输出：
+
+  RADAR_VALIDITY_MASK Artifact
+  VALID_RADAR_TARGET Artifact
+
+这样S3 Discrepancy不需要猜测0是真实距离还是无效测量，而是读取已经声明有效性的Artifact。
+
+
+例3：Residual
+
+S4 Residual Artifact的Parents应至少指向：
+
+- S3 Primary Outcome；
+- S4 Baseline Model或Baseline Series。
+
+因此将来如果Residual异常，可以区分：
+
+- 原始Camera/Radar输入变化；
+- Target选择变化；
+- Baseline版本变化；
+- Residual算法变化。
+
+
+十、常见错误与判断方式
+
+错误1：只保存CSV，不保存Manifest
+
+后果：
+
+下游无法确认身份、范围、来源和Schema。
+
+
+错误2：修改Payload后不更新Sha256
+
+后果：
+
+验证失败。正确处理是生成新Artifact，而不是偷偷改Hash掩盖历史变化。
+
+
+错误3：把文件名当ArtifactId
+
+后果：
+
+文件重命名或移动后身份丢失。
+
+
+错误4：ArtifactStatus写COMPLETE，但Payloads为空
+
+后果：
+
+语义验证失败。COMPLETE必须有实际内容。
+
+
+错误5：FAILED但没有Metadata.ErrorCode
+
+后果：
+
+失败不可诊断，Validator拒绝。
+
+
+错误6：Parents只写文件路径
+
+后果：
+
+无法锁定上游身份。必须引用ArtifactId、ManifestSha256和ContentSha256。
+
+
+错误7：Absolute Path或..路径
+
+后果：
+
+包无法迁移，并可能越过Case目录边界。只允许安全相对路径。
+
+
+错误8：忽略Scope
+
+后果：
+
+把7400–17400的局部结果误当全视频结果。
+
+
+错误9：忽略ClockDomain
+
+后果：
+
+把不同时间轴按DataFrame行号硬拼，制造虚假Discrepancy和Lag。
+
+
+错误10：Hash一致就认为结论正确
+
+后果：
+
+把文件完整性误解为算法有效性。Hash只回答“是不是同一份内容”。
+
+
+错误11：原地覆盖已登记Artifact
+
+后果：
+
+Run Manifest和下游Parents全部失真。
+
+
+错误12：把大型LiDAR数据强制复制进JSON
+
+后果：
+
+契约失去扩展性。正确做法是Manifest登记Payload或POINT_CLOUD_REFERENCE。
+
+
+十一、动手理解练习
+
+练习1：只读有效Fixture
+
+打开：
+
+  valid_artifact_manifest.json
+
+按顺序回答：
+
+1. ArtifactId是什么？
+2. 属于哪个Stage？
+3. 哪个Module生成？
+4. Parent是谁？
+5. PRIMARY Payload在哪里？
+6. 覆盖哪个FrameCount范围？
+7. 使用哪个ClockDomain？
+8. 当前Eligibility是什么？
+
+
+练习2：查看非法Parent身份Fixture
+
+打开：
+
+  invalid_artifact_parent_identity.json
+
+先不要运行Validator，人工寻找：
+
+- Parent Hash是否缺失或格式错误；
+- Parent身份是否足以锁定上游；
+- 为什么只写ArtifactId不够。
+
+再运行Validator，对照错误码。
+
+
+练习3：模拟Payload被修改
+
+复制Fixture和测试Payload到临时目录：
+
+1. 记录原Sha256；
+2. 修改Payload一个字符；
+3. 重新计算Sha256；
+4. 比较Manifest登记值；
+5. 理解为什么肉眼相同的文件也可能不是同一Artifact。
+
+
+练习4：画一条三层血缘链
+
+手写：
+
+  S0 Accepted Input
+      ↓
+  S1 Canonical Camera Target
+      ↓
+  S2 Analysis View
+
+为每层写出：
+
+- ArtifactId；
+- Producer；
+- Parent；
+- PRIMARY Payload；
+- Scope；
+- ClockDomain。
+
+完成后，你就真正理解了Artifact在架构中的作用。
+
+
+十二、维护者检查清单
+
+创建Artifact前：
+
+- ArtifactType与Schema是否已经定义；
+- Producer Module是否已经通过Registry；
+- 上游Parents是否已经接受；
+- Scope和ClockDomain是否明确。
+
+创建Artifact时：
+
+- 先写临时Payload；
+- 检查内容；
+- 计算ByteSize、RowCount和Sha256；
+- 再生成Manifest；
+- 不覆盖已接受Artifact。
+
+交给下游前：
+
+- Manifest Schema通过；
+- Semantic规则通过；
+- Payload存在；
+- Hash一致；
+- ArtifactStatus允许继续；
+- ArtifactSchemaVersion满足下游最低要求；
+- Scope与ClockDomain兼容。
+
+
+十三、与另外两份Manifest的关系
+
+Module Manifest回答：
+
+  谁能生产什么，以及它需要什么。
+
+Artifact Manifest回答：
+
+  某一份具体结果是谁生产、从哪里来、装了什么。
+
+Run Manifest回答：
+
+  这一整次运行实际选择了谁、怎样执行、最后产生了哪些Artifact。
+
+关系：
+
+  Module Manifest
+      定义能力
+          ↓
+  Run Manifest
+      选择并调度能力
+          ↓
+  Artifact Manifest
+      记录每个实际结果
+          ↓
+  Run Manifest
+      汇总本次运行全部结果与状态
+
+
+十四、自检问题
+
+如果能够不用看答案回答以下问题，说明已经掌握本说明书：
+
+1. Artifact和Payload有什么区别？
+2. ArtifactId和文件名有什么区别？
+3. ArtifactType和ArtifactSchemaId有什么区别？
+4. 为什么Producer需要ModuleManifestSha256？
+5. 为什么Parent同时需要ManifestSha256和ContentSha256？
+6. COMPLETE、PARTIAL、FAILED分别表示什么？
+7. 为什么失败Artifact也可能是有效Manifest？
+8. Scope为什么不能省略？
+9. ClockDomain为什么比排序列名更重要？
+10. SourceReferences和Parents有什么区别？
+11. Sha256能证明什么，不能证明什么？
+12. 为什么接受后的Artifact不能原地修改？
+
+
+十五、五行记忆版
+
+1. Artifact是结果，Artifact Manifest是结果的身份、来源、范围和校验说明。
+2. Producer说明谁制造，Parents说明直接上游，SourceReferences说明根源输入。
+3. Payload装实际数据，Scope和ClockDomain限定数据能在哪里、按什么时间轴使用。
+4. Hash证明内容身份，不证明算法结论正确。
+5. Artifact一旦登记就不原地修改；更正必须产生新Artifact并保持血缘。

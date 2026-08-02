@@ -1,0 +1,1340 @@
+U002 RUN MANIFEST中文说明书
+
+版本：1.0
+日期：2026-08-03
+Owner：Zhao Zhili
+适用对象：第一次运行U002的人、分析工程师、模块开发者、维护者和后续接手人员
+
+
+一、读完后应该会什么
+
+读完后，你应该能够：
+
+1. 用一句话解释Run Manifest是什么；
+2. 区分Case、Run和Artifact；
+3. 从Run Manifest看出本次运行使用了哪些输入、范围、Module、Profile和配置；
+4. 看懂S0–S7每个Stage的实际状态；
+5. 判断SUCCEEDED、PARTIAL、FAILED和CANCELLED是否记录完整；
+6. 回答“为什么同一份数据两次运行结果不同”；
+7. 判断一次运行是否有资格被复现、继续、对比或用于正式报告；
+8. 理解Run Manifest为什么是实验记录、构建记录和审计记录的共同核心。
+
+
+二、一句话定义
+
+Run Manifest是一份机器可读的“本次U002运行总账、执行履历和结果目录”。
+
+它记录：
+
+- 运行的是哪个Case；
+- 使用哪个输入包；
+- 分析哪个Frame范围；
+- 采用哪个ClockDomain；
+- Registry当时发现了哪些正式能力；
+- 最终选择了哪些Module及版本；
+- 使用了哪些Profile和配置；
+- S0至S7各自成功还是失败；
+- 产生了哪些Artifact；
+- 在什么软件环境中运行；
+- 失败时去哪里找诊断；
+- 是否从某个中间Artifact继续运行。
+
+可以把它理解成：
+
+  一次实验的实验记录
+  + 一次软件Build的构建清单
+  + 一次分析任务的执行日志索引
+  + 一次交付结果的追溯入口
+
+
+三、Case、Run、Module、Artifact之间的区别
+
+1. Case
+
+Case表示一个稳定的调查对象或测试数据集合，例如：
+
+  TC001_20260422
+
+同一个Case可以运行很多次。
+
+
+2. Run
+
+Run表示“在某个时刻，使用某组输入、模块、配置和范围执行的一次具体计算”。
+
+例如：
+
+  RUN_TC001_20260803_001
+  RUN_TC001_20260803_002
+
+即使Case相同，只要Module版本、配置、Frame范围或输入身份不同，就应该是不同Run。
+
+
+3. Module
+
+Module表示可安装的处理能力，例如Camera Target Selector、Baseline Engine或Candidate Synthesizer。
+
+Module Manifest说明它“能够怎样运行”。
+
+
+4. Artifact
+
+Artifact表示某次Run实际产生的一份结果。
+
+Artifact Manifest说明这份结果“实际由谁产生、来自哪里、包含什么”。
+
+
+关系：
+
+  一个Case
+      可以有多个Run
+
+  一个Run
+      解析并执行多个Module
+      产生多个Artifact
+
+  一个Module
+      可以在不同Run中重复使用
+
+
+四、它在U002架构中的位置
+
+U002不是把S0–S7写死成一个巨型脚本，而是：
+
+  Registry发现Module
+      ↓
+  Engineer选择Profile、范围与策略
+      ↓
+  Engine解析依赖和顺序
+      ↓
+  创建Run Manifest
+      ↓
+  逐Stage运行并登记Artifact
+      ↓
+  完成、部分完成、失败或取消
+
+Run Manifest贯穿整次执行，而不是只在结束时补写一份报告。
+
+它的生命周期是：
+
+  PENDING
+      ↓
+  RUNNING
+      ↓
+  SUCCEEDED / PARTIAL / FAILED / CANCELLED
+
+在正式设计中，Run Manifest是Workbench和Engine之间最重要的状态记录之一。
+
+
+五、现实工程意义
+
+没有Run Manifest时，分析经常依赖人的记忆：
+
+  “我记得昨天好像选了Camera 1和3。”
+  “这次应该用了新的invalid-value规则。”
+  “这个CSV可能是7400帧以后跑的。”
+  “为什么Q95和上次不一样？”
+
+这种状态下，即使结果图很好看，也无法稳定复现。
+
+Run Manifest把这些口头信息固定为：
+
+- 输入包Hash；
+- Registry快照Hash；
+- 配置快照Hash；
+- 每个Module Manifest Hash；
+- 每个Module解析后的Config Hash；
+- 每个Stage输入和输出Artifact；
+- Engine和Python环境；
+- 最终状态与诊断路径。
+
+因此，同一个Case出现两种结果时，可以逐项比较两个Run Manifest，而不是重新猜测整个过程。
+
+对于汽车研发环境，它提供的不是“自动通过车规认证”，而是构建以下证据基础：
+
+- 可追溯；
+- 可复现；
+- 变更可识别；
+- 失败可诊断；
+- 结果可回到具体数据范围和程序版本。
+
+
+六、Run Manifest不是什么
+
+1. 它不是最终工程报告
+
+Run Manifest给机器和维护者使用，不替代Excel、PowerPoint或Teams说明。
+
+
+2. 它不是完整运行日志
+
+它保存关键状态和日志入口，不应把数十万行stdout全部塞进JSON。
+
+
+3. 它不是Artifact内容
+
+它登记Artifact Manifest路径和Hash，不重复保存每个CSV的全部内容。
+
+
+4. 它不是算法正确性证明
+
+Run SUCCEEDED只说明既定流程按契约完成，不说明工程假设已经被证明。
+
+
+5. 它不是自由编辑的工作笔记
+
+Run终态确定后应保持不可变。解释性讨论进入Experiment Log、Decision Log或报告。
+
+
+七、实际阅读文件
+
+打开：
+
+  .\U-UDP002\05_TESTS\01_FIXTURES\U20A_v0_1\valid_run_manifest.json
+
+本Fixture描述一次TC001范围运行。
+
+不要按JSON显示顺序机械背字段。按照以下九步阅读。
+
+
+STEP R1：确认运行身份
+
+字段：
+
+  ContractType
+  ContractVersion
+  RunId
+  EngineVersion
+  CaseId
+
+
+1. ContractType
+
+本例：
+
+  U002_RUN_MANIFEST
+
+意义：
+
+告诉Validator这份JSON采用Run规则。
+
+
+2. ContractVersion
+
+本例：
+
+  0.1
+
+表示Manifest公共结构版本，不是Engine版本。
+
+
+3. RunId
+
+本例：
+
+  RUN_TC001_20260803_001
+
+意义：
+
+整次运行的唯一身份。所有本次运行生成的Artifact都应引用同一个RunId。
+
+推荐包含：
+
+  RUN_<Case>_<日期或批次>_<序号>
+
+
+4. EngineVersion
+
+意义：
+
+记录执行S0–S7调度、Registry解析和Artifact登记的U002 Engine版本。
+
+EngineVersion不同，即使Module相同，调度、验证或状态写入行为也可能不同。
+
+
+5. CaseId
+
+本例：
+
+  TC001_20260422
+
+RunScope中的CaseId必须与这里一致，防止把另一个Case的范围或输入混入。
+
+
+STEP R2：确认运行状态和时间
+
+字段：
+
+  RunStatus
+  CreatedAtUtc
+  StartedAtUtc
+  CompletedAtUtc
+
+
+1. RunStatus
+
+允许：
+
+  PENDING
+  RUNNING
+  SUCCEEDED
+  PARTIAL
+  FAILED
+  CANCELLED
+
+
+2. CreatedAtUtc
+
+Run记录被创建的UTC时间。
+
+
+3. StartedAtUtc
+
+真正开始执行的UTC时间。
+
+
+4. CompletedAtUtc
+
+到达终态的UTC时间。
+
+时间语义：
+
+  PENDING
+    StartedAtUtc = null
+    CompletedAtUtc = null
+
+  RUNNING
+    StartedAtUtc有值
+    CompletedAtUtc = null
+
+  SUCCEEDED / PARTIAL / FAILED / CANCELLED
+    StartedAtUtc有值
+    CompletedAtUtc有值
+
+不能把“文件创建时间”当作“运行开始时间”。
+
+
+STEP R3：确认输入、范围与时间轴
+
+字段：
+
+  InputPackages
+  RunScope
+  ClockDomain
+
+
+1. InputPackages
+
+每项包含：
+
+  SourceId
+  SourceType
+  IdentitySha256
+
+至少需要一个输入包。
+
+当前项目通常引用U001 Accepted Package。
+
+IdentitySha256用于区分：
+
+- 同名但内容不同的U001包；
+- 重新Decode或重建后的Case包；
+- 被人工修改过的输入。
+
+
+2. RunScope
+
+字段：
+
+  ScopeType
+  CaseId
+  FrameStart
+  FrameEnd
+
+本例可为：
+
+  ScopeType = FRAME_RANGE
+  CaseId    = TC001_20260422
+  FrameStart = 7400
+  FrameEnd   = 17400
+
+现实意义：
+
+Run不是模糊地“跑这个CSV”，而是明确声明对哪个Case的哪段Frame负责。
+
+以后可进行：
+
+- Preview Run；
+- 全视频Run；
+- 指定事件区间Run；
+- 排除未上路区间后的Run；
+- 同一区间不同算法A/B Run。
+
+
+3. ClockDomain
+
+字段：
+
+  ClockDomainId
+  ClockKind
+  FrameRateHz
+  TimeUnit
+
+当前TC001使用FrameCount作为可信对齐基准，常见FrameRateHz为20。
+
+Run级ClockDomain定义整次运行的主时间域。各Artifact仍要记录自己的ClockDomain，以便验证没有中途偷偷换轴。
+
+
+STEP R4：确认Registry和配置快照
+
+字段：
+
+  RegistrySnapshotSha256
+  ConfigSnapshotSha256
+
+
+1. RegistrySnapshotSha256
+
+Registry刷新Modules目录后，会形成“当时可见模块集合及其身份”的快照。
+
+这个Hash回答：
+
+  本次运行开始时，系统看到的是哪一组Module？
+
+为什么重要？
+
+因为同一个Modules文件夹之后可能新增、删除或升级Module。没有快照，就无法确认当时Engine基于什么环境解析Pipeline。
+
+
+2. ConfigSnapshotSha256
+
+锁定本次运行全部顶层配置，例如：
+
+- Frame范围；
+- 选中的Signal Profile；
+- 选中的Module；
+- invalid-value规则；
+- Candidate预算；
+- Merge gap；
+- 权重；
+- 输出策略。
+
+它不是某一个Module的配置Hash，而是整次Run配置的身份。
+
+以后两个Run结果不同，先比较：
+
+  InputPackages.IdentitySha256
+  RegistrySnapshotSha256
+  ConfigSnapshotSha256
+
+如果三者任何一个不同，结果不同可能是合理的。
+
+
+STEP R5：确认ResolvedModules——本次真正执行谁
+
+字段：
+
+  ResolvedModules[].Order
+  ResolvedModules[].Stage
+  ResolvedModules[].ModuleId
+  ResolvedModules[].ModuleVersion
+  ResolvedModules[].ModuleManifestSha256
+  ResolvedModules[].ResolvedConfigSha256
+  ResolvedModules[].ExecutionRequirement
+  ResolvedModules[].Status
+
+Module目录里存在，不等于本次Run使用。
+
+ResolvedModules记录Engine根据选择、Scope、依赖和冲突规则最终解析出的执行集合。
+
+
+1. Order
+
+实际执行顺序。必须唯一并有序。
+
+Order不是Stage的替代品。一个Stage内可以有多个Module，因此需要Order进一步排序。
+
+
+2. Stage
+
+Module在S0–S7中的位置。
+
+
+3. ModuleId与ModuleVersion
+
+稳定身份和版本。
+
+
+4. ModuleManifestSha256
+
+锁定实际使用的Module Manifest。
+
+
+5. ResolvedConfigSha256
+
+Module配置经过：
+
+  默认值
+  + Profile
+  + 用户选择
+  + Engine解析
+
+以后得到最终Resolved Config。该Hash锁定的就是最终实际参数，而不是GUI里曾经显示的草稿。
+
+
+6. ExecutionRequirement
+
+  REQUIRED
+    失败通常阻断Run或依赖路径。
+
+  OPTIONAL
+    可按FailurePolicy跳过，不一定阻断所有结果。
+
+
+7. Status
+
+允许：
+
+  PENDING
+  RUNNING
+  SUCCEEDED
+  SKIPPED
+  FAILED
+
+Module Status是单个Module状态；RunStatus是整次Run状态。不能混用。
+
+例如：
+
+  Optional Plot Module = SKIPPED
+  但核心S0–S7均成功
+
+Run仍可能符合预先定义的成功条件。
+
+
+STEP R6：确认ResolvedProfiles——使用了哪些可复用策略包
+
+字段：
+
+  ProfileType
+  ProfileId
+  ProfileVersion
+  ResolvedSha256
+
+Profile不是Module。
+
+Module定义能力，Profile定义一组可复用选择或参数。
+
+示例：
+
+  Signal Profile
+    定义选择哪些CAN信号或Canonical信号。
+
+  Invalid-Value Profile
+    定义不同信号的无效值规则。
+
+  Candidate Policy Profile
+    定义Candidate数量、最小间隔、Merge策略。
+
+  Weight Profile
+    定义多Evidence组合权重。
+
+ResolvedSha256锁定Profile经过解析后的实际内容。
+
+现实意义：
+
+以后换车型时可以换Signal Profile，而不需要修改Module代码；换调查目的时可以换Candidate Policy，而不需要复制整个Analyzer。
+
+
+STEP R7：确认Stages——S0至S7实际发生了什么
+
+每个Stage记录：
+
+  Stage
+  Status
+  InputArtifactIds
+  OutputArtifactIds
+  ErrorCode
+
+
+1. Stage
+
+固定为S0–S7。
+
+
+2. Status
+
+允许：
+
+  PENDING
+  RUNNING
+  SUCCEEDED
+  SKIPPED
+  FAILED
+
+
+3. InputArtifactIds
+
+本Stage实际接收哪些Artifact。
+
+
+4. OutputArtifactIds
+
+本Stage实际产生哪些Artifact。
+
+
+5. ErrorCode
+
+成功时通常为null；失败时必须给出稳定错误码。
+
+Stages数组将Pipeline从抽象设计变成实际履历。
+
+例如：
+
+  S1 InputArtifactIds
+    ART_TC001_S0_ACCEPTED_INPUT_001
+
+  S1 OutputArtifactIds
+    ART_TC001_S1_CAMERA_TARGET_001
+    ART_TC001_S1_RADAR_VALIDITY_001
+
+这样可以看出一次Run是否真的走过预定路径，而不是仅仅在最后目录出现一个CSV。
+
+Stages必须唯一并按S0至S7排序。
+
+
+STEP R8：确认Artifacts目录
+
+字段：
+
+  Artifacts[].ArtifactId
+  Artifacts[].ManifestRelativePath
+  Artifacts[].ManifestSha256
+
+这里不是重复Artifact Manifest内容，而是整次Run的Artifact索引。
+
+作用：
+
+- 从Run快速找到全部结果；
+- 验证Stage登记的Artifact是否存在；
+- 锁定每份Artifact Manifest；
+- 给U003或报告工具提供统一入口。
+
+ManifestRelativePath必须是Run包内安全相对路径。
+
+SUCCEEDED Run至少要登记一个Artifact。否则“成功但没有任何结果”在工程上没有意义。
+
+
+STEP R9：确认环境、诊断和Resume
+
+字段：
+
+  Environment
+  DiagnosticsRelativePath
+  ResumeFromArtifactId
+  Extensions
+
+
+1. Environment
+
+包括：
+
+  Platform
+  PythonVersion
+  Dependencies
+
+现实意义：
+
+相同代码在不同Python、pandas、numpy或操作系统版本上可能有差异。
+
+Environment不是为了收集所有电脑信息，只登记影响复现的最小必要环境。
+
+
+2. DiagnosticsRelativePath
+
+指向日志、错误摘要、质量报告或诊断目录。
+
+FAILED、PARTIAL或CANCELLED Run必须有诊断入口。
+
+不要只在屏幕上显示错误后丢失。
+
+
+3. ResumeFromArtifactId
+
+表示本次Run是否从已接受的中间Artifact继续，而不是从S0重新开始。
+
+例如S0–S4已验证，只重新运行S5–S7。
+
+Resume不是简单“跳过前面步骤”。至少应确认：
+
+- Artifact Manifest和Payload Hash一致；
+- Artifact Schema兼容；
+- Scope一致；
+- ClockDomain一致；
+- Registry与相关Module版本满足规则；
+- Config变化不会使上游结果失效。
+
+如果这些条件不满足，必须重新运行上游。
+
+
+4. Extensions
+
+用于未来兼容扩展，不允许悄悄改变核心状态语义。
+
+
+八、六种RunStatus的严格含义
+
+1. PENDING
+
+含义：
+
+Run已经创建并完成基本解析，但尚未开始执行。
+
+要求：
+
+  StartedAtUtc = null
+  CompletedAtUtc = null
+
+
+2. RUNNING
+
+含义：
+
+至少已经开始一个执行动作，尚未到终态。
+
+要求：
+
+  StartedAtUtc有值
+  CompletedAtUtc = null
+
+
+3. SUCCEEDED
+
+含义：
+
+本次Run按正式成功标准完整结束。
+
+当前Core Contract要求至少：
+
+- StartedAtUtc和CompletedAtUtc均存在；
+- S0–S7完整登记；
+- S0–S7全部SUCCEEDED；
+- 所有REQUIRED Module成功；
+- 至少登记一个Artifact。
+
+SUCCEEDED不等于：
+
+- 所有可选图都生成；
+- 所有Candidate都是真异常；
+- Root Cause已经确定；
+- 算法已通过正式业务批准。
+
+
+4. PARTIAL
+
+含义：
+
+Run产生了部分有价值结果，但未满足SUCCEEDED标准。
+
+要求：
+
+- 有开始和结束时间；
+- 有DiagnosticsRelativePath；
+- 明确哪些Stage/Module没有完成；
+- 下游不得默认为完整正式输入。
+
+
+5. FAILED
+
+含义：
+
+Run未能完成预定核心路径。
+
+要求：
+
+- 有开始和结束时间；
+- 至少一个Stage为FAILED；
+- 有DiagnosticsRelativePath；
+- Stage ErrorCode可定位问题。
+
+重要原则：
+
+> valid_failed_run_manifest.json应该通过Contract验证。
+
+因为它“诚实、完整地记录了一次失败”。
+
+相反，一个写着SUCCEEDED但缺Stage或缺Artifact的Manifest才是无效记录。
+
+
+6. CANCELLED
+
+含义：
+
+运行由用户、资源策略或外部条件受控终止。
+
+例如：
+
+- 内存持续增长，工程师主动Abort；
+- 下班前受控停止；
+- 输入发现错误，不再继续浪费计算时间。
+
+要求：
+
+- 有开始和结束时间；
+- 有DiagnosticsRelativePath；
+- 保留已完成Stage和Artifact；
+- 不能伪装成FAILED或直接删除目录。
+
+
+九、Run Manifest完整生命周期
+
+STEP L1：Engineer创建Run请求
+
+选择：
+
+- Case；
+- Frame范围；
+- ClockDomain；
+- Signal/Profile；
+- Module；
+- 参数；
+- 输出策略。
+
+
+STEP L2：Registry刷新
+
+读取Module Manifest，检查：
+
+- Contract；
+- Stage；
+- 版本；
+- 兼容性；
+- SelfTest；
+- 依赖；
+- 输出冲突。
+
+形成Registry Snapshot。
+
+
+STEP L3：Engine解析Pipeline
+
+根据Module依赖和Stage生成：
+
+- ResolvedModules；
+- Order；
+- ResolvedConfig；
+- ResolvedProfiles；
+- 预定S0–S7路径。
+
+
+STEP L4：创建PENDING Run Manifest
+
+此时记录：
+
+- RunId；
+- InputPackages；
+- Scope；
+- ClockDomain；
+- Snapshot Hash；
+- ResolvedModules与Profiles；
+- Stage初始状态。
+
+
+STEP L5：进入RUNNING
+
+写StartedAtUtc。
+
+Module和Stage状态随执行更新。
+
+更新应采用安全写入策略，例如先写临时文件，再原子替换，防止进程中断留下半个JSON。
+
+
+STEP L6：每个Stage登记输入与输出
+
+Stage开始：
+
+  Status = RUNNING
+  InputArtifactIds = 实际输入
+
+Stage成功：
+
+  Status = SUCCEEDED
+  OutputArtifactIds = 已验证Artifact
+
+Stage失败：
+
+  Status = FAILED
+  ErrorCode = 稳定错误码
+
+
+STEP L7：登记Artifacts
+
+每份Artifact Manifest通过验证后，加入Run Manifest的Artifacts索引。
+
+
+STEP L8：确定终态
+
+根据Required/Optional、FailurePolicy和Stage结果决定：
+
+  SUCCEEDED
+  PARTIAL
+  FAILED
+  CANCELLED
+
+写CompletedAtUtc和DiagnosticsRelativePath。
+
+
+STEP L9：冻结终态Manifest
+
+终态Run Manifest不应被随意改写。
+
+如果需要重新运行：
+
+  创建新的RunId
+
+如果允许从中间继续：
+
+  创建新Run
+  + ResumeFromArtifactId
+
+不要把旧FAILED Run改成SUCCEEDED来隐藏历史。
+
+
+十、怎样用Run Manifest比较两次结果
+
+假设：
+
+  Run A的Candidate是12个
+  Run B的Candidate是28个
+
+不要先看代码。按以下顺序比较：
+
+1. CaseId是否相同；
+2. RunScope是否相同；
+3. ClockDomain是否相同；
+4. InputPackages IdentitySha256是否相同；
+5. RegistrySnapshotSha256是否相同；
+6. ConfigSnapshotSha256是否相同；
+7. ResolvedModules列表、版本和Hash是否相同；
+8. ResolvedConfigSha256是否相同；
+9. ResolvedProfiles是否相同；
+10. Environment是否相同；
+11. S0–S7输入输出Artifact链是否相同；
+12. 再检查算法结果本身。
+
+这套顺序把“结果为什么不同”从猜测变成差异定位。
+
+
+十一、结合当前Camera–Radar项目理解
+
+例1：同一个视频跑Preview与Full Case
+
+Preview Run：
+
+  Scope = 7400–17400
+
+Full Run：
+
+  Scope = 7400–视频结束
+
+两个Run都可能SUCCEEDED，但它们不是同一个实验，Candidate数量不能直接比较。
+
+
+例2：Camera Target Selector升级
+
+Run A使用：
+
+  U002.S1.CameraTargetSelector 0.1.0
+
+Run B使用：
+
+  U002.S1.CameraTargetSelector 0.2.0
+
+即使输入相同，Canonical Camera Target不同是预期可能性。Run Manifest使差异可定位到S1，而不是误以为S4 Baseline突然失效。
+
+
+例3：修改invalid-value Profile
+
+Radar Distance的0或327.66等失效规则变化，可能改变有效分析Population。
+
+如果Profile内容变化：
+
+  ResolvedProfiles.ResolvedSha256改变
+  ConfigSnapshotSha256通常也改变
+
+这样S3 Discrepancy和后续Candidate变化就有明确来源。
+
+
+例4：S5实验性Evidence失败
+
+如果该Evidence Module是OPTIONAL且FailurePolicy允许跳过：
+
+- Module Status可为FAILED或SKIPPED；
+- 依赖它的分支被阻断；
+- 其他Evidence仍可保留；
+- Run可能是PARTIAL，而不是伪装SUCCEEDED。
+
+最终是否允许S6生成Candidate，要由正式Candidate合成契约决定。
+
+
+例5：内存增长主动终止
+
+过去G10B1全量运行出现内存持续增长，工程师主动停止。
+
+在U002中应记录为：
+
+  RunStatus = CANCELLED
+  CompletedAtUtc = 实际停止时间
+  DiagnosticsRelativePath = 内存监控与Abort记录
+
+已完成Artifact可保留，但不能把未完成Run当正式Full Case结果。
+
+
+十二、常见错误与判断方式
+
+错误1：同一个RunId反复覆盖运行
+
+后果：
+
+历史配置、结果和失败过程被混合。每次独立执行使用新RunId。
+
+
+错误2：Run写SUCCEEDED，但只跑到S4
+
+后果：
+
+状态与真实流程不一致。当前SUCCEEDED要求完整S0–S7成功。
+
+
+错误3：SUCCEEDED但Artifacts为空
+
+后果：
+
+没有任何可交付结果，Semantic Validation失败。
+
+
+错误4：FAILED但没有失败Stage
+
+后果：
+
+无法知道失败发生在哪里，Validator拒绝。
+
+
+错误5：FAILED/PARTIAL/CANCELLED没有DiagnosticsRelativePath
+
+后果：
+
+只知道失败，不知道证据在哪，不能维护。
+
+
+错误6：RunScope.CaseId与CaseId不同
+
+后果：
+
+范围属于另一Case，必须阻断。
+
+
+错误7：ResolvedModules重复Order或ModuleId
+
+后果：
+
+执行顺序或身份不唯一，无法稳定重现。
+
+
+错误8：Stages顺序错乱或重复
+
+后果：
+
+运行履历不能作为固定S0–S7链解释。
+
+
+错误9：只记录ModuleVersion，不记录Hash
+
+后果：
+
+同版本文件被误改时无法发现。
+
+
+错误10：只保存GUI截图，不保存Resolved Config Hash
+
+后果：
+
+截图不能保证最终实际参数，也无法自动比较。
+
+
+错误11：Resume时只看文件名
+
+后果：
+
+可能从错误Scope、旧Schema或旧算法Artifact继续，污染后续结果。
+
+
+错误12：认为valid FAILED Manifest是测试失败
+
+后果：
+
+混淆业务状态与契约状态。只要失败被正确记录，Manifest就应该通过验证。
+
+
+错误13：把全部stdout塞进Run Manifest
+
+后果：
+
+Manifest巨大、难更新、难比较。正确做法是保存诊断文件，并在DiagnosticsRelativePath引用。
+
+
+错误14：终态后手工改RunStatus
+
+后果：
+
+Run Manifest不再可信。应创建新Run，而不是改历史。
+
+
+十三、动手理解练习
+
+练习1：只读有效Run
+
+打开：
+
+  valid_run_manifest.json
+
+按顺序回答：
+
+1. RunId与CaseId是什么？
+2. 分析Frame范围是什么？
+3. 主ClockDomain是什么？
+4. 使用哪个Input Package？
+5. 解析了几个Module？
+6. 每个Module属于哪个Stage？
+7. 使用哪个Profile？
+8. S0–S7是否完整？
+9. 产生哪些Artifact？
+10. 使用什么Python环境？
+
+
+练习2：阅读有效失败Run
+
+打开：
+
+  valid_failed_run_manifest.json
+
+回答：
+
+1. 哪个Stage失败？
+2. ErrorCode是什么？
+3. DiagnosticsRelativePath在哪里？
+4. 为什么它是FAILED但仍应通过Validator？
+
+
+练习3：阅读不完整成功Run
+
+打开：
+
+  invalid_run_incomplete_succeeded.json
+
+人工判断：
+
+- 缺少哪个Stage；
+- 是否所有REQUIRED Module成功；
+- 是否登记Artifact；
+- 为什么不能写SUCCEEDED。
+
+再运行Validator，对照错误输出。
+
+
+练习4：比较两个假想Run
+
+复制valid_run_manifest.json两份，在临时目录中仅修改一个变量：
+
+  Run A：FrameEnd = 17400
+  Run B：FrameEnd = 27400
+
+思考必须变化的内容：
+
+- RunId；
+- RunScope；
+- ConfigSnapshotSha256；
+- 产生的ArtifactId与Hash；
+- 可能的Candidate数量。
+
+这说明一个参数改变会怎样沿Run和Artifact链传播。
+
+
+练习5：模拟Module升级
+
+只把Camera Target Selector从0.1.0改成0.2.0，列出应同步变化：
+
+- ModuleVersion；
+- ModuleManifestSha256；
+- 可能的ResolvedConfigSha256；
+- RegistrySnapshotSha256；
+- ConfigSnapshotSha256是否变化取决于定义；
+- S1 Output Artifact身份和Hash；
+- 所有依赖S1的后续Artifact。
+
+完成后，就能理解为什么Run Manifest是变更影响分析的入口。
+
+
+十四、第一次拿到Run Manifest时的阅读顺序
+
+不要先展开所有数组。按以下顺序看：
+
+第一层：这是谁
+
+  RunId
+  CaseId
+  RunStatus
+
+第二层：跑了哪里
+
+  RunScope
+  ClockDomain
+
+第三层：用的是什么
+
+  InputPackages
+  RegistrySnapshotSha256
+  ConfigSnapshotSha256
+
+第四层：实际执行谁
+
+  ResolvedModules
+  ResolvedProfiles
+
+第五层：过程怎样
+
+  Stages
+
+第六层：得到了什么
+
+  Artifacts
+
+第七层：能否复现和排障
+
+  Environment
+  DiagnosticsRelativePath
+  ResumeFromArtifactId
+
+这比从JSON第一行看到最后一行更容易建立整体概念。
+
+
+十五、维护者检查清单
+
+Run开始前：
+
+- Input Package身份已确认；
+- CaseId、Scope和ClockDomain一致；
+- Registry刷新完成；
+- Module SelfTest通过；
+- 依赖和冲突已解析；
+- Config与Profile已冻结为Snapshot；
+- 创建唯一RunId。
+
+Run执行中：
+
+- StartedAtUtc只写一次；
+- Module和Stage状态及时更新；
+- Artifact通过验证后再登记；
+- 日志和错误写入Diagnostics；
+- Manifest安全写入，不留下半文件。
+
+Run结束时：
+
+- 终态与实际结果一致；
+- CompletedAtUtc存在；
+- S0–S7履历完整；
+- REQUIRED Module状态符合规则；
+- Artifact索引与实际Manifest一致；
+- FAILED/PARTIAL/CANCELLED有诊断；
+- Validator通过；
+- 终态Manifest冻结。
+
+
+十六、与Experiment Log和Decision Log的关系
+
+Run Manifest记录客观执行事实：
+
+  用了什么
+  跑了什么
+  成功或失败
+  产生什么
+
+Experiment Log记录研究设计和结论：
+
+  为什么运行
+  唯一改变项是什么
+  指标怎样变化
+  Keep / Reject / Modify
+
+Decision Log记录路线决定：
+
+  为什么正式采用或拒绝某方法
+  重新评估条件是什么
+
+三者关系：
+
+  Experiment E001
+      引用Run A与Run B
+          ↓
+      比较Artifact指标
+          ↓
+      得出实验结论
+          ↓
+  Decision D001
+      决定Module是否进入正式Pipeline
+
+Run Manifest让Experiment不再依赖“我记得当时怎么跑的”。
+
+
+十七、与另外两份Manifest的关系
+
+Module Manifest回答：
+
+  系统里有哪些能力、各自需要什么、提供什么。
+
+Artifact Manifest回答：
+
+  某一份实际结果是谁产生、来自哪里、包含什么。
+
+Run Manifest回答：
+
+  本次到底选择并执行了哪些能力，过程和结果是什么。
+
+关系：
+
+  Registry读取Module Manifest
+      ↓
+  Run Manifest登记ResolvedModules
+      ↓
+  Module产生Artifact Manifest和Payload
+      ↓
+  Run Manifest登记Stage与Artifacts
+      ↓
+  Experiment Log引用Run进行比较
+
+
+十八、自检问题
+
+如果能够不用看答案回答以下问题，说明已经掌握本说明书：
+
+1. Case与Run有什么区别？
+2. Run Manifest为什么不是结束后才补写？
+3. RegistrySnapshotSha256和ConfigSnapshotSha256分别锁定什么？
+4. Module Manifest与ResolvedModules有什么区别？
+5. Module Status、Stage Status和RunStatus有什么区别？
+6. 为什么SUCCEEDED要求完整S0–S7和至少一个Artifact？
+7. 为什么FAILED Run也能通过Contract验证？
+8. PARTIAL和FAILED怎样区分？
+9. CANCELLED为什么不能直接删目录？
+10. ResolvedConfigSha256为什么比GUI截图可靠？
+11. Resume前必须确认哪些身份和范围？
+12. 两次Run结果不同时应该按什么顺序比较？
+13. Run Manifest、Experiment Log和Decision Log分别记录什么？
+
+
+十九、五行记忆版
+
+1. Run Manifest是一整次U002运行的输入、配置、模块、过程、结果和环境总账。
+2. Case是调查对象，Run是一次具体执行，Artifact是该次执行产生的结果。
+3. Snapshot和Hash让“当时究竟用了什么”可以被比较和复现。
+4. SUCCEEDED表示契约路径完成，不表示工程结论自动正确；失败也必须被完整记录。
+5. 终态Run不可原地改写，重跑使用新RunId，继续运行通过受控Resume建立新Run。
