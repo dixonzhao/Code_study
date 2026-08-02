@@ -64,11 +64,11 @@ source identity and never rewrite the U001 package.
 
 Use Windows CMD from the C-CODE root.
 
-Create:
+Download all three files directly into:
 
-  .\U-UDP002\04_TEMP\U20A_20260803
+  .\U-UDP002\04_TEMP
 
-Download all three files into this folder.
+Do not create a U20A_20260803 or other task subfolder under 04_TEMP.
 
 Rename only the executable/data suffixes:
 
@@ -87,7 +87,7 @@ All commands below are run from the C-CODE root.
 
 5.1 Self-test
 
-python .\U-UDP002\04_TEMP\U20A_20260803\u002_core_contract_validator_v0_1.py --schema-bundle .\U-UDP002\04_TEMP\U20A_20260803\u002_core_contract_schema_bundle_v0_1.json --self-test
+python .\U-UDP002\04_TEMP\u002_core_contract_validator_v0_1.py --schema-bundle .\U-UDP002\04_TEMP\u002_core_contract_schema_bundle_v0_1.json --self-test
 
 Expected:
 
@@ -96,7 +96,7 @@ Expected:
 
 5.2 Generate eight synthetic fixtures
 
-python .\U-UDP002\04_TEMP\U20A_20260803\u002_core_contract_validator_v0_1.py --schema-bundle .\U-UDP002\04_TEMP\U20A_20260803\u002_core_contract_schema_bundle_v0_1.json --emit-fixtures .\U-UDP002\05_TESTS\01_FIXTURES\U20A_v0_1
+python .\U-UDP002\04_TEMP\u002_core_contract_validator_v0_1.py --schema-bundle .\U-UDP002\04_TEMP\u002_core_contract_schema_bundle_v0_1.json --emit-fixtures .\U-UDP002\05_TESTS\01_FIXTURES\U20A_v0_1
 
 Expected:
 
@@ -105,7 +105,7 @@ Expected:
 
 5.3 Validate the complete fixture directory
 
-python .\U-UDP002\04_TEMP\U20A_20260803\u002_core_contract_validator_v0_1.py --schema-bundle .\U-UDP002\04_TEMP\U20A_20260803\u002_core_contract_schema_bundle_v0_1.json --validate-dir .\U-UDP002\05_TESTS\01_FIXTURES\U20A_v0_1
+python .\U-UDP002\04_TEMP\u002_core_contract_validator_v0_1.py --schema-bundle .\U-UDP002\04_TEMP\u002_core_contract_schema_bundle_v0_1.json --validate-dir .\U-UDP002\05_TESTS\01_FIXTURES\U20A_v0_1
 
 Expected:
 
