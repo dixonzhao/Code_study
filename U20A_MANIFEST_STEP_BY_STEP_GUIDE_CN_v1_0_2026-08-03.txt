@@ -1,0 +1,687 @@
+U002 U2-0A MANIFEST逐步阅读指南
+
+版本：1.0
+日期：2026-08-03
+对象：第一次接触Module / Artifact / Run Manifest的工程师
+Owner：Zhao Zhili
+
+
+一、先记住一句话
+
+三个Manifest分别回答三个不同问题：
+
+Module Manifest：
+  “这个模块是谁、允许做什么、需要什么、会产出什么？”
+
+Artifact Manifest：
+  “这份结果是谁生成的、来自什么、正文在哪里、是否可追溯？”
+
+Run Manifest：
+  “这一次完整运行选了什么、按什么顺序运行、最后发生了什么？”
+
+最简单的类比：
+
+Module Manifest = 员工的岗位说明书和身份证
+Artifact Manifest = 每件产品的出厂单和履历卡
+Run Manifest = 一次项目执行的总台账
+
+Manifest本身不是算法，也不是数据正文。
+
+
+二、今天打开哪些文件
+
+使用VS Code打开：
+
+  .\U-UDP002\05_TESTS\01_FIXTURES\U20A_v0_1
+
+先只看三个文件，按照以下顺序：
+
+1. valid_module_manifest.json
+2. valid_artifact_manifest.json
+3. valid_run_manifest.json
+
+暂时不要先读：
+
+  u002_core_contract_schema_bundle_v0_1.json
+
+Schema Bundle是给Validator和实现者检查规则用的，不是初学者的第一份阅读材料。
+
+
+三、先理解三者关系
+
+运行前：
+
+  Registry读取Module Manifest
+    -> 知道有哪些Module可用
+    -> 检查版本、Stage、输入、输出和自测
+
+运行开始：
+
+  Engine创建Run Manifest
+    -> 记录Case、范围、ClockDomain、Module顺序和配置身份
+
+每个Module执行后：
+
+  Module生成Payload
+    +
+  创建Artifact Manifest
+    -> 记录Payload身份、父Artifact和来源
+
+运行结束：
+
+  Run Manifest记录最终Stage状态和全部Artifact索引
+
+逻辑图：
+
+  Module Manifest
+        |
+        | 被Registry选择
+        v
+  Run Manifest中的ResolvedModules
+        |
+        | Module执行
+        v
+  Payload + Artifact Manifest
+        |
+        | Artifact登记回总台账
+        v
+  Final Run Manifest
+
+
+四、逐步阅读Module Manifest
+
+打开：
+
+  valid_module_manifest.json
+
+不要从第一行一路机械地看到最后。按照下面六组阅读。
+
+
+STEP M1：它是谁
+
+查看：
+
+  ContractType
+  ContractVersion
+  ModuleId
+  ModuleVersion
+  DisplayName
+
+本例：
+
+  ContractType = U002_MODULE_MANIFEST
+  ContractVersion = 0.1
+  ModuleId = U002.S1.CameraTargetSelector
+  ModuleVersion = 0.1.0
+
+含义：
+
+- 这是一个U002 Module定义；
+- 使用Core Contract 0.1；
+- 它是S1阶段的Camera Target Selector；
+- 当前算法实现版本为0.1.0。
+
+ContractVersion与ModuleVersion不是一回事：
+
+- ContractVersion：模块说明书采用哪一版公共格式；
+- ModuleVersion：这个具体模块自身迭代到了哪一版。
+
+
+STEP M2：它在系统里负责什么
+
+查看：
+
+  Stage
+  ModuleKind
+  AlgorithmStatus
+  ExecutionRequirement
+
+本例：
+
+  Stage = S1
+  ModuleKind = SEMANTIC_BUILDER
+  AlgorithmStatus = PROVISIONAL
+  ExecutionRequirement = REQUIRED
+
+含义：
+
+- 它只能在S1 Semantic Reconstruction阶段运行；
+- 它负责构造语义状态，不负责Baseline或Candidate；
+- 算法目前是暂定方法，不得包装成最终真值；
+- 这条Golden Run路径依赖它，失败后不能假装继续成功。
+
+AlgorithmStatus：
+
+  FORMAL        已批准进入正式路径
+  PROVISIONAL   可以用于工程推进，但必须保留限制说明
+  EXPERIMENTAL  只用于实验，不可自动进入正式结论
+  DEPRECATED    已废弃，不应进入新Run
+
+
+STEP M3：它可以看哪些信号
+
+查看：
+
+  ScopeSelector
+  RequiredInputs
+  OptionalInputs
+
+ScopeSelector回答：
+
+  “Registry或GUI应该把哪些信号列给这个Module选择？”
+
+RequiredInputs回答：
+
+  “没有哪些输入，这个Module就不能运行？”
+
+OptionalInputs回答：
+
+  “哪些输入可以增强结果，但缺失时不阻塞？”
+
+本例RequiredInputs中的camera_targets：
+
+  Role = CAMERA_TARGET
+  MinCount = 1
+  MaxCount = null
+
+含义：
+
+- 至少要有一个Camera Target来源；
+- null表示没有在契约层设置固定最大数目；
+- 实际选择哪些Channel、CAN ID和Signal，由Profile和GUI解析；
+- Yamaha当前CAN ID不是通用代码常量。
+
+
+STEP M4：它依赖哪些上游结果
+
+查看：
+
+  RequiresArtifacts
+
+这与RequiredInputs不同：
+
+RequiredInputs：
+  通常指所需源信号或源数据端口。
+
+RequiresArtifacts：
+  指必须由前一Stage或其他Module产生的治理后结果。
+
+例如未来的Residual Evidence Module可能：
+
+  RequiresArtifacts:
+    PRIMARY_OUTCOME
+    BASELINE
+    RESIDUAL
+
+它不应该自己绕过上游，再从原始CSV重新定义Residual。
+
+这正是模块边界能够阻止数学定义漂移的地方。
+
+
+STEP M5：它会产出什么
+
+查看：
+
+  ProvidesArtifacts
+  OutputNamespace
+  ConflictPolicy
+
+本例：
+
+  ArtifactType = CANONICAL_CAMERA_TARGET
+  ExclusiveOutput = true
+  OutputNamespace = camera.canonical_target
+  ConflictPolicy = REQUIRE_ARBITRATION
+
+含义：
+
+- 它声称可以提供一个Canonical Camera Target结果；
+- 同一条正式路径最终只能有一个排他的Canonical结果；
+- 如果多个Resolver竞争，不能“最后写入者覆盖前面”；
+- 必须经过明确的Arbitration Module决定选择谁。
+
+OutputNamespace用来防止不同Module产生同名列或结果时互相覆盖。
+
+
+STEP M6：它如何被配置、执行和检查
+
+查看：
+
+  ConfigurationSchema
+  FailurePolicy
+  Entrypoint
+  SelfTest
+  Compatibility
+  ImplementationSha256
+
+ConfigurationSchema：
+  模块允许有哪些配置、配置版本和配置文件身份。
+
+FailurePolicy：
+  模块失败时，是终止Run、阻断依赖路径，还是只跳过可选路径。
+
+Entrypoint：
+  Engine以后调用哪个文件、哪个函数。
+
+SelfTest：
+  Module被启用前怎样证明最基本功能存在。
+
+Compatibility：
+  它支持哪些U002 Engine版本。
+
+ImplementationSha256：
+  当前实现文件的内容指纹。哪怕文件名一样，只要代码变化，SHA-256就会变化。
+
+注意：
+
+SHA-256证明“内容是不是同一份”，不证明“算法一定正确”。算法正确性仍需要Experiment与Validation。
+
+
+五、逐步阅读Artifact Manifest
+
+打开：
+
+  valid_artifact_manifest.json
+
+Artifact = Manifest + Payload。
+
+例如：
+
+  canonical_camera_target.manifest.json
+  canonical_camera_target.csv
+
+CSV是数据正文Payload；Manifest是它的身份和履历。
+
+
+STEP A1：这是什么结果
+
+查看：
+
+  ArtifactId
+  ArtifactType
+  ArtifactSchemaId
+  ArtifactSchemaVersion
+  ArtifactStatus
+  Stage
+  RunId
+
+本例表示：
+
+- 这是一次特定Run中S1产生的Canonical Camera Target；
+- 数据正文应遵守u002.canonical_camera_target 0.1.0；
+- ArtifactStatus为COMPLETE，表示它已经完整生成。
+
+ArtifactSchemaVersion与ModuleVersion仍然不同：
+
+- ModuleVersion：算法实现版本；
+- ArtifactSchemaVersion：输出数据结构版本。
+
+Module算法升级并不一定改变输出Schema；Schema变化也必须独立管理。
+
+
+STEP A2：是谁生成的
+
+查看：
+
+  Producer.ModuleId
+  Producer.ModuleVersion
+  Producer.ModuleManifestSha256
+
+这组字段把结果锁定到：
+
+- 哪一个Module；
+- 哪一个Module版本；
+- 哪一份具体Module Manifest。
+
+以后出现问题，不能只说“Camera Selector生成的”，而能追到准确实现身份。
+
+
+STEP A3：它从哪些结果演变而来
+
+查看：
+
+  Parents
+
+每个Parent记录：
+
+  ArtifactId
+  ManifestSha256
+  ContentSha256
+
+这形成Lineage Chain：
+
+  Accepted Input
+    -> Canonical Camera Target
+    -> Analysis View
+    -> PrimaryOutcome
+    -> Baseline / Residual
+    -> Evidence
+    -> Candidate
+
+Parent不仅保存名字，还保存父Manifest和父内容的SHA-256，避免上游文件被替换后仍被误认为原实验。
+
+
+STEP A4：数据正文在哪里
+
+查看：
+
+  Payloads
+
+本例Payload包含：
+
+  PayloadId
+  Role
+  RelativePath
+  MediaType
+  ByteSize
+  Sha256
+  RowCount
+  PayloadKind
+
+关键理解：
+
+- Manifest不把几十万行数据塞进JSON；
+- Manifest只描述并指向Payload；
+- Payload可以是CSV、JSON、模型或未来的大型数据引用；
+- RelativePath禁止绝对路径和“..”跳出Run目录；
+- Payload自己的SHA-256用于验证正文有没有变化。
+
+这也解释为什么未来LiDAR不必被强制放进一张CSV。Artifact Manifest可以指向点云Payload或点云索引。
+
+
+STEP A5：这份结果覆盖什么范围
+
+查看：
+
+  Scope
+  ClockDomain
+  SourceReferences
+
+Scope回答：
+
+  “这是全Case还是某段FrameCount？”
+
+ClockDomain回答：
+
+  “这些记录使用哪个时间/帧域？”
+
+本例：
+
+  ClockKind = FRAMECOUNT
+  FrameRateHz = 20.0
+
+SourceReferences回答：
+
+  “最终源数据来自哪个已接受U001 Package？”
+
+FrameCount是当前Case的可信同步域，但Contract没有把世界上所有未来数据都硬编码为FrameCount。
+
+
+STEP A6：结果的工程语义是什么
+
+查看：
+
+  Metadata
+  CoordinateFrame
+  UncertaintyReference
+  Extensions
+
+Metadata可以记录：
+
+- Eligibility；
+- MissingReason；
+- SelectionConfidence；
+- Algorithm限制；
+- 统计摘要。
+
+CoordinateFrame和UncertaintyReference为将来GNSS、LiDAR或融合结果保留明确位置；当前Camera-Radar标量结果可以为null。
+
+Extensions只能用于带命名空间的扩展信息，不能借它绕过正式字段随意塞入核心定义。
+
+
+六、逐步阅读Run Manifest
+
+打开：
+
+  valid_run_manifest.json
+
+Run Manifest是一次完整分析Run的总台账。
+
+
+STEP R1：这次Run是谁
+
+查看：
+
+  RunId
+  EngineVersion
+  CaseId
+  RunStatus
+  CreatedAtUtc
+  StartedAtUtc
+  CompletedAtUtc
+
+RunStatus：
+
+  PENDING
+  RUNNING
+  SUCCEEDED
+  PARTIAL
+  FAILED
+  CANCELLED
+
+重要区别：
+
+Run执行失败，不等于Run Manifest无效。
+
+一次FAILED Run如果正确记录失败Stage、ErrorCode和Diagnostics，它仍然是一份有效且有价值的工程证据。
+
+
+STEP R2：这次分析用的是什么数据范围
+
+查看：
+
+  InputPackages
+  RunScope
+  ClockDomain
+
+InputPackages记录输入U001 Package身份。
+
+RunScope记录：
+
+  FULL_CASE
+或者
+  FRAME_RANGE + FrameStart + FrameEnd
+
+这使得“只跑7400到17400”成为Run正式定义，而不是运行人员口头记忆。
+
+
+STEP R3：这次到底选择了哪些Module
+
+查看：
+
+  RegistrySnapshotSha256
+  ResolvedModules
+
+RegistrySnapshotSha256：
+  本次选择Module时，Module目录是什么状态。
+
+ResolvedModules每一项记录：
+
+  Order
+  Stage
+  ModuleId
+  ModuleVersion
+  ModuleManifestSha256
+  ResolvedConfigSha256
+  ExecutionRequirement
+  Status
+
+所以以后能够回答：
+
+- S1当时用的是哪一个Camera Selector？
+- 它的配置是不是后来被修改过？
+- S5当时启用了哪个Evidence Module？
+- 某个Optional Module是否被跳过？
+
+
+STEP R4：这次用了哪些Profile
+
+查看：
+
+  ResolvedProfiles
+
+Profile可能包括：
+
+- Signal Profile；
+- Invalid Value Rule Profile；
+- Baseline Profile；
+- Candidate Policy Profile。
+
+Run Manifest保存Profile ID、版本和最终解析内容的SHA-256。
+
+这可以防止GUI里改了参数但报告里完全没有记录。
+
+
+STEP R5：每个Stage发生了什么
+
+查看：
+
+  Stages
+
+每个Stage记录：
+
+  Stage
+  Status
+  InputArtifactIds
+  OutputArtifactIds
+  ErrorCode
+
+SUCCEEDED Run必须完整记录S0到S7，并且Required Module和所有Stage成功。
+
+这不是为了增加形式，而是为了防止：
+
+  “Excel生成了，所以默认前面所有步骤都成功。”
+
+
+STEP R6：所有结果在哪里
+
+查看：
+
+  Artifacts
+
+Run Manifest不重复写全部Artifact内容，只记录：
+
+  ArtifactId
+  ManifestRelativePath
+  ManifestSha256
+
+它相当于本次Run所有结果的目录。
+
+
+STEP R7：出了问题怎样排查
+
+查看：
+
+  Environment
+  DiagnosticsRelativePath
+  ResumeFromArtifactId
+
+Environment记录Python、平台和依赖版本。
+
+DiagnosticsRelativePath指向失败日志和诊断结果。
+
+ResumeFromArtifactId以后用于判断能否从某个已接受Artifact继续，而不是无条件复用旧中间文件。
+
+
+七、怎样从一个异常结果反向追踪
+
+假设U003里看到一个可疑Candidate：
+
+1. 在Run Manifest的Artifacts中找到Candidate Artifact；
+2. 打开它的Artifact Manifest；
+3. 查看Producer，确认S6 Candidate Module及版本；
+4. 查看Parents，找到S5 Evidence Artifact；
+5. 继续沿Parents找到S4 Residual / Baseline；
+6. 继续找到S3 PrimaryOutcome；
+7. 继续找到S2 Analysis View和S1 Semantic Target；
+8. 最后通过SourceReferences追到U001 Accepted Package；
+9. 使用各级Payload的SHA-256确认内容没有被替换；
+10. 回到Run Manifest确认当时的配置、Profile和运行范围。
+
+这就是可追溯性的实际含义。
+
+
+八、用四个坏Fixture学习Validator
+
+依次打开：
+
+1. invalid_module_missing_field.json
+   问题：ModuleId被删除，模块没有身份。
+
+2. invalid_module_stage.json
+   问题：Stage被改成S8，但正式流程只有S0到S7。
+
+3. invalid_artifact_parent_identity.json
+   问题：父Artifact的ContentSha256不是合法SHA-256。
+
+4. invalid_run_incomplete_succeeded.json
+   问题：Run声称SUCCEEDED，但Stage集合缺少S7。
+
+这里最重要的是第四个：
+
+系统不允许“最终文件看起来生成了”就宣布成功。成功状态必须与完整执行证据一致。
+
+
+九、单文件验证练习
+
+从C-CODE根目录运行：
+
+验证一个正确Module：
+
+python .\U-UDP002\04_TEMP\u002_core_contract_validator_v0_1.py --schema-bundle .\U-UDP002\04_TEMP\u002_core_contract_schema_bundle_v0_1.json --validate .\U-UDP002\05_TESTS\01_FIXTURES\U20A_v0_1\valid_module_manifest.json
+
+预期：
+
+  UDP002-U20A-VALID-MODULE-valid_module_manifest.json C-0
+
+验证一个错误Module：
+
+python .\U-UDP002\04_TEMP\u002_core_contract_validator_v0_1.py --schema-bundle .\U-UDP002\04_TEMP\u002_core_contract_schema_bundle_v0_1.json --validate .\U-UDP002\05_TESTS\01_FIXTURES\U20A_v0_1\invalid_module_missing_field.json
+
+预期：
+
+  C-7
+
+并且错误内容会指出：
+
+  MISSING_FIELD
+  ModuleManifest
+  ModuleId
+
+
+十、今天不需要记住什么
+
+不需要背下：
+
+- 每一个字段；
+- JSON Schema语法；
+- SHA-256算法细节；
+- 将来所有Module类型；
+- U002 Engine具体实现。
+
+今天只需要能回答：
+
+1. Module Manifest为什么不能被Artifact Manifest代替？
+2. Payload与Artifact Manifest有什么区别？
+3. Run失败时为什么仍然需要有效Run Manifest？
+4. 怎样从Candidate沿Parents追到U001来源？
+5. 为什么Module版本、Artifact Schema版本和Contract版本必须分开？
+
+
+十一、五句最终记忆
+
+1. Module Manifest管“能力和边界”。
+2. Artifact Manifest管“结果和血缘”。
+3. Run Manifest管“一次执行的全貌”。
+4. Payload保存正文，Manifest保存身份和证据。
+5. C-0只表示契约检查通过，不自动表示算法结论正确。
