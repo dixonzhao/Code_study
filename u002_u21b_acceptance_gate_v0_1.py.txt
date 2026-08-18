@@ -99,7 +99,9 @@ def atomic_json(path: Path, value: Any) -> None:
 def atomic_text(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(value, encoding="utf-8")
+    # Write bytes directly so Windows cannot translate LF to CRLF. Evidence
+    # hashes and self-tests must be byte-stable across supported hosts.
+    temporary.write_bytes(value.encode("utf-8"))
     os.replace(temporary, path)
 
 
@@ -444,7 +446,9 @@ def run_selftest() -> str:
     checks: list[str] = []
 
     def check(name: str, condition: bool) -> None:
-        require(condition, "GATE_SELFTEST", name)
+        if not condition:
+            reason = safe_slug(name).upper()
+            raise GateError(f"GATE_SELFTEST_{reason}", name)
         checks.append(name)
 
     check("sha-bytes", sha256_bytes(b"abc") == hashlib.sha256(b"abc").hexdigest())
