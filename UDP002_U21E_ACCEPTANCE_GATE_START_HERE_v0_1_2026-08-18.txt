@@ -1,0 +1,281 @@
+UDP002 U21E INDEPENDENT BLACK-BOX ACCEPTANCE GATE
+
+Task ID: U21E-GATE
+Version: 0.1
+Date: 2026-08-18
+Owner: Zhao Zhili
+Status: APPROVED FOR COMPANY-SIDE IMPLEMENTATION
+
+
+1. PURPOSE
+
+Independently evaluate the exact company-side candidate:
+
+  u002_run_preflight_data_binder_v0_1.py.txt
+
+The Gate must not trust U21E1 self-reported counts. It must call only the public
+CLI, create external U001 CONTROLLED_PROFILE fixtures and Run Requests, inspect
+the resulting binding evidence, and verify controlled denial behavior.
+
+The Gate uses one real qualified U21D software-plan output and its matching
+synthetic Module root so that U21D -> U21E interface compatibility is tested.
+No company CAN data and no production analysis callable may be used.
+
+
+2. GENERATE EXACTLY ONE FILE
+
+Generate and return the complete downloadable Python source:
+
+  u002_u21e_acceptance_gate_v0_1.py.txt
+
+Initial company location:
+
+  U-UDP002/04_TEMP
+
+Do not modify the candidate binder, the qualified plan, the Module Packs, U001,
+U21A-D or frozen U2-0A contracts. Do not return only prose or partial code.
+
+Use Python standard library only.
+
+
+3. REQUIRED MODES
+
+Gate helper self-test:
+
+  --self-test
+
+Success:
+
+  U21EGS1 N-T12-X0 C-0
+
+Formal run:
+
+  --run
+  --binder PATH
+  --qualified-plan PATH
+  --modules-root PATH
+  --out-dir PATH
+
+The formal out-dir must not already exist. Controlled exits are 0 and 7.
+
+
+4. GATE-OWNED OUTPUT
+
+Create below --out-dir:
+
+  01_FIXTURES
+  02_POSITIVE_OUTPUTS
+  03_FAILURE_OUTPUTS
+  04_GATE_EVIDENCE
+  05_LOGS
+
+Final evidence:
+
+  04_GATE_EVIDENCE/U21E_ACCEPTANCE_EVIDENCE.json
+
+All Gate writes must remain under --out-dir. The supplied qualified plan and
+Module root are read-only inputs.
+
+
+5. EXACT INPUT IDENTITIES
+
+Record exact byte SHA-256 for:
+
+- candidate binder;
+- qualified software plan;
+- every plan-selected Module Manifest;
+- every selected implementation;
+- every selected configuration schema.
+
+Require from the plan:
+
+  PlanType = U002_QUALIFIED_MODULE_PLAN
+  PlanVersion = 0.1
+  PlanStatus = SOFTWARE_PLAN_READY
+  SignalBindingStatus = DEFERRED_TO_RUN_PREFLIGHT
+
+The final Gate decision applies only to the tested binder SHA-256.
+
+
+6. EXTERNAL VALID U001 PACKAGE
+
+Construct one Gate-owned CONTROLLED_PROFILE package containing the six exact
+standard basenames D1-D6.
+
+D3 must use the U001 required Signal Catalog columns. Derive at least one
+eligible synthetic CanonicalName for every RequiredInputs port in the supplied
+qualified plan. Satisfy selectors deterministically using the first supported
+selector and explicit U001-to-U002 ValueKind mapping.
+
+Also create:
+
+- one additional eligible signal for an ALL_MATCHES port;
+- one optional-port signal when an optional port exists;
+- one ineligible catalog signal that must never bind;
+- exact D2 seven-column header groups for included frame-view signals;
+- tidy passing D4 global/per-signal quality evidence;
+- complete successful path-safe D5 CONTROLLED_PROFILE identity;
+- D1 and D6 files containing non-CSV/invalid-text payload after a short sentinel
+  prefix so any attempted semantic parsing is exposed.
+
+D2 may be header-only. D4/D5 provide a synthetic valid FrameCount range. This
+deliberately proves that U21E binds metadata/header evidence rather than scanning
+the analysis payload.
+
+
+7. EXTERNAL RUN REQUESTS
+
+Construct deterministic valid configuration objects from each selected
+Module's configuration schema. Support only the approved U21E v0.1 schema
+subset and deny the Gate run if the supplied Module schemas require unsupported
+keywords.
+
+Create at least these valid requests:
+
+P1 FULL_CASE with EXPLICIT required-port bindings;
+P2 FRAME_RANGE inside the declared domain;
+P3 ALL_MATCHES on one compatible port while respecting MinCount/MaxCount;
+P4 omitted optional ports normalized to NONE.
+
+If the supplied plan has no suitable optional port or ALL_MATCHES cardinality,
+the Gate may create a Gate-owned exact copy of one Module Pack and matching plan
+projection only inside 01_FIXTURES. The copied identities must be recomputed and
+must not be presented as U21D-accepted production software.
+
+
+8. POSITIVE REPEATABILITY
+
+Run the same P1 bind request twice into two different output files.
+
+Independently require:
+
+- both binder exits are 0;
+- both statuses are RUN_PREFLIGHT_READY;
+- binder, plan, D2/D3/D4/D5 and request hashes equal Gate calculations;
+- exact U21D Module order is preserved;
+- every required input port is resolved;
+- optional omissions are explicitly NONE;
+- selected CanonicalNames satisfy port and Module scope selectors;
+- D2 seven-column mappings are exact;
+- ResolvedConfigSha256 values equal Gate normalization/hash calculations;
+- FULL_CASE frame bounds equal D4/D5 evidence;
+- no D1/D6 parsing failure occurs;
+- no Module file is imported, executed or modified.
+
+Compare a stable projection of repeated outputs. Exclude only GeneratedAtUtc.
+All other governed content must agree.
+
+
+9. INDEPENDENT FAILURE MATRIX
+
+Create and run at least these twelve denied requests/packages:
+
+F1  software plan status or SignalBindingStatus is invalid;
+F2  selected Module/implementation/configuration-schema hash is stale;
+F3  one standard U001 package file is missing;
+F4  duplicate CanonicalName exists in D3;
+F5  D4 contains blocking FrameCount/package quality failure;
+F6  D5 is failed/incomplete or contains an unsafe absolute/parent path;
+F7  a required D2 seven-column signal group is incomplete;
+F8  one RequiredInputs port is omitted;
+F9  EXPLICIT CanonicalName does not satisfy its selector;
+F10 ALL_MATCHES violates MinCount or MaxCount;
+F11 RunScope is outside the declared frame domain or invalid EVALUATION timing;
+F12 Module configuration is missing, has an illegal extra property, or uses an
+    unsupported schema keyword.
+
+Independently require exit 7, expected stable reason class and no partial
+RUN_PREFLIGHT_READY output for every case.
+
+The Gate may include extra cases but must not replace F1-F12.
+
+
+10. NON-EXECUTION AND IMMUTABILITY PROOF
+
+Before and after all tests, recursively snapshot supplied Module-root relative
+paths, byte hashes and sizes. Require exact equality.
+
+Also require:
+
+- no new file under the supplied Module root;
+- no production marker created;
+- supplied qualified plan bytes unchanged;
+- Gate-owned U001 source fixtures unchanged;
+- no discrepancy, baseline, residual, score or candidate artifact exists.
+
+Controlled subprocess invocation of the binder is allowed. Importing the binder
+into the Gate process is forbidden.
+
+
+11. FINAL GATE EVIDENCE
+
+Write one atomic UTF-8 JSON object containing:
+
+  GateType = U21E_INDEPENDENT_ACCEPTANCE
+  GateVersion = 0.1
+  GeneratedAtUtc
+  GateStatus
+  InputHashes
+  QualifiedPlanResult
+  PositiveRepeatability
+  U001BoundaryResult
+  SignalBindingResult
+  ConfigurationResult
+  ScopeResult
+  FailureMatrix
+  NonExecutionResult
+  Assertions
+  ReturnCapsule
+
+Assertions must contain independent Gate observations, not copied U21E summary
+counts.
+
+
+12. GATE HELPER SELF-TEST - 12 CHECKS
+
+Cover argument exclusivity, existing output denial, path containment, stable
+hashing, JSON/CSV fixture writers, selector synthesis, ValueKind bridge,
+configuration synthesis, child-process capture, stable projection, atomic
+evidence and controlled-error formatting.
+
+
+13. SUCCESS CAPSULE
+
+Print only:
+
+  U21EG1 N-R2-P4-F12-I6-X0 C-0
+
+Meanings:
+
+  R2  two repeated positive bindings agreed
+  P4  four external positive request modes passed
+  F12 twelve independent controlled denials passed
+  I6  six identity/immutability groups passed
+  X0  no uncontrolled exception
+
+Failure:
+
+  U21EG1 N-R<r>-P<p>-F<f>-I<i>-X<x> C-7 K-<reason>
+
+
+14. COMPANY EXECUTION FLOW
+
+1. Give Copilot this complete specification.
+2. Download the generated Gate as the exact filename above into 04_TEMP.
+3. Run Gate helper self-test.
+4. Locate one accepted U21D Gate positive plan and its matching fixture
+   Module root. Do not guess newest files; use the U21D Gate evidence paths.
+5. Run formal Gate into a new directory under 05_TESTS/02_ACCEPTANCE.
+6. Return only the U21EG1 line. On failure add at most one short Memo.
+
+The exact CMD commands depend on the retained U21D Gate directory and must be
+provided by company Copilot after reading actual paths. Do not manually retype
+long paths if Copilot can generate them from the local tree.
+
+
+15. COMPLETION BOUNDARY
+
+Gate C-0 accepts only the exact tested binder identity. A separate byte-identical
+promotion step remains required before U21E is frozen and U21F is authorized.
+
+END OF U21E GATE SPECIFICATION
