@@ -1,0 +1,109 @@
+UDP002 U21B INDEPENDENT ACCEPTANCE GATE
+
+Version: 0.1
+Date: 2026-08-18
+Owner: Zhao Zhili
+Status: APPROVED FOR COMPANY-SIDE EXECUTION
+
+
+1. PURPOSE
+
+U21B internal self-test returned:
+
+  U21B1 N-T24-V1-I2-C1-M2-Q4-S1-X0 C-0
+
+This proves the Registry's internal checks, but it is self-reported evidence.
+This independent Gate treats the Registry as an opaque child process, builds a
+separate mixed Module directory and verifies the resulting snapshot externally.
+
+
+2. FILES TO DOWNLOAD
+
+Download these two files directly into U-UDP002/04_TEMP:
+
+  UDP002_U21B_ACCEPTANCE_GATE_START_HERE_v0_1_2026-08-18.txt
+  u002_u21b_acceptance_gate_v0_1.py.txt
+
+The first file is this instruction. The second file is executed directly by
+Python. Do not ask Copilot to rewrite the Gate.
+
+
+3. PRECONDITIONS
+
+The following company-side files must already exist:
+
+  U-UDP002/04_TEMP/u002_module_registry_v0_1.py.txt
+  U-UDP002/04_TEMP/u002_core_contract_schema_bundle_v0_1.json.txt
+  U-UDP002/04_TEMP/u002_core_contract_validator_v0_1.py.txt
+  U-UDP002/05_TESTS/01_FIXTURES/U20A_v0_1/valid_module_manifest.json
+
+Do not modify U21A, U20A fixtures, the Registry or frozen contract files.
+
+
+4. GATE SELF-TEST
+
+Run from C-CODE root using CMD:
+
+  python .\U-UDP002\04_TEMP\u002_u21b_acceptance_gate_v0_1.py.txt --self-test
+
+Expected:
+
+  U21BGS N-T16-X0 C-0
+
+If this fails, stop and return its first error line.
+
+
+5. INDEPENDENT GATE RUN
+
+The output directory must not already contain files. Run:
+
+  python .\U-UDP002\04_TEMP\u002_u21b_acceptance_gate_v0_1.py.txt --run --registry .\U-UDP002\04_TEMP\u002_module_registry_v0_1.py.txt --schema-bundle .\U-UDP002\04_TEMP\u002_core_contract_schema_bundle_v0_1.json.txt --contract-validator .\U-UDP002\04_TEMP\u002_core_contract_validator_v0_1.py.txt --fixture-manifest .\U-UDP002\05_TESTS\01_FIXTURES\U20A_v0_1\valid_module_manifest.json --out .\U-UDP002\05_TESTS\02_ACCEPTANCE\U21B_GATE_20260818
+
+If accepted contract files use the same basename without a final .txt suffix,
+change only that suffix in this command.
+
+
+6. EXPECTED RESULT
+
+  U21BG1 N-R2-M10-S6-H12-D1-N0-X0 C-0
+
+Meaning:
+
+  R2  two independent Registry scans completed;
+  M10 ten synthetic Module entries were externally verified;
+  S6  all six Registry status classes were present in StatusCounts;
+  H12 twelve independent hash-link checks passed;
+  D1  outputs matched after normalizing GeneratedAtUtc only;
+  N0  no Module implementation marker was created;
+  X0  no uncontrolled Gate exception occurred.
+
+
+7. OUTPUT EVIDENCE
+
+The Gate creates:
+
+  U-UDP002/05_TESTS/02_ACCEPTANCE/U21B_GATE_20260818/
+    00_FIXTURES/
+    01_RUNS/
+    02_EVIDENCE/
+      U21B_ACCEPTANCE_EVIDENCE.json
+      U21B_ACCEPTANCE_REPORT.txt
+      U21B_RETURN_CAPSULE.txt
+
+The accepted Registry SHA-256 is stored in U21B_ACCEPTANCE_EVIDENCE.json. Do not
+manually transcribe the full hash.
+
+
+8. RETURN
+
+Return only:
+
+  U21BG1 N-R2-M10-S6-H12-D1-N0-X0 C-0
+
+On failure return the first U21BG1-ERROR line plus at most one short Memo.
+
+Passing this Gate does not itself move the Registry into 01_PROGRAMS. Promotion
+is a separate byte-identity-preserving closeout after formal acceptance.
+
+
+END
