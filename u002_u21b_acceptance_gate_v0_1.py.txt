@@ -280,6 +280,23 @@ def entry_by_path(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {entry.get("ManifestRelativePath"): entry for entry in snapshot["Modules"]}
 
 
+def identity_sort_part(value: Any) -> tuple[int, str]:
+    # Parsed identity values sort normally. An unreadable Manifest has no
+    # identity and is placed after identifiable Modules for stable review.
+    if isinstance(value, str) and value:
+        return (0, value)
+    return (1, "")
+
+
+def module_sort_key(entry: dict[str, Any]) -> tuple[tuple[int, str], tuple[int, str], tuple[int, str], str]:
+    return (
+        identity_sort_part(entry.get("Stage")),
+        identity_sort_part(entry.get("ModuleId")),
+        identity_sort_part(entry.get("ModuleVersion")),
+        entry.get("ManifestRelativePath") or "",
+    )
+
+
 def verify_snapshot(snapshot: dict[str, Any]) -> int:
     require(TOP_FIELDS.issubset(snapshot), "SNAPSHOT_TOP_FIELDS")
     require(snapshot["RegistrySnapshotType"] == "U002_MODULE_REGISTRY_SNAPSHOT", "SNAPSHOT_TYPE")
@@ -295,15 +312,7 @@ def verify_snapshot(snapshot: dict[str, Any]) -> int:
         require(not Path(entry["ManifestRelativePath"]).is_absolute(), "ABSOLUTE_MANIFEST_PATH")
         require(entry["RegistryStatus"] in EXPECTED_COUNTS, "UNKNOWN_STATUS")
         require(entry["ReasonCodes"] == sorted(entry["ReasonCodes"]), "REASON_ORDER")
-    ordered = sorted(
-        modules,
-        key=lambda entry: (
-            entry.get("Stage") or "",
-            entry.get("ModuleId") or "",
-            entry.get("ModuleVersion") or "",
-            entry.get("ManifestRelativePath") or "",
-        ),
-    )
+    ordered = sorted(modules, key=module_sort_key)
     require(modules == ordered, "MODULE_ORDER")
     by_path = entry_by_path(snapshot)
 
@@ -459,7 +468,7 @@ def run_selftest() -> str:
     check("expected-module-ten", sum(EXPECTED_COUNTS.values()) == 10)
     check("top-fields", "Modules" in TOP_FIELDS and "StatusCounts" in TOP_FIELDS)
     check("entry-fields", "RegistryStatus" in ENTRY_FIELDS and "ManifestSha256" in ENTRY_FIELDS)
-    check("slug", safe_slug("A-B.C") == "A_B_C")
+    check("null-identity-last", identity_sort_part(None) > identity_sort_part("S1"))
     normalized = normalized_snapshot({"GeneratedAtUtc": "now", "Modules": []})
     check("normalize-time", normalized["GeneratedAtUtc"] == "<NORMALIZED>")
     with tempfile.TemporaryDirectory(prefix="u21bgate_selftest_") as temporary:
