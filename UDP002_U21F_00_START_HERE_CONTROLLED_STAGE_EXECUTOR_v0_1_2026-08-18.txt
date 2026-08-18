@@ -1,0 +1,527 @@
+UDP002 U21F CONTROLLED STAGE EXECUTOR
+
+Task ID: U21F
+Specification Version: 0.1
+Date: 2026-08-18
+Owner: Zhao Zhili
+Status: APPROVED FOR COMPANY-SIDE IMPLEMENTATION AND INTERNAL SELF-TEST
+
+
+1. OBJECTIVE
+
+Build the first governed execution layer that turns one accepted U21E
+RUN_PREFLIGHT_READY document into one controlled U002 Run.
+
+U21F must:
+
+- initialize one new U21A-compatible Run workspace;
+- execute only the exact qualified Modules and bindings approved by U21E;
+- isolate every Module invocation in a child process;
+- validate every Module request, result, payload and Artifact Manifest;
+- update S0-S7, Module, Artifact and Run states atomically;
+- apply declared FailurePolicy without hidden continuation;
+- preserve bounded diagnostics and input immutability evidence;
+- produce a contract-valid governed Run or a contract-valid controlled failure.
+
+U21F is execution infrastructure. It must not contain Camera/Radar algorithms,
+statistics, SysID, baseline, residual, Candidate or U003 business logic.
+
+
+2. POSITION AND OWNERSHIP
+
+U21A  creates the governed Run identity, workspace and initial PENDING lifecycle.
+U21B  establishes statically eligible Module identities.
+U21C  proves selected Module software can pass its declared self-test.
+U21D  creates a deterministic SOFTWARE_PLAN_READY order and Artifact graph.
+U21E  binds that plan to exact U001 signals, configurations and Run scope.
+U21F  executes the approved plan and commits verified Artifacts.
+U21G  independently proves the complete synthetic vertical chain.
+
+U21F must use the frozen outputs of U21A-U21E. It must not rewrite or extend
+their source files, schemas or accepted evidence.
+
+
+3. GENERATE EXACTLY THREE DOWNLOADABLE FILES
+
+Generate complete files, without Markdown fences:
+
+1. u002_module_runtime_protocol_bundle_v0_1.json.txt
+2. u002_module_runtime_protocol_validator_v0_1.py.txt
+3. u002_controlled_stage_executor_v0_1.py.txt
+
+Initial company location for all three:
+
+  U-UDP002/04_TEMP
+
+Do not generate BAT, PowerShell, GUI, Office file, README or additional source.
+Use English identifiers and concise English code comments. Python executor and
+protocol validator must use the standard library only. Production Modules may
+later use approved third-party libraries inside their own child process.
+
+
+4. IMPLEMENTER INPUTS
+
+Provide Copilot no more than three files at one time:
+
+1. this complete U21F specification;
+2. promoted u002_engine_skeleton_v0_1.py;
+3. frozen u002_core_contract_schema_bundle_v0_1.json.txt.
+
+The generated executor must call the existing core contract validator through
+an explicit CLI path at runtime. Do not copy or redesign that validator.
+
+
+5. FIXED RUNTIME STAGES
+
+Preserve the frozen order:
+
+  S0 Intake and Contract Gate
+  S1 Semantic Reconstruction and Analysis Preprocessing
+  S2 Analysis View and Population Construction
+  S3 Primary Outcome Construction
+  S4 Baseline and Residual
+  S5 Evidence Engines
+  S6 Candidate Synthesis
+  S7 Handoff and Export
+
+Module order is the exact U21D ExecutionOrder already preserved by U21E.
+Execution is serial in v0.1. No thread, process pool, parallel Stage or automatic
+performance optimization is permitted in the control plane.
+
+
+6. RUNTIME MODULE ABI v0.1
+
+The Module Manifest already declares Entrypoint.RelativeFile and
+Entrypoint.Callable. U21F freezes the callable convention:
+
+  result = declared_callable(request)
+
+Requirements:
+
+- exactly one positional argument;
+- request is a Python mapping loaded from a validated runtime request;
+- return value is one JSON-serializable mapping;
+- no DataFrame, numpy object, custom class or generator may cross the boundary;
+- Module writes payload files only below its assigned staging output root;
+- Module never writes an Artifact Manifest or Run Manifest;
+- Module never edits U001, preflight, plan, Module Manifest or prior Artifact;
+- Module does not decide its own Stage, identity, configuration or scope.
+
+This ABI is a software interface, not an algorithm definition. U22 Algorithm
+Cards and Module specifications will define each real Module's mathematics.
+
+
+7. RUNTIME PROTOCOL BUNDLE
+
+The JSON bundle must be a deterministic JSON Schema 2020-12 document containing
+two definitions and exact constants:
+
+  U002_MODULE_EXECUTION_REQUEST / version 0.1
+  U002_MODULE_EXECUTION_RESULT  / version 0.1
+
+Reject unknown top-level fields in both documents.
+
+7.1 Request required logical fields
+
+  ContractType
+  ContractVersion
+  RunId
+  CaseId
+  Stage
+  ModuleIdentity
+  Scope
+  ClockDomain
+  BoundSignals
+  InputArtifacts
+  Configuration
+  ExecutionPolicy
+  RuntimePaths
+
+ModuleIdentity contains exact ModuleId, ModuleVersion, ManifestSha256,
+ImplementationSha256 and Callable.
+
+BoundSignals preserves U21E port identity, role, required/optional status,
+selection mode, CanonicalNames, D3 semantic projection and exact D2 column
+mapping. Do not let the executor search for replacement signals.
+
+InputArtifacts contains exact upstream ArtifactId, type, schema identity,
+ManifestSha256 and validated payload locations.
+
+ExecutionPolicy contains TimeoutSeconds and MaxRetainedLogBytes.
+
+RuntimePaths is explicitly ephemeral and may contain absolute company-local
+paths required by the child process. It must never be copied into formal Run,
+Artifact, export or diagnostic manifests. Formal evidence stores only logical
+identities, relative paths and SHA-256 values.
+
+7.2 Result required fields
+
+  ContractType
+  ContractVersion
+  RunId
+  Stage
+  ModuleId
+  ModuleVersion
+  Status
+  Artifacts
+  Warnings
+  Metrics
+
+Status is SUCCEEDED, SKIPPED or FAILED.
+
+Each Artifact declaration contains:
+
+  ArtifactType
+  ArtifactSchemaId
+  ArtifactSchemaVersion
+  Payloads
+  CoordinateFrame
+  UncertaintyReference
+  Metadata
+
+Each Payload declaration contains:
+
+  RelativePath
+  Role
+  MediaType
+  RowCount
+  PayloadKind
+
+The Module must not claim payload SHA-256 or ByteSize. The parent executor owns
+those measurements from exact persisted bytes.
+
+Metrics is limited to JSON scalar or short scalar arrays. It must not contain
+raw CAN rows, complete signal series, absolute paths or binary/text payloads.
+
+
+8. PROTOCOL VALIDATOR
+
+The dedicated validator must support:
+
+  --self-test --protocol-bundle PATH
+  --validate-request FILE --protocol-bundle PATH
+  --validate-result FILE --protocol-bundle PATH
+
+It must implement only the subset of JSON Schema used by the generated bundle,
+reject unsupported keywords, reject bool-as-integer confusion, reject NaN and
+Infinity, reject unknown fields, and print stable C-0/C-7 capsules.
+
+The protocol bundle and validator are U21F candidates until independent Gate and
+promotion complete. Do not modify the frozen U2-0A core schema or validator.
+
+
+9. EXECUTOR CLI
+
+Exactly one action per invocation.
+
+9.1 Internal self-test
+
+  --self-test
+  --engine PATH
+  --protocol-bundle PATH
+  --protocol-validator PATH
+  --schema-bundle PATH
+  --contract-validator PATH
+
+9.2 Execute one governed Run
+
+  --execute-run
+  --preflight PATH
+  --software-plan PATH
+  --modules-root PATH
+  --u001-package PATH
+  --run-root PATH
+  --engine PATH
+  --protocol-bundle PATH
+  --protocol-validator PATH
+  --schema-bundle PATH
+  --contract-validator PATH
+  --module-timeout-seconds INTEGER
+  --max-retained-log-bytes INTEGER
+
+9.3 Internal worker mode
+
+  --module-worker
+  --module-file PATH
+  --callable NAME
+  --request PATH
+  --result PATH
+  --protocol-bundle PATH
+  --protocol-validator PATH
+
+Worker mode is invoked only by the parent executor. Direct user execution is
+allowed only in self-test fixtures. The worker must not initialize a Run or
+commit Artifacts.
+
+
+10. PREFLIGHT REVALIDATION BEFORE SIDE EFFECTS
+
+Before creating a Run, U21F must fail closed unless all are true:
+
+- PreflightType, version and RUN_PREFLIGHT_READY status are exact;
+- software-plan exact-byte SHA-256 equals SoftwarePlanIdentity;
+- plan status is SOFTWARE_PLAN_READY;
+- modules-root identity and every selected Manifest/implementation/configuration
+  schema hash equal U21E evidence;
+- Module execution order exactly equals U21D/U21E order;
+- U001 D2-D5 exact-byte hashes equal U21E package identity;
+- D1 and D6 presence agrees with U21E evidence without reading their payloads;
+- SignalBindings, ResolvedConfigurations, scope and clock domain are complete;
+- engine, protocol bundle, protocol validator, core schema and core validator
+  paths exist and are regular non-symlink files;
+- run-root exists or its parent is explicitly writable, with no target Run yet.
+
+Do not select any file by newest time. Do not accept a same-name substitute.
+
+
+11. RUN INITIALIZATION
+
+Use the promoted U21A Engine only through its CLI. Do not import private Engine
+functions and do not modify the Engine source.
+
+Required sequence:
+
+1. record the exact set of RunId directories already under run-root;
+2. invoke Engine `--init-run` with preflight CaseId, U001 identity, resolved
+   scope, FRAMECOUNT clock and the supplied frozen core files;
+3. require exit code 0 and bounded stdout/stderr;
+4. compute the directory set difference and require exactly one new RunId;
+5. validate its PENDING Run Manifest with the frozen validator;
+6. preserve RunId, CreatedAtUtc and governed directory layout;
+7. persist exact preflight, plan, Module Registry and resolved configuration
+   snapshots under 00_CONFIG with exact hashes;
+8. replace the skeleton Registry/config projections with the actual selected
+   Module/configuration projections while retaining the explicit Engine Skeleton
+   system Module identity;
+9. update the Run Manifest atomically and revalidate it before execution.
+
+Set-difference discovery is allowed. Modification-time discovery is prohibited.
+
+
+12. ATOMIC MODULE TRANSACTION
+
+For each selected Module in exact plan order:
+
+1. recheck Manifest and implementation hashes;
+2. verify required upstream Artifacts are COMPLETE and exact-hash valid;
+3. create a unique private staging directory below the governed Stage;
+4. construct and validate one runtime request;
+5. launch this executor's worker mode as a child process using the same Python;
+6. redirect stdout and stderr to files, never capture unbounded logs in memory;
+7. enforce timeout; terminate, then kill if termination does not complete;
+8. require controlled worker exit and a complete atomic result JSON;
+9. validate the result through the protocol validator;
+10. require identity, Stage and RunId to equal the request;
+11. require declared Artifacts to match the Module Manifest ProvidesArtifacts;
+12. reject missing, extra or colliding exclusive outputs;
+13. reject absolute payload paths, parent traversal, symlinks and files outside
+    the assigned staging root;
+14. compute exact payload SHA-256, ByteSize and optional RowCount consistency;
+15. require at least one PRIMARY payload for each successful Artifact;
+16. construct Artifact Manifest(s) in the parent executor;
+17. validate each through the frozen core validator;
+18. atomically move the complete Artifact directory into 03_ARTIFACTS/Sx;
+19. update Run Manifest Artifact index, Module status and Stage state atomically;
+20. only then delete the private runtime request containing absolute paths.
+
+No partial Artifact may be registered. Failed staging content may be moved into
+02_DIAGNOSTICS/failed_modules after absolute paths and oversized logs are
+redacted/truncated; it never becomes an accepted Artifact.
+
+
+13. CHILD WORKER
+
+The worker must:
+
+- validate request before importing Module code;
+- verify module file exact SHA-256 against request;
+- import from the exact file path with a unique non-user-controlled import name;
+- find exactly the declared callable and verify it is callable;
+- call it once with one request mapping;
+- require one mapping result and JSON serialization with allow_nan=false;
+- atomically write result;
+- catch exceptions only at the outer boundary and emit bounded diagnostic type,
+  source basename, function and line without raw input values;
+- never claim execution success if result validation fails.
+
+U21F is process isolation, not an OS security sandbox. Approved Module identity,
+read-only inputs, pre/post hashes and post-run validation remain required.
+
+
+14. RUN AND STAGE STATE RULES
+
+- Run begins PENDING, then RUNNING.
+- Stages are processed S0 through S7 only.
+- A Stage with no selected Module is an explicit successful no-op, not omitted.
+- Stage InputArtifactIds and OutputArtifactIds contain actual validated IDs.
+- A Module becomes SUCCEEDED only after all its Artifacts are committed.
+- Later Stage cannot start while an earlier required dependency is unresolved.
+- Existing Run or Artifact outputs are never overwritten.
+- run_status.json, Run Manifest and event log remain consistent.
+- Every governed JSON update is atomic and followed by validation.
+
+Successful completion requires:
+
+- every REQUIRED Module SUCCEEDED;
+- every S0-S7 Stage reached a terminal governed state;
+- at least one validated Artifact exists;
+- all registered Manifest and payload hashes reconcile;
+- U001 D2-D5 hashes still equal preflight;
+- no uncommitted staging directory is presented as formal output.
+
+
+15. FAILURE POLICY
+
+ABORT_RUN:
+
+- mark Module and current Stage FAILED;
+- leave later Stages PENDING;
+- mark Run FAILED and persist diagnostics;
+- stop immediately.
+
+BLOCK_DEPENDENT_PATH:
+
+- mark failed Module FAILED;
+- transitively mark only Artifact-dependent Modules SKIPPED;
+- allow independent Modules to continue in fixed order;
+- final Run is FAILED if the failed Module was REQUIRED, otherwise PARTIAL.
+
+SKIP_OPTIONAL_PATH:
+
+- valid only for OPTIONAL Module failure;
+- mark failed optional Module SKIPPED with a diagnostic reason;
+- skip only dependent optional path and continue independent work;
+- final Run is PARTIAL unless no requested output was lost under the accepted
+  plan; do not silently upgrade an incomplete requested path to SUCCEEDED.
+
+Unexpected executor, protocol, identity, core-contract or input-mutation failure
+always aborts the Run with C-7.
+
+
+16. INPUT IMMUTABILITY
+
+- Verify U001 D2-D5 hashes immediately before Run creation.
+- Verify them again after the last child exits and before final success.
+- Verify plan, preflight, Module Manifest, implementation and configuration
+  identities before every applicable execution.
+- Never write to U001 package or modules-root.
+- Record only hashes and logical identities in formal evidence.
+
+The executor does not need to hold full D2 in memory. SHA-256 must stream fixed
+binary chunks. This protects correctness without reintroducing U001's memory
+growth problem.
+
+
+17. LOG AND RESOURCE BOUNDARY
+
+- Parent control plane is standard-library and streaming.
+- No full U001 CSV is loaded by U21F.
+- Child stdout/stderr go to files, with only the configured retained tail/head.
+- Record original byte count when truncating retained logs.
+- Default timeout for synthetic self-test: 30 seconds per Module.
+- Default production timeout when not specified: 600 seconds per Module.
+- Default retained log size: 262144 bytes per stream.
+- Timeout and limits are persisted in resolved configuration evidence.
+- v0.1 has no multiprocessing, resume, cache reuse, GUI or EXE packaging.
+
+
+18. REQUIRED INTERNAL SELF-TEST
+
+Self-test must use only private temporary directories and synthetic marker data.
+It must not read company CAN/DBC/video or real U001 payloads.
+
+Create temporary:
+
+- one minimal U21A-compatible Engine invocation;
+- one valid U21D plan and U21E preflight projection;
+- one synthetic six-file U001 package;
+- versioned synthetic Modules using the v0.1 callable ABI;
+- one full S0-S7 Artifact chain;
+- one required controlled failure Run;
+- one optional-path controlled failure Run.
+
+Prove exactly 36 named assertions covering:
+
+- protocol request/result positive and denial cases;
+- exact plan/preflight/U001/Module identities;
+- U21A Run initialization and unique directory set difference;
+- serial S0-S7 ordering;
+- worker isolation and callable ABI;
+- Artifact declaration, payload hashing and core validation;
+- Run/Stage/Module atomic transitions;
+- ABORT_RUN, BLOCK_DEPENDENT_PATH and SKIP_OPTIONAL_PATH;
+- timeout, callable-missing, exception and invalid-result denial;
+- traversal, symlink, missing/extra output and collision denial;
+- bounded logs and diagnostic redaction;
+- pre/post U001 immutability;
+- no accepted partial Artifact;
+- deterministic stable projections across repeated success Runs.
+
+Self-test success line:
+
+  U21F1 N-T36-R3-M12-A10-F10-I8-X0 C-0
+
+Meanings:
+
+  T36 = thirty-six named assertions passed
+  R3  = success, required-failure and optional-failure Runs verified
+  M12 = twelve controlled synthetic Module invocations observed
+  A10 = ten accepted synthetic Artifacts validated
+  F10 = ten controlled failure/denial classes verified
+  I8  = eight identity/immutability checks passed
+  X0  = zero uncontrolled exception
+
+Do not print this capsule unless all exact counters are true. Detailed evidence
+remains in the self-test temporary evidence retained only when the test fails.
+
+
+19. IMPLEMENTER SELF-CHECK
+
+Before returning the three files:
+
+1. filenames and versions are exact;
+2. JSON bundle parses and is deterministic UTF-8/LF;
+3. both Python files compile;
+4. standard library only;
+5. all action modes parse;
+6. only one action can be selected;
+7. no arbitrary Module is imported in the parent process;
+8. no source file is modified;
+9. no newest-file selection exists;
+10. all file writes are atomic where governed;
+11. all paths use containment and symlink checks;
+12. exact 36-assertion self-test passes.
+
+
+20. COMPANY EXECUTION
+
+Place the three generated files in U-UDP002/04_TEMP. From C-CODE root, use
+Copilot to construct the exact CMD command from the actual local paths, then run
+the executor self-test. The command must explicitly name the promoted U21A
+Engine, generated protocol files, frozen core schema and frozen core validator.
+
+Do not execute a real company case in U21F. Real data execution begins only
+after the independent U21F Gate, promotion and U21G synthetic vertical
+acceptance.
+
+
+21. RETURN
+
+On success return only:
+
+  U21F1 N-T36-R3-M12-A10-F10-I8-X0 C-0
+
+On failure return:
+
+  U21F1 N-T<t>-R<r>-M<m>-A<a>-F<f>-I<i>-X<x> C-7 K-<stable_reason>
+
+Add at most one short Memo only when the stable code cannot identify the failure.
+
+
+22. SUCCESS BOUNDARY
+
+Internal C-0 authorizes an independent U21F black-box Gate. It does not freeze
+or promote the executor or runtime protocol. U21G remains unauthorized until
+Gate and byte-identical promotion complete.
+
+END OF U21F v0.1 SPECIFICATION
