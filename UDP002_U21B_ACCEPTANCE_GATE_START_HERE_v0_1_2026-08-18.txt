@@ -5,6 +5,12 @@ Date: 2026-08-18
 Owner: Zhao Zhili
 Status: APPROVED FOR COMPANY-SIDE EXECUTION
 
+Correction note:
+The public Gate source was corrected before acceptance after the first Windows
+self-test exposed CRLF translation in an evidence-byte hash check. The corrected
+source writes governed text as UTF-8 bytes and reports the exact failed self-test
+name. Replace the earlier download before rerunning.
+
 
 1. PURPOSE
 
