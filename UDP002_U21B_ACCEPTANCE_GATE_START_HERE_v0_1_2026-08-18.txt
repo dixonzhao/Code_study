@@ -11,6 +11,12 @@ self-test exposed CRLF translation in an evidence-byte hash check. The corrected
 source writes governed text as UTF-8 bytes and reports the exact failed self-test
 name. Replace the earlier download before rerunning.
 
+Ordering clarification:
+The first formal attempt showed that the Registry placed the fully unreadable
+invalid-JSON record after all identifiable Modules. The original specification
+did not define null-key placement. Null identity now formally sorts last; the
+Registry is unchanged and the Gate implements the clarified rule.
+
 
 1. PURPOSE
 
@@ -63,7 +69,7 @@ If this fails, stop and return its first error line.
 
 The output directory must not already contain files. Run:
 
-  python .\U-UDP002\04_TEMP\u002_u21b_acceptance_gate_v0_1.py.txt --run --registry .\U-UDP002\04_TEMP\u002_module_registry_v0_1.py.txt --schema-bundle .\U-UDP002\04_TEMP\u002_core_contract_schema_bundle_v0_1.json.txt --contract-validator .\U-UDP002\04_TEMP\u002_core_contract_validator_v0_1.py.txt --fixture-manifest .\U-UDP002\05_TESTS\01_FIXTURES\U20A_v0_1\valid_module_manifest.json --out .\U-UDP002\05_TESTS\02_ACCEPTANCE\U21B_GATE_20260818
+  python .\U-UDP002\04_TEMP\u002_u21b_acceptance_gate_v0_1.py.txt --run --registry .\U-UDP002\04_TEMP\u002_module_registry_v0_1.py.txt --schema-bundle .\U-UDP002\04_TEMP\u002_core_contract_schema_bundle_v0_1.json.txt --contract-validator .\U-UDP002\04_TEMP\u002_core_contract_validator_v0_1.py.txt --fixture-manifest .\U-UDP002\05_TESTS\01_FIXTURES\U20A_v0_1\valid_module_manifest.json --out .\U-UDP002\05_TESTS\02_ACCEPTANCE\U21B_GATE_20260818_R2
 
 If accepted contract files use the same basename without a final .txt suffix,
 change only that suffix in this command.
@@ -88,7 +94,7 @@ Meaning:
 
 The Gate creates:
 
-  U-UDP002/05_TESTS/02_ACCEPTANCE/U21B_GATE_20260818/
+  U-UDP002/05_TESTS/02_ACCEPTANCE/U21B_GATE_20260818_R2/
     00_FIXTURES/
     01_RUNS/
     02_EVIDENCE/
