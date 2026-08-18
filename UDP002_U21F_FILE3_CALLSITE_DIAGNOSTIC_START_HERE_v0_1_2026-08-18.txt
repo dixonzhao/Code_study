@@ -1,0 +1,89 @@
+UDP002 U21F FILE3 CALL-SITE DIAGNOSTIC
+
+Task ID: U21F-DIAG-02
+Version: 0.1
+Date: 2026-08-18
+Owner: Zhao Zhili
+Status: APPROVED FOR READ-ONLY DIAGNOSIS ONLY
+
+
+1. CONFIRMED INPUT
+
+The first diagnosis returned:
+
+  U21FD1 E-RuntimeError
+  F-u002_controlled_stage_executor_diagonstic_v0_1.py
+  L-47 FN-ck C-0
+  MEMO-FILE3
+
+This proves only that the generic helper ck() raised RuntimeError("FILE3").
+It does not identify the failed file role, the caller, or the checked predicate.
+Do not correct any U21F program from this evidence alone.
+
+
+2. PROVIDE TO COPILOT
+
+Provide exactly these existing items:
+
+1. this instruction;
+2. retained u21f_full_traceback.txt from U21F-DIAG-01;
+3. exact u002_controlled_stage_executor_diagonstic_v0_1.py used in U21FD1;
+4. exact failed self-test CMD command or its retained argument record.
+
+Keep all three original U21F candidates unchanged. Do not provide company data.
+
+
+3. REQUIRED READ-ONLY INSPECTION
+
+Locate the caller frame immediately above ck() in the retained traceback, then
+locate the source call whose failure label is exactly "FILE3".
+
+Record only:
+
+- caller source basename;
+- caller source line;
+- caller function;
+- checked command-line option or semantic file role;
+- the exact checked predicate;
+- whether the resolved value exists;
+- whether it is a regular file.
+
+Do not expose an absolute company path. A basename is sufficient.
+
+If Copilot cannot inspect this reliably as text, it may generate exactly one
+standard-library, read-only helper named:
+
+  u002_u21f_file3_callsite_probe_v0_1.py.txt
+
+The helper may read only the retained traceback, diagnostic source and the same
+explicit self-test path arguments. It must not search by modification time,
+create candidates, copy inputs, change permissions or modify any U21F file.
+
+
+4. REQUIRED RETURN
+
+Return only two lines:
+
+  U21FD2 K-FILE3 CL-<caller_line> FN-<caller_function> ARG-<option_or_role> EX-<0|1|NA> IF-<0|1|NA> C-0
+  MEMO-<basename and exact checked predicate, maximum 120 characters>
+
+If FILE3 is not an existence/regular-file check, use EX-NA and IF-NA and put
+the exact predicate in MEMO. Do not return the full path or traceback.
+
+
+5. PROHIBITED ACTIONS
+
+- no repair in this step;
+- no overwrite or rename of a candidate;
+- no edit to U21A-U21E or frozen contracts;
+- no self-test counter adjustment;
+- no U-to-I capsule correction yet;
+- no U21G and no real-data run.
+
+
+6. COMPLETION BOUNDARY
+
+U21FD2 C-0 authorizes the project lead to issue one versioned correction only
+after the failed FILE3 role and predicate are known. It is not acceptance.
+
+END
