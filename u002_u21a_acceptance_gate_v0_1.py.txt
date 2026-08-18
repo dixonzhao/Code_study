@@ -1,0 +1,788 @@
+from __future__ import annotations
+
+import argparse
+import ast
+import hashlib
+import json
+import os
+import platform
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable
+
+
+GATE_VERSION = "0.1.0"
+EXPECTED_SCHEMA_SHA256 = "02acedb73d1adbb64b1f13c38f890cbdfc119fbd21bbb512e04d8284dc354183"
+EXPECTED_VALIDATOR_SHA256 = "1971535b682fd51435acfc4f8baf9c2a3e298a274147ba0ed90934aa96ce85f8"
+ENGINE_SELFTEST_TOKEN = "UDP002-U21A-SELFTEST-PASS-24 C-0"
+STAGES = [f"S{i}" for i in range(8)]
+TOP_LEVEL_ENTRIES = {
+    "00_CONFIG",
+    "01_LOGS",
+    "02_DIAGNOSTICS",
+    "03_ARTIFACTS",
+    "04_REVIEW_PACKAGE",
+    "05_EXPORTS",
+    "run_manifest.json",
+    "run_status.json",
+}
+CONFIG_FILES = {
+    "resolved_run_config.json",
+    "engine_skeleton_configuration_schema.json",
+    "engine_skeleton_module_manifest.json",
+    "module_registry_snapshot.json",
+}
+SUCCESS_EVENTS = {
+    "RUN_CREATED",
+    "RUN_STARTED",
+    "STAGE_STARTED",
+    "STAGE_SUCCEEDED",
+    "ARTIFACT_ACCEPTED",
+    "RUN_SUCCEEDED",
+}
+FAILURE_EVENTS = {
+    "RUN_CREATED",
+    "RUN_STARTED",
+    "STAGE_STARTED",
+    "STAGE_FAILED",
+    "RUN_FAILED",
+}
+BANNED_IMPORTS = {
+    "cv2",
+    "matplotlib",
+    "numpy",
+    "pandas",
+    "polars",
+    "scipy",
+    "sklearn",
+    "statsmodels",
+    "tkinter",
+}
+
+
+class GateFailure(RuntimeError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass
+class CommandResult:
+    name: str
+    args: list[str]
+    returncode: int
+    stdout: str
+    stderr: str
+    elapsed_seconds: float
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def canonical_json_bytes(value: Any) -> bytes:
+    return (json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
+def atomic_write_json(path: Path, value: Any) -> None:
+    atomic_write_bytes(path, canonical_json_bytes(value))
+
+
+def atomic_write_text(path: Path, value: str) -> None:
+    atomic_write_bytes(path, value.encode("utf-8"))
+
+
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            block = handle.read(1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def read_json(path: Path) -> Any:
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def bounded_text(value: str, limit: int = 1200) -> str:
+    text = value.replace("\x00", "?")
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "...<truncated>"
+
+
+def require(condition: bool, code: str, message: str) -> None:
+    if not condition:
+        raise GateFailure(code, message)
+
+
+def relative_posix(path: Path, root: Path) -> str:
+    return path.relative_to(root).as_posix()
+
+
+def snapshot_run_dirs(run_root: Path) -> set[Path]:
+    if not run_root.exists():
+        return set()
+    return {path.resolve() for path in run_root.iterdir() if path.is_dir() and path.name.startswith("RUN_")}
+
+
+def discover_single_new_run(before: set[Path], run_root: Path, action: str) -> Path:
+    after = snapshot_run_dirs(run_root)
+    new_runs = sorted(after - before)
+    require(len(new_runs) == 1, "RUN_DISCOVERY", f"{action}: expected one new Run, observed {len(new_runs)}")
+    return new_runs[0]
+
+
+def file_tree_hashes(root: Path) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            result[relative_posix(path, root)] = sha256_file(path)
+    return result
+
+
+def no_temporary_files(root: Path) -> bool:
+    return not any(path.is_file() and path.name.endswith(".tmp") for path in root.rglob("*"))
+
+
+def run_command(name: str, args: list[str], logs_dir: Path, timeout_seconds: int = 180) -> CommandResult:
+    started = time.monotonic()
+    try:
+        completed = subprocess.run(
+            args,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+        )
+        result = CommandResult(
+            name=name,
+            args=args,
+            returncode=completed.returncode,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            elapsed_seconds=time.monotonic() - started,
+        )
+    except subprocess.TimeoutExpired as error:
+        stdout = error.stdout.decode("utf-8", "replace") if isinstance(error.stdout, bytes) else (error.stdout or "")
+        stderr = error.stderr.decode("utf-8", "replace") if isinstance(error.stderr, bytes) else (error.stderr or "")
+        result = CommandResult(
+            name=name,
+            args=args,
+            returncode=124,
+            stdout=stdout,
+            stderr=stderr + "\nTIMEOUT",
+            elapsed_seconds=time.monotonic() - started,
+        )
+    atomic_write_text(logs_dir / f"{name}.stdout.txt", result.stdout)
+    atomic_write_text(logs_dir / f"{name}.stderr.txt", result.stderr)
+    return result
+
+
+def command_evidence(result: CommandResult) -> dict[str, Any]:
+    return {
+        "Name": result.name,
+        "Arguments": result.args,
+        "ReturnCode": result.returncode,
+        "ElapsedSeconds": round(result.elapsed_seconds, 6),
+        "StdoutTail": bounded_text(result.stdout[-1200:]),
+        "StderrTail": bounded_text(result.stderr[-1200:]),
+    }
+
+
+def validate_with_reference(
+    name: str,
+    validator: Path,
+    schema_bundle: Path,
+    manifest: Path,
+    logs_dir: Path,
+) -> CommandResult:
+    result = run_command(
+        name,
+        [
+            sys.executable,
+            str(validator),
+            "--schema-bundle",
+            str(schema_bundle),
+            "--validate",
+            str(manifest),
+        ],
+        logs_dir,
+    )
+    require(result.returncode == 0, "REFERENCE_VALIDATION", f"{name}: validator returned {result.returncode}")
+    require(" C-0" in result.stdout, "REFERENCE_VALIDATION", f"{name}: missing C-0 token")
+    return result
+
+
+def parse_import_roots(source_path: Path) -> set[str]:
+    source = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(source_path))
+    roots: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots.update(alias.name.split(".", 1)[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            roots.add(node.module.split(".", 1)[0])
+    return roots
+
+
+def check_engine_imports(engine: Path) -> list[str]:
+    imports = parse_import_roots(engine)
+    stdlib = set(getattr(sys, "stdlib_module_names", set()))
+    stdlib.update({"__future__"})
+    disallowed = sorted((imports - stdlib) | (imports & BANNED_IMPORTS))
+    return disallowed
+
+
+def assert_layout(run_dir: Path) -> None:
+    require(run_dir.exists() and run_dir.is_dir(), "LAYOUT", f"missing Run directory {run_dir}")
+    observed = {path.name for path in run_dir.iterdir()}
+    require(observed == TOP_LEVEL_ENTRIES, "LAYOUT", f"top-level entries differ: {sorted(observed ^ TOP_LEVEL_ENTRIES)}")
+    config_observed = {path.name for path in (run_dir / "00_CONFIG").iterdir() if path.is_file()}
+    require(config_observed == CONFIG_FILES, "LAYOUT", f"00_CONFIG differs: {sorted(config_observed ^ CONFIG_FILES)}")
+    artifact_stages = [path.name for path in sorted((run_dir / "03_ARTIFACTS").iterdir()) if path.is_dir()]
+    require(artifact_stages == STAGES, "LAYOUT", f"Artifact Stage directories differ: {artifact_stages}")
+    for relative in (
+        "01_LOGS/engine_events.jsonl",
+        "01_LOGS/stdout.txt",
+        "01_LOGS/stderr.txt",
+        "run_manifest.json",
+        "run_status.json",
+    ):
+        require((run_dir / relative).is_file(), "LAYOUT", f"missing {relative}")
+
+
+def stage_map(run_manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    stages = run_manifest.get("Stages")
+    require(isinstance(stages, list), "RUN_MANIFEST", "Stages is not a list")
+    names = [item.get("Stage") for item in stages]
+    require(names == STAGES, "STAGE_ORDER", f"expected S0-S7, observed {names}")
+    return {item["Stage"]: item for item in stages}
+
+
+def event_codes(run_dir: Path) -> list[str]:
+    codes: list[str] = []
+    log_path = run_dir / "01_LOGS" / "engine_events.jsonl"
+    with log_path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise GateFailure("EVENT_LOG", f"invalid JSONL line {line_number}: {error}") from error
+            code = value.get("EventCode")
+            require(isinstance(code, str) and code, "EVENT_LOG", f"missing EventCode at line {line_number}")
+            codes.append(code)
+    return codes
+
+
+def verify_snapshot_hashes(run_dir: Path, manifest: dict[str, Any]) -> int:
+    checks = 0
+    config = run_dir / "00_CONFIG" / "resolved_run_config.json"
+    registry = run_dir / "00_CONFIG" / "module_registry_snapshot.json"
+    module = run_dir / "00_CONFIG" / "engine_skeleton_module_manifest.json"
+    require(manifest["ConfigSnapshotSha256"] == sha256_file(config), "HASH_CONFIG", "ConfigSnapshotSha256 mismatch")
+    checks += 1
+    require(manifest["RegistrySnapshotSha256"] == sha256_file(registry), "HASH_REGISTRY", "RegistrySnapshotSha256 mismatch")
+    checks += 1
+    resolved = manifest.get("ResolvedModules")
+    require(isinstance(resolved, list) and len(resolved) == 1, "MODULE_COUNT", "expected one built-in Module")
+    require(resolved[0]["ModuleManifestSha256"] == sha256_file(module), "HASH_MODULE", "ModuleManifestSha256 mismatch")
+    checks += 1
+    return checks
+
+
+def verify_artifacts(run_dir: Path, manifest: dict[str, Any]) -> tuple[int, list[Path]]:
+    references = manifest.get("Artifacts")
+    require(isinstance(references, list), "ARTIFACTS", "Artifacts is not a list")
+    artifact_manifests: list[Path] = []
+    hash_checks = 0
+    for reference in references:
+        path = run_dir / Path(reference["ManifestRelativePath"])
+        require(path.is_file(), "ARTIFACT_MANIFEST", f"missing {path}")
+        require(reference["ManifestSha256"] == sha256_file(path), "HASH_ARTIFACT_MANIFEST", f"hash mismatch {path.name}")
+        hash_checks += 1
+        value = read_json(path)
+        require(value["ArtifactId"] == reference["ArtifactId"], "ARTIFACT_ID", f"ArtifactId mismatch {path.name}")
+        for payload in value.get("Payloads", []):
+            payload_path = run_dir / Path(payload["RelativePath"])
+            require(payload_path.is_file(), "PAYLOAD", f"missing {payload_path}")
+            require(payload["ByteSize"] == payload_path.stat().st_size, "PAYLOAD_SIZE", f"size mismatch {payload_path.name}")
+            require(payload["Sha256"] == sha256_file(payload_path), "HASH_PAYLOAD", f"hash mismatch {payload_path.name}")
+            hash_checks += 1
+        artifact_manifests.append(path)
+    return hash_checks, artifact_manifests
+
+
+def verify_common_run(run_dir: Path) -> tuple[dict[str, Any], dict[str, Any], int, list[Path]]:
+    assert_layout(run_dir)
+    require(no_temporary_files(run_dir), "ORPHAN_TEMP", f"orphan .tmp file in {run_dir.name}")
+    manifest = read_json(run_dir / "run_manifest.json")
+    status = read_json(run_dir / "run_status.json")
+    require(manifest.get("RunId") == run_dir.name, "RUN_ID", f"RunId does not equal directory name {run_dir.name}")
+    require(status.get("RunId") == run_dir.name, "RUN_ID", f"status RunId mismatch {run_dir.name}")
+    require(manifest.get("EngineVersion") == "0.1.0", "ENGINE_VERSION", "unexpected EngineVersion")
+    require(manifest.get("ContractType") == "U002_RUN_MANIFEST", "RUN_MANIFEST", "wrong ContractType")
+    require(manifest.get("ContractVersion") == "0.1", "RUN_MANIFEST", "wrong ContractVersion")
+    require(status.get("RunStatus") == manifest.get("RunStatus"), "RUN_STATUS", "manifest/status disagreement")
+    stage_map(manifest)
+    hash_checks = verify_snapshot_hashes(run_dir, manifest)
+    artifact_hash_checks, artifact_manifests = verify_artifacts(run_dir, manifest)
+    return manifest, status, hash_checks + artifact_hash_checks, artifact_manifests
+
+
+def verify_pending(run_dir: Path) -> tuple[int, list[Path]]:
+    manifest, status, hash_checks, artifacts = verify_common_run(run_dir)
+    require(manifest["RunStatus"] == "PENDING", "PENDING_STATE", "init Run is not PENDING")
+    require(status["RunStatus"] == "PENDING", "PENDING_STATE", "status is not PENDING")
+    require(all(item["Status"] == "PENDING" for item in manifest["Stages"]), "PENDING_STAGE", "not all Stages PENDING")
+    require(manifest["ResolvedModules"][0]["Status"] == "PENDING", "PENDING_MODULE", "system Module is not PENDING")
+    require(manifest["Artifacts"] == [], "PENDING_ARTIFACT", "PENDING Run has Artifacts")
+    require(manifest["DiagnosticsRelativePath"] is None, "PENDING_DIAGNOSTICS", "PENDING Run has diagnostics")
+    return hash_checks, artifacts
+
+
+def verify_success(run_dir: Path) -> tuple[int, list[Path], dict[str, Any]]:
+    manifest, status, hash_checks, artifacts = verify_common_run(run_dir)
+    require(manifest["RunStatus"] == "SUCCEEDED", "SUCCESS_STATE", "smoke Run is not SUCCEEDED")
+    require(status["RunStatus"] == "SUCCEEDED", "SUCCESS_STATE", "status is not SUCCEEDED")
+    require(all(item["Status"] == "SUCCEEDED" for item in manifest["Stages"]), "SUCCESS_STAGE", "not all Stages SUCCEEDED")
+    require(manifest["ResolvedModules"][0]["Status"] == "SUCCEEDED", "SUCCESS_MODULE", "system Module is not SUCCEEDED")
+    require(len(manifest["Artifacts"]) == 1, "SUCCESS_ARTIFACT", "expected exactly one synthetic Artifact")
+    require(manifest["DiagnosticsRelativePath"] is None, "SUCCESS_DIAGNOSTICS", "success Run has diagnostics")
+    codes = set(event_codes(run_dir))
+    require(SUCCESS_EVENTS.issubset(codes), "SUCCESS_EVENTS", f"missing events {sorted(SUCCESS_EVENTS - codes)}")
+    summary = {
+        "RunStatus": manifest["RunStatus"],
+        "StageNames": [item["Stage"] for item in manifest["Stages"]],
+        "StageStatuses": [item["Status"] for item in manifest["Stages"]],
+        "ModuleIds": [item["ModuleId"] for item in manifest["ResolvedModules"]],
+        "ModuleStatuses": [item["Status"] for item in manifest["ResolvedModules"]],
+        "ArtifactTypes": [read_json(path)["ArtifactType"] for path in artifacts],
+        "ArtifactStages": [read_json(path)["Stage"] for path in artifacts],
+        "RequiredEventCodes": sorted(SUCCESS_EVENTS & codes),
+    }
+    return hash_checks, artifacts, summary
+
+
+def verify_failure(run_dir: Path) -> tuple[int, list[Path]]:
+    manifest, status, hash_checks, artifacts = verify_common_run(run_dir)
+    stages = stage_map(manifest)
+    require(manifest["RunStatus"] == "FAILED", "FAILURE_STATE", "controlled failure Run is not FAILED")
+    require(status["RunStatus"] == "FAILED", "FAILURE_STATE", "status is not FAILED")
+    for name in ("S0", "S1", "S2"):
+        require(stages[name]["Status"] == "SUCCEEDED", "FAILURE_STAGE", f"{name} is not SUCCEEDED")
+    require(stages["S3"]["Status"] == "FAILED", "FAILURE_STAGE", "S3 is not FAILED")
+    require(stages["S3"]["ErrorCode"] == "U21A_SYNTHETIC_FAILURE", "FAILURE_CODE", "unexpected S3 ErrorCode")
+    for name in ("S4", "S5", "S6", "S7"):
+        require(stages[name]["Status"] == "PENDING", "FAILURE_STAGE", f"{name} is not PENDING")
+    require(manifest["ResolvedModules"][0]["Status"] == "FAILED", "FAILURE_MODULE", "system Module is not FAILED")
+    require(manifest["DiagnosticsRelativePath"] == "02_DIAGNOSTICS/diagnostics.json", "FAILURE_DIAGNOSTICS", "wrong diagnostics path")
+    diagnostics_path = run_dir / "02_DIAGNOSTICS" / "diagnostics.json"
+    capsule_path = run_dir / "02_DIAGNOSTICS" / "error_capsule.txt"
+    require(diagnostics_path.is_file() and capsule_path.is_file(), "FAILURE_DIAGNOSTICS", "Diagnostic Bundle incomplete")
+    diagnostics = read_json(diagnostics_path)
+    require(diagnostics.get("FailedStage") == "S3", "FAILURE_DIAGNOSTICS", "diagnostics FailedStage mismatch")
+    require(diagnostics.get("ErrorCode") == "U21A_SYNTHETIC_FAILURE", "FAILURE_DIAGNOSTICS", "diagnostics ErrorCode mismatch")
+    require(diagnostics.get("ProcessedRowCount") == 0, "FAILURE_DIAGNOSTICS", "ProcessedRowCount must be zero")
+    trace = diagnostics.get("BoundedStackTrace")
+    if isinstance(trace, list):
+        require(len(trace) <= 20, "FAILURE_DIAGNOSTICS", "BoundedStackTrace exceeds twenty lines")
+    elif isinstance(trace, str):
+        require(len(trace.splitlines()) <= 20, "FAILURE_DIAGNOSTICS", "BoundedStackTrace exceeds twenty lines")
+    else:
+        raise GateFailure("FAILURE_DIAGNOSTICS", "BoundedStackTrace has invalid type")
+    require("U21A_SYNTHETIC_FAILURE" in capsule_path.read_text(encoding="utf-8"), "FAILURE_CAPSULE", "error capsule code missing")
+    codes = set(event_codes(run_dir))
+    require(FAILURE_EVENTS.issubset(codes), "FAILURE_EVENTS", f"missing events {sorted(FAILURE_EVENTS - codes)}")
+    return hash_checks, artifacts
+
+
+def validator_targets(run_dir: Path, artifact_manifests: Iterable[Path]) -> list[Path]:
+    return [
+        run_dir / "00_CONFIG" / "engine_skeleton_module_manifest.json",
+        *artifact_manifests,
+        run_dir / "run_manifest.json",
+    ]
+
+
+def self_test() -> int:
+    checks: list[str] = []
+
+    def check(name: str, condition: bool) -> None:
+        if not condition:
+            raise GateFailure("SELFTEST", name)
+        checks.append(name)
+
+    temporary_root = Path(tempfile.mkdtemp(prefix="u21a_gate_selftest_"))
+    try:
+        sample = temporary_root / "sample.json"
+        atomic_write_json(sample, {"b": 2, "a": 1})
+        check("T01 atomic JSON exists", sample.is_file())
+        check("T02 canonical key order", sample.read_bytes().startswith(b'{\n  "a"'))
+        check("T03 one LF ending", sample.read_bytes().endswith(b"\n") and not sample.read_bytes().endswith(b"\n\n"))
+        check("T04 no atomic temporary", not sample.with_name("sample.json.tmp").exists())
+        check("T05 SHA-256 length", len(sha256_file(sample)) == 64)
+        check("T06 read JSON", read_json(sample) == {"a": 1, "b": 2})
+        run_root = temporary_root / "runs"
+        run_root.mkdir()
+        before = snapshot_run_dirs(run_root)
+        run_one = run_root / "RUN_20260818T000000000000Z_A1B2C3"
+        run_one.mkdir()
+        check("T07 Run snapshot", len(snapshot_run_dirs(run_root)) == 1)
+        check("T08 discover one Run", discover_single_new_run(before, run_root, "selftest") == run_one.resolve())
+        (run_one / "S0").mkdir()
+        atomic_write_text(run_one / "S0" / "x.txt", "x")
+        tree_before = file_tree_hashes(run_one)
+        tree_after = file_tree_hashes(run_one)
+        check("T09 tree hash stable", tree_before == tree_after)
+        check("T10 no temporary files", no_temporary_files(run_one))
+        atomic_write_text(run_one / "orphan.tmp", "x")
+        check("T11 temporary detection", not no_temporary_files(run_one))
+        (run_one / "orphan.tmp").unlink()
+        check("T12 bounded text", len(bounded_text("x" * 2000, 100)) < 130)
+        check("T13 relative POSIX", relative_posix(run_one / "S0" / "x.txt", run_one) == "S0/x.txt")
+        check("T14 import parser", "json" in parse_import_roots(Path(__file__)))
+        check("T15 banned import absent", not (parse_import_roots(Path(__file__)) & BANNED_IMPORTS))
+        check("T16 exact assertion count", len(checks) == 15)
+        print("UDP002-U21A-GATE-SELFTEST-PASS-16 C-0")
+        return 0
+    except Exception as error:
+        code = error.code if isinstance(error, GateFailure) else error.__class__.__name__
+        print(f"UDP002-U21A-GATE-SELFTEST-ERROR-{code} C-7")
+        return 7
+    finally:
+        shutil.rmtree(temporary_root, ignore_errors=True)
+
+
+def run_acceptance(engine: Path, schema_bundle: Path, validator: Path, output: Path) -> int:
+    started_at = utc_now()
+    started_monotonic = time.monotonic()
+    commands: list[CommandResult] = []
+    checks: list[dict[str, Any]] = []
+    run_dirs: dict[str, Path] = {}
+    validation_count = 0
+    hash_check_count = 0
+
+    def accept(name: str, detail: str = "") -> None:
+        checks.append({"Check": name, "Status": "PASS", "Detail": detail})
+
+    def execute(name: str, args: list[str], expected_token: str | None = None) -> CommandResult:
+        result = run_command(name, args, logs_dir)
+        commands.append(result)
+        require(result.returncode == 0, "CHILD_PROCESS", f"{name} returned {result.returncode}")
+        if expected_token is not None:
+            require(expected_token in result.stdout, "CHILD_TOKEN", f"{name} missing expected token")
+        accept(name, f"returncode={result.returncode}")
+        return result
+
+    try:
+        require(not output.exists(), "OUTPUT_EXISTS", f"acceptance output already exists: {output}")
+        output.mkdir(parents=True)
+        run_root = output / "00_RUNS"
+        logs_dir = output / "01_LOGS"
+        evidence_dir = output / "02_EVIDENCE"
+        run_root.mkdir()
+        logs_dir.mkdir()
+        evidence_dir.mkdir()
+
+        for path, label in ((engine, "engine"), (schema_bundle, "schema"), (validator, "validator")):
+            require(path.is_file(), "INPUT_MISSING", f"missing {label}: {path}")
+        accept("INPUT_FILES_EXIST")
+
+        schema_sha = sha256_file(schema_bundle)
+        validator_sha = sha256_file(validator)
+        engine_sha = sha256_file(engine)
+        require(schema_sha == EXPECTED_SCHEMA_SHA256, "SCHEMA_IDENTITY", schema_sha)
+        require(validator_sha == EXPECTED_VALIDATOR_SHA256, "VALIDATOR_IDENTITY", validator_sha)
+        accept("FROZEN_IDENTITIES", f"schema={schema_sha}; validator={validator_sha}")
+
+        disallowed_imports = check_engine_imports(engine)
+        require(not disallowed_imports, "NON_STDLIB_IMPORT", ",".join(disallowed_imports))
+        accept("STANDARD_LIBRARY_ONLY")
+
+        execute(
+            "01_engine_selftest",
+            [
+                sys.executable,
+                str(engine),
+                "--self-test",
+                "--schema-bundle",
+                str(schema_bundle),
+                "--contract-validator",
+                str(validator),
+            ],
+            ENGINE_SELFTEST_TOKEN,
+        )
+
+        common = [
+            "--schema-bundle",
+            str(schema_bundle),
+            "--contract-validator",
+            str(validator),
+        ]
+
+        before = snapshot_run_dirs(run_root)
+        execute(
+            "02_init_run",
+            [
+                sys.executable,
+                str(engine),
+                "--init-run",
+                "--run-root",
+                str(run_root),
+                "--case-id",
+                "U21A_GATE_PENDING",
+                "--input-id",
+                "U21A_GATE_INPUT_001",
+                "--input-type",
+                "SYNTHETIC_NO_DATA",
+                "--input-sha256",
+                "1" * 64,
+                "--scope",
+                "FULL_CASE",
+                "--clock-kind",
+                "FRAMECOUNT",
+                "--frame-rate-hz",
+                "20",
+                *common,
+            ],
+            "UDP002U21A-I1",
+        )
+        run_dirs["PENDING"] = discover_single_new_run(before, run_root, "init")
+
+        for index in (1, 2):
+            before = snapshot_run_dirs(run_root)
+            execute(
+                f"0{2 + index}_smoke_{index}",
+                [
+                    sys.executable,
+                    str(engine),
+                    "--synthetic-smoke",
+                    "--run-root",
+                    str(run_root),
+                    "--case-id",
+                    f"U21A_GATE_SMOKE_{index}",
+                    *common,
+                ],
+                "UDP002U21A-S1",
+            )
+            run_dirs[f"SMOKE_{index}"] = discover_single_new_run(before, run_root, f"smoke {index}")
+
+        before = snapshot_run_dirs(run_root)
+        execute(
+            "05_synthetic_failure",
+            [
+                sys.executable,
+                str(engine),
+                "--synthetic-failure",
+                "--run-root",
+                str(run_root),
+                "--case-id",
+                "U21A_GATE_FAILURE",
+                "--fail-stage",
+                "S3",
+                *common,
+            ],
+            "TEST_EXPECTED_FAILURE-1 C-0",
+        )
+        run_dirs["FAILED"] = discover_single_new_run(before, run_root, "controlled failure")
+        require(len(set(run_dirs.values())) == 4, "RUN_ID_UNIQUENESS", "Run directories are not unique")
+        accept("FOUR_UNIQUE_RUNS")
+
+        pending_hashes, pending_artifacts = verify_pending(run_dirs["PENDING"])
+        hash_check_count += pending_hashes
+        smoke_one_hashes, smoke_one_artifacts, smoke_one_summary = verify_success(run_dirs["SMOKE_1"])
+        hash_check_count += smoke_one_hashes
+        smoke_two_hashes, smoke_two_artifacts, smoke_two_summary = verify_success(run_dirs["SMOKE_2"])
+        hash_check_count += smoke_two_hashes
+        failure_hashes, failure_artifacts = verify_failure(run_dirs["FAILED"])
+        hash_check_count += failure_hashes
+        require(smoke_one_summary == smoke_two_summary, "SEMANTIC_REPEATABILITY", "two smoke summaries differ")
+        accept("RUN_SEMANTICS", "PENDING=1; SUCCEEDED=2; FAILED=1")
+        accept("SMOKE_REPEATABILITY")
+
+        artifacts_by_run = {
+            "PENDING": pending_artifacts,
+            "SMOKE_1": smoke_one_artifacts,
+            "SMOKE_2": smoke_two_artifacts,
+            "FAILED": failure_artifacts,
+        }
+        for run_name, run_dir in run_dirs.items():
+            for index, target in enumerate(validator_targets(run_dir, artifacts_by_run[run_name]), 1):
+                result = validate_with_reference(
+                    f"validate_{run_name.lower()}_{index}",
+                    validator,
+                    schema_bundle,
+                    target,
+                    logs_dir,
+                )
+                commands.append(result)
+                validation_count += 1
+        require(validation_count == 10, "VALIDATION_COUNT", f"expected 10, observed {validation_count}")
+        accept("REFERENCE_VALIDATION", f"count={validation_count}")
+
+        for index, (run_name, run_dir) in enumerate(run_dirs.items(), 1):
+            before_hashes = file_tree_hashes(run_dir)
+            execute(
+                f"inspect_{index}_{run_name.lower()}",
+                [
+                    sys.executable,
+                    str(engine),
+                    "--inspect-run",
+                    str(run_dir),
+                    *common,
+                ],
+                "UDP002U21A-P1",
+            )
+            after_hashes = file_tree_hashes(run_dir)
+            require(before_hashes == after_hashes, "INSPECT_MUTATION", f"inspect modified {run_dir.name}")
+        accept("READ_ONLY_INSPECTION", "count=4")
+
+        require(no_temporary_files(output), "ORPHAN_TEMP", "acceptance tree contains orphan .tmp")
+        accept("NO_ORPHAN_TEMP")
+        accept("HASH_LINKAGE", f"count={hash_check_count}")
+
+        completed_at = utc_now()
+        capsule = f"UDP002U21AG1 N-E1-I1-S2-F1-P4-V{validation_count}-H{hash_check_count}-D1-T0-X0 C-0"
+        evidence = {
+            "GateId": "UDP002.U21A.AcceptanceGate",
+            "GateVersion": GATE_VERSION,
+            "GateStatus": "PASS",
+            "StartedAtUtc": started_at,
+            "CompletedAtUtc": completed_at,
+            "ElapsedSeconds": round(time.monotonic() - started_monotonic, 6),
+            "Inputs": {
+                "EngineSha256": engine_sha,
+                "SchemaBundleSha256": schema_sha,
+                "ContractValidatorSha256": validator_sha,
+            },
+            "RunDirectories": {name: str(path) for name, path in run_dirs.items()},
+            "Checks": checks,
+            "Commands": [command_evidence(result) for result in commands],
+            "ReferenceValidationCount": validation_count,
+            "HashLinkageCheckCount": hash_check_count,
+            "ReturnCapsule": capsule,
+        }
+        atomic_write_json(evidence_dir / "U21A_ACCEPTANCE_EVIDENCE.json", evidence)
+        report = "\n".join(
+            [
+                "UDP002 U21A ACCEPTANCE REPORT",
+                "",
+                "Status: PASS",
+                f"Engine SHA-256: {engine_sha}",
+                f"Schema SHA-256: {schema_sha}",
+                f"Validator SHA-256: {validator_sha}",
+                "Runs: 1 PENDING, 2 SUCCEEDED, 1 governed FAILED",
+                f"Reference validations: {validation_count}",
+                f"Hash-linkage checks: {hash_check_count}",
+                "Inspection: four Runs verified read-only",
+                "Unexpected errors: 0",
+                "",
+                capsule,
+                "",
+            ]
+        )
+        atomic_write_text(evidence_dir / "U21A_ACCEPTANCE_REPORT.txt", report)
+        atomic_write_text(evidence_dir / "U21A_RETURN_CAPSULE.txt", capsule + "\n")
+        print(capsule)
+        return 0
+    except Exception as error:
+        code = error.code if isinstance(error, GateFailure) else error.__class__.__name__
+        message = bounded_text(str(error), 700)
+        completed_at = utc_now()
+        capsule = f"UDP002U21AG1-ERROR-{code} C-7"
+        try:
+            output.mkdir(parents=True, exist_ok=True)
+            evidence_dir = output / "02_EVIDENCE"
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            evidence = {
+                "GateId": "UDP002.U21A.AcceptanceGate",
+                "GateVersion": GATE_VERSION,
+                "GateStatus": "FAIL",
+                "StartedAtUtc": started_at,
+                "CompletedAtUtc": completed_at,
+                "ElapsedSeconds": round(time.monotonic() - started_monotonic, 6),
+                "ErrorCode": code,
+                "ErrorMessage": message,
+                "BoundedStackTrace": traceback.format_exc().splitlines()[-20:],
+                "RunDirectories": {name: str(path) for name, path in run_dirs.items()},
+                "Checks": checks,
+                "Commands": [command_evidence(result) for result in commands],
+                "ReturnCapsule": capsule,
+            }
+            atomic_write_json(evidence_dir / "U21A_ACCEPTANCE_EVIDENCE.json", evidence)
+            atomic_write_text(evidence_dir / "U21A_RETURN_CAPSULE.txt", capsule + "\n")
+        except Exception:
+            pass
+        print(capsule)
+        return 7
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Independent black-box acceptance gate for UDP002 U21A")
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument("--self-test", action="store_true")
+    action.add_argument("--run", action="store_true")
+    parser.add_argument("--engine")
+    parser.add_argument("--schema-bundle")
+    parser.add_argument("--contract-validator")
+    parser.add_argument("--out")
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    if args.self_test:
+        return self_test()
+    missing = [
+        name
+        for name, value in (
+            ("--engine", args.engine),
+            ("--schema-bundle", args.schema_bundle),
+            ("--contract-validator", args.contract_validator),
+            ("--out", args.out),
+        )
+        if not value
+    ]
+    if missing:
+        print(f"UDP002-U21A-GATE-ERROR-MISSING-ARGUMENTS-{','.join(missing)} C-7")
+        return 7
+    return run_acceptance(
+        Path(args.engine).resolve(),
+        Path(args.schema_bundle).resolve(),
+        Path(args.contract_validator).resolve(),
+        Path(args.out).resolve(),
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
