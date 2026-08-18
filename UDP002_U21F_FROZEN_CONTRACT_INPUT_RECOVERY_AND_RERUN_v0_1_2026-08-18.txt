@@ -1,0 +1,92 @@
+UDP002 U21F FROZEN CONTRACT INPUT RECOVERY AND RERUN
+
+Task ID: U21F-RECOVERY-01
+Version: 0.1
+Date: 2026-08-18
+Owner: Zhao Zhili
+Status: APPROVED FOR INPUT RECOVERY AND ORIGINAL-CANDIDATE RERUN
+
+
+1. CONFIRMED ROOT CAUSE
+
+Second diagnostic evidence:
+
+  U21FD2 K-FILE3 CL-49 FN-selftest ARG---schema-bundle
+  EX-0 IF-0 C-0
+  MEMO-u002_core_contract_schema_bundle_v0_1.json.txt;
+  Path(p).is_file(); role=CORE_SCHEMA_BUNDLE
+
+The U21F self-test stopped before its formal matrix because the explicit
+--schema-bundle path did not resolve to a regular file. This is a bootstrap
+input/path defect, not evidence of a Controlled Stage Executor, runtime ABI,
+Module, Artifact or FailurePolicy defect.
+
+No U21F source correction is authorized in this step.
+
+
+2. PUBLIC TRANSFER FILES
+
+Download these exact frozen U2-0A dependencies from the public transfer root:
+
+  u002_core_contract_schema_bundle_v0_1.json.txt
+  u002_core_contract_validator_v0_1.py.txt
+
+Place both files directly in:
+
+  C-CODE\U-UDP002\04_TEMP
+
+Do not rename them and do not add another .txt suffix.
+
+
+3. VERIFY FROZEN IDENTITIES IN WINDOWS CMD
+
+Run from C-CODE root:
+
+  certutil -hashfile ".\U-UDP002\04_TEMP\u002_core_contract_schema_bundle_v0_1.json.txt" SHA256
+
+Required SHA-256:
+
+  02acedb73d1adbb64b1f13c38f890cbdfc119fbd21bbb512e04d8284dc354183
+
+Then run:
+
+  certutil -hashfile ".\U-UDP002\04_TEMP\u002_core_contract_validator_v0_1.py.txt" SHA256
+
+Required SHA-256:
+
+  1971535b682fd51435acfc4f8baf9c2a3e298a274147ba0ed90934aa96ce85f8
+
+Stop with C-7 if either identity differs. Do not use an Archive or newest-file
+copy merely because its basename matches.
+
+
+4. RERUN THE ORIGINAL U21F CANDIDATE
+
+Run this single CMD command from C-CODE root. Use the original candidate, not
+the diagnostic copy:
+
+  python ".\U-UDP002\04_TEMP\u002_controlled_stage_executor_v0_1.py.txt" --self-test --engine ".\U-UDP002\01_PROGRAMS\u002_engine_skeleton_v0_1.py" --protocol-bundle ".\U-UDP002\04_TEMP\u002_module_runtime_protocol_bundle_v0_1.json.txt" --protocol-validator ".\U-UDP002\04_TEMP\u002_module_runtime_protocol_validator_v0_1.py.txt" --schema-bundle ".\U-UDP002\04_TEMP\u002_core_contract_schema_bundle_v0_1.json.txt" --contract-validator ".\U-UDP002\04_TEMP\u002_core_contract_validator_v0_1.py.txt"
+
+Do not alter the command to make a result pass. If an actual local promoted
+Engine filename differs, Copilot may substitute only the exact promoted U21A
+Engine path already recorded by U21AP1; all other identities remain fixed.
+
+
+5. REQUIRED RETURN
+
+Return the executor's final capsule exactly as printed, without manually
+changing U to I or any counter.
+
+Expected success contract:
+
+  U21F1 N-T36-R3-M12-A10-F10-I8-X0 C-0
+
+If it fails, return its exact one-line C-7 capsule plus at most one short Memo.
+
+
+6. COMPLETION BOUNDARY
+
+C-0 authorizes an independent U21F black-box Gate. It does not freeze or
+promote the three candidates and does not authorize U21G or real company data.
+
+END
