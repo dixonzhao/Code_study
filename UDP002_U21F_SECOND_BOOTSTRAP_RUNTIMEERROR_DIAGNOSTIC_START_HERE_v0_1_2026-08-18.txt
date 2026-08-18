@@ -1,0 +1,96 @@
+UDP002 U21F SECOND BOOTSTRAP RUNTIMEERROR DIAGNOSTIC
+
+Task ID: U21F-DIAG-03
+Version: 0.1
+Date: 2026-08-18
+Owner: Zhao Zhili
+Status: APPROVED FOR DIAGNOSIS ONLY
+
+
+1. OBSERVED RESULT
+
+After restoring the frozen Core Schema Bundle and Core Validator inputs, the
+unchanged original candidate returned:
+
+  U21F1 N-T0-R0-M0-A0-F0-I0-X1 C-7 K-RUNTIMEERROR
+
+The actual original executor filename is:
+
+  u002_controlled_stage_executor_v0_1.py
+
+It has no .txt suffix. The previous recovery instruction showed the wrong
+.py.txt executor suffix. That documentation defect is corrected here; do not
+rename or regenerate the original executor.
+
+The I0 field now matches the approved capsule key. All formal counters remain
+zero, so this is still a bootstrap exception before the 36-check matrix.
+
+
+2. PROVIDE TO COPILOT
+
+Provide no more than these three files:
+
+1. this instruction;
+2. exact failed u002_controlled_stage_executor_v0_1.py;
+3. prior u002_controlled_stage_executor_diagonstic_v0_1.py, if retained.
+
+Also make the exact successful dependency paths and the failing CMD command
+available as text in the chat. Do not provide company data.
+
+
+3. GENERATE EXACTLY ONE NEW DIAGNOSTIC COPY
+
+Generate and return:
+
+  u002_controlled_stage_executor_diagnostic_v0_2.py.txt
+
+Base it on the exact failed original executor. Permitted changes only:
+
+- preserve the complete original self-test and all counters;
+- print and retain the complete traceback at the outermost exception boundary;
+- record Exists/IsFile for the five explicit self-test dependencies in this
+  fixed order: Engine, Protocol Bundle, Protocol Validator, Core Schema Bundle,
+  Core Contract Validator;
+- when the deepest frame is the generic helper ck(), report the immediately
+  preceding caller frame and the ck() label/predicate instead of hiding it;
+- otherwise report the deepest application frame;
+- save evidence under a new U21F_DIAG_03 directory;
+- expose basenames only, never absolute company paths.
+
+Do not repair the exception, edit counters, change candidate behavior or reuse
+the previous diagnostic directory.
+
+
+4. RUN
+
+Run diagnostic_v0_2 with the same five dependency paths that produced the
+second failure. The Executor argument itself is the diagnostic .py.txt file;
+the original production candidate remains the unchanged .py file.
+
+
+5. REQUIRED RETURN
+
+Return only:
+
+  U21FD3 E-<ExceptionType> CL-<CallerLine> FN-<CallerFunction> P-<five 0/1 file-state bits> C-0
+  MEMO-<exact message or ck label plus checked predicate, maximum 120 characters>
+
+P bit order is Engine, Protocol Bundle, Protocol Validator, Core Schema Bundle,
+Core Contract Validator. Each bit is 1 only when Exists and IsFile are true.
+
+
+6. PROHIBITED ACTIONS
+
+- no edit or rename of u002_controlled_stage_executor_v0_1.py;
+- no edit to the restored frozen U2-0A contracts;
+- no edit to U21A-U21E;
+- no U21F Gate, promotion, U21G or real-data execution;
+- no correction based only on the generic RUNTIMEERROR capsule.
+
+
+7. COMPLETION BOUNDARY
+
+U21FD3 C-0 authorizes root-cause classification and, only if needed, one
+separate versioned correction. It is not U21F acceptance.
+
+END
