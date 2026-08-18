@@ -1,0 +1,85 @@
+UDP002 U21E LEARNING BRIEF
+
+Topic: Input Binding and Independent Acceptance
+Date: 2026-08-18
+Audience: Zhao Zhili / future maintainers
+
+
+1. WHAT U21E DOES IN ONE SENTENCE
+
+U21E converts “these files and Modules probably belong together” into a
+machine-verifiable authorization saying exactly what may run on exactly which
+signals, configuration and FrameCount range.
+
+
+2. WHY IT EXISTS
+
+An analysis result is meaningful only if its input identity is stable. Without
+binding, two runs can silently use different Camera columns, Module versions,
+invalid-value policies or frame ranges while appearing to run the same method.
+
+Reality meaning:
+
+  U21E prevents a correct mathematical model from answering the wrong data
+  question without anyone noticing.
+
+
+3. FAIL-CLOSED
+
+Fail-closed means uncertainty denies execution. Missing signals, excess matches,
+invalid configuration, out-of-range frames or identity mismatch produce a
+controlled C-7 rather than an approximate best guess.
+
+Reality meaning:
+
+  In vehicle-data engineering, “I cannot prove the input” is safer and more
+  traceable than silently choosing one plausible input.
+
+
+4. INDEPENDENT ACCEPTANCE
+
+The Binder's own self-test proves its intended internal cases. The independent
+Gate treats it as a black box and checks external behavior, denial cases,
+repeatability and immutability. These are different evidence layers.
+
+Reality meaning:
+
+  A program cannot be the only witness that it works correctly.
+
+
+5. THE TYPEERROR LESSON
+
+`Path` represents a filesystem location. `json.loads()` parses JSON text already
+in memory. Passing a WindowsPath directly crossed two different abstraction
+levels. The correct sequence is Path -> read text -> parse JSON.
+
+Reality meaning:
+
+  Many software failures are not bad mathematics; they are type and interface
+  mismatches at subsystem boundaries.
+
+
+6. IS THIS “REAL KNOWLEDGE”?
+
+Yes, but it is software/R&D systems knowledge rather than SysID mathematics.
+The full capability stack is:
+
+  trustworthy data -> controlled execution -> statistical model -> engineering
+  interpretation -> reproducible evidence
+
+U21E strengthens the second link. U22 and later Algorithm Cards will supply the
+Camera/Radar statistics and SysID content. Neither layer replaces the other.
+
+
+7. WHAT THE ENGINEER MUST STILL OWN
+
+- why each Module exists;
+- the mathematical definition and assumptions;
+- which signal represents the physical quantity;
+- acceptance metrics and failure conditions;
+- interpretation and limitations of the output.
+
+Code generation may be delegated. These decisions may not be delegated without
+losing technical ownership.
+
+END
