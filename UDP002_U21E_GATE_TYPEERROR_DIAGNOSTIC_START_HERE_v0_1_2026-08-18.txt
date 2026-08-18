@@ -1,0 +1,87 @@
+UDP002 U21E GATE TYPEERROR DIAGNOSTIC
+
+Task ID: U21E-GATE-DIAG
+Version: 0.1
+Date: 2026-08-18
+Owner: Zhao Zhili
+Status: APPROVED FOR DIAGNOSIS ONLY
+
+
+1. OBSERVED FAILURE
+
+  U21EG1 N-R0-P0-F0-I0-X1 C-7 K-TYPEERROR
+
+All test-group counts are zero. Treat this as a Gate-local uncontrolled
+exception before acceptance testing, not as a U21E binder failure.
+
+
+2. INPUTS TO COPILOT
+
+Provide:
+
+1. this diagnostic instruction;
+2. the exact original file:
+   u002_u21e_acceptance_gate_v0_1.py.txt;
+3. the exact formal CMD command and the failed output directory if available.
+
+Do not provide or modify the U21E binder unless required only as an unchanged
+runtime input to reproduce the same command.
+
+
+3. GENERATE EXACTLY ONE DIAGNOSTIC COPY
+
+Generate the complete downloadable file:
+
+  u002_u21e_acceptance_gate_diagnostic_v0_1.py.txt
+
+It must preserve all original Gate logic. The only permitted behavioral change
+is diagnostic visibility:
+
+- import traceback;
+- at the outermost controlled `except Exception` boundary, write
+  traceback.print_exc() to stderr before the existing failure capsule;
+- also atomically retain the full traceback under the new diagnostic out-dir;
+- do not suppress the original exception type, message, file, function or line;
+- do not repair any suspected defect in this diagnostic copy.
+
+Do not overwrite the original Gate. Do not edit the binder, plan, Module Packs,
+U001 fixtures or frozen contracts.
+
+
+4. EXECUTION
+
+Run the diagnostic copy with the exact same arguments as the failed formal Gate,
+but use a new non-existing output directory, for example:
+
+  U21E_GATE_DIAG_01
+
+The failed original out-dir must remain unchanged.
+
+If the original Gate did not create enough output to reconstruct its command,
+Copilot may locate the exact retained U21D qualified plan and matching Module
+root, then reproduce the formal invocation from the Gate specification. It must
+not select files by newest modification time.
+
+
+5. REQUIRED DIAGNOSTIC OUTPUT
+
+After reproduction, Copilot must inspect the complete traceback and return only:
+
+  U21EGD1 E-<ExceptionType> F-<SourceBasename> L-<LineNumber> FN-<FunctionName> C-0
+  MEMO-<maximum 120 characters, exact exception message>
+
+Example form only:
+
+  U21EGD1 E-TypeError F-u002_u21e_acceptance_gate_v0_1.py.txt L-412 FN-build_catalog C-0
+  MEMO-unsupported operand type(s) for +: 'dict' and 'list'
+
+Do not return the full traceback through the manual channel. Keep it in the
+diagnostic output directory for later correction evidence.
+
+
+6. COMPLETION BOUNDARY
+
+Diagnosis C-0 authorizes a separate versioned Gate correction specification.
+It does not authorize modifying the binder or treating the Gate as accepted.
+
+END
