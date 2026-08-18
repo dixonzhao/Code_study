@@ -1,0 +1,90 @@
+UDP002 U21F GATE DENIAL FAILURE DIAGNOSTIC
+
+Task ID: U21F-GATE-DIAG-01
+Version: 0.1
+Date: 2026-08-18
+Owner: Zhao Zhili
+Status: APPROVED FOR READ-ONLY DIAGNOSIS ONLY
+
+
+1. OBSERVED FAILURE
+
+  U21FG1 N-R0-P0-D0-I0-S0-E0-X0 C-7 K-DENIAL
+
+The Gate was executed as u002_u21f_acceptance_gate_v0_1.py.txt. This temporary
+suffix is valid when passed explicitly to Python and is not itself a defect.
+
+
+2. PROVIDE TO COPILOT
+
+Provide no more than three items:
+
+1. this instruction;
+2. exact u002_u21f_acceptance_gate_v0_1.py.txt;
+3. exact Gate evidence JSON or failure summary retained under the explicit
+   U21F_GATE_20260818 out-dir.
+
+Keep the child stdout/stderr files available locally. Do not provide company
+data and do not expose absolute company paths.
+
+
+3. READ-ONLY DIAGNOSIS
+
+Identify the first failing denial probe by its fixed index from the Gate design:
+
+1. no action;
+2. missing Engine;
+3. missing Protocol Bundle;
+4. missing Protocol Validator;
+5. missing Core Schema;
+6. missing Core Validator;
+7. modified private Protocol Bundle copy;
+8. directory supplied where a regular file is required.
+
+For that exact child invocation, record:
+
+- denial index;
+- child process return code;
+- whether stdout ended in an application C-7 capsule;
+- whether stderr contained argparse usage, a traceback, or neither;
+- the Gate predicate that rejected the observed behavior;
+- whether any tested input hash changed.
+
+Prefer existing evidence. If the Gate failed before retaining these fields,
+Copilot may generate exactly one read-only helper:
+
+  u002_u21f_gate_denial_diagnostic_v0_1.py.txt
+
+The helper may parse only the explicit Gate source and explicit Gate out-dir.
+It must not rerun children, search by modification time or modify any file.
+
+
+4. REQUIRED RETURN
+
+Return only:
+
+  U21FGD1 IDX-<1..8> RC-<integer> CAP-<0|1> ERR-<ARGPARSE|TRACEBACK|CONTROLLED|NONE> H-<0|1> C-0
+  MEMO-<exact rejected Gate predicate, maximum 120 characters>
+
+H is 1 only when all six tested input hashes remained unchanged.
+
+If the first failing denial cannot be reconstructed from retained evidence:
+
+  U21FGD1 IDX-0 RC-NA CAP-0 ERR-NONE H-<0|1> C-7 K-EVIDENCE
+
+
+5. PROHIBITED ACTIONS
+
+- no Gate correction in this step;
+- no candidate correction or rename;
+- no counter editing;
+- no rerun using relaxed acceptance;
+- no promotion, U21G or real data.
+
+
+6. COMPLETION BOUNDARY
+
+U21FGD1 C-0 authorizes one narrowly scoped Gate correction specification if the
+failure is Gate-local. It does not authorize U21F acceptance.
+
+END
