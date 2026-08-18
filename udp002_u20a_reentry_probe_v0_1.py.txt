@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+"""Read-only recovery probe for the UDP002 U2-0A foundation checkpoint.
+
+The probe scans only small text-like files, never opens raw CAN/video/binary
+payloads, and writes one human-readable result file under U-UDP002/04_TEMP.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+import re
+import sys
+import tempfile
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+
+
+VERSION = "0.1"
+OUTPUT_NAME = "UDP002_U20A_REENTRY_PROBE_RESULT_20260818.txt"
+TEXT_EXTENSIONS = {
+    ".txt", ".md", ".csv", ".json", ".log", ".yaml", ".yml",
+    ".ini", ".cfg", ".toml", ".py", ".cmd", ".bat",
+}
+MAX_TEXT_BYTES = 2 * 1024 * 1024
+EXCLUDED_NAME_TOKENS = ("reentryprobe", "reentrychecklist")
+
+
+@dataclass(frozen=True)
+class Evidence:
+    relative_path: str
+    size: int
+    modified: str
+    sha256: str
+    archived: bool
+    scope_source: str
+    categories: tuple[str, ...]
+    name_categories: tuple[str, ...]
+    category_source: str
+    pass_marker: bool
+    fail_marker: bool
+
+
+def compact(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+
+def is_scope_marker(text: str) -> bool:
+    value = compact(text)
+    return "u20a" in value or "u2a" in value and "foundation" in value
+
+
+def categories_in(text: str) -> set[str]:
+    value = compact(text)
+    categories: set[str] = set()
+    if "fixture" in value:
+        categories.add("FIXTURE")
+    if "selftest" in value:
+        categories.add("SELFTEST")
+    if "acceptance" in value:
+        categories.add("ACCEPTANCE")
+    if "nodereport" in value:
+        categories.add("NODE")
+    if "returncapsule" in value or "finalcapsule" in value:
+        categories.add("CAPSULE")
+    if "freeze" in value or "frozen" in value:
+        categories.add("FREEZE")
+    if any(token in value for token in ("cleanfolder", "independentrerun", "cleanrerun")):
+        categories.add("INDEPENDENT")
+    return categories
+
+
+def read_small_text(path: Path) -> str:
+    if path.suffix.lower() not in TEXT_EXTENSIONS or path.stat().st_size > MAX_TEXT_BYTES:
+        return ""
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def scan(root: Path) -> tuple[list[Evidence], list[str]]:
+    evidence: list[Evidence] = []
+    warnings: list[str] = []
+    for directory, names, filenames in os.walk(root):
+        names[:] = [name for name in names if name not in {".git", "__pycache__"}]
+        for filename in filenames:
+            path = Path(directory) / filename
+            relative = path.relative_to(root).as_posix()
+            name_key = compact(filename)
+            if filename == OUTPUT_NAME or any(token in name_key for token in EXCLUDED_NAME_TOKENS):
+                continue
+            try:
+                name_scope = is_scope_marker(filename)
+                name_categories = categories_in(filename)
+                text = read_small_text(path)
+                content_scope = is_scope_marker(text) if text else False
+                content_categories = categories_in(text) if text else set()
+                if not name_scope and not content_scope:
+                    continue
+                categories = name_categories | content_categories
+                if not categories:
+                    categories = {"GENERAL"}
+                lower_text = text.lower()
+                pass_marker = bool(re.search(r"\bc\s*[-_=]?\s*0\b|\bpass(?:ed)?\b", lower_text))
+                fail_marker = bool(
+                    re.search(r"\bc\s*[-_=]?\s*[1-9]\d*\b", lower_text)
+                    or re.search(
+                        r"\b(?:status|result|returncode)\s*[:=_-]?\s*(?:fail|failed|blocked)\b",
+                        lower_text,
+                    )
+                )
+                evidence.append(
+                    Evidence(
+                        relative_path=relative,
+                        size=path.stat().st_size,
+                        modified=datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
+                        sha256=sha256(path),
+                        archived="a-archive" in relative.lower() or "/archive/" in f"/{relative.lower()}/",
+                        scope_source="NAME" if name_scope else "CONTENT",
+                        categories=tuple(sorted(categories)),
+                        name_categories=tuple(sorted(name_categories)),
+                        category_source="NAME" if name_categories else "CONTENT",
+                        pass_marker=pass_marker,
+                        fail_marker=fail_marker,
+                    )
+                )
+            except (OSError, ValueError) as error:
+                warnings.append(f"{relative}: {type(error).__name__}: {error}")
+    evidence.sort(key=lambda item: (item.modified, item.relative_path), reverse=True)
+    return evidence, warnings
+
+
+def classify(evidence: list[Evidence]) -> tuple[str, str, dict[str, int], list[str]]:
+    counts = {
+        category: sum(category in item.name_categories for item in evidence)
+        for category in ("FIXTURE", "SELFTEST", "ACCEPTANCE", "NODE", "CAPSULE", "FREEZE", "INDEPENDENT")
+    }
+    pass_count = sum(item.pass_marker for item in evidence)
+    fail_count = sum(item.fail_marker for item in evidence)
+    missing = [
+        category for category in ("ACCEPTANCE", "NODE", "CAPSULE", "FREEZE", "INDEPENDENT")
+        if counts[category] == 0
+    ]
+    if not evidence:
+        status, return_code = "UNKNOWN", "C-7"
+    elif not missing and pass_count > 0 and fail_count == 0:
+        status, return_code = "PASS", "C-0"
+    else:
+        status, return_code = "INCOMPLETE", "C-7"
+    counts["PASS"] = pass_count
+    counts["FAIL"] = fail_count
+    return status, return_code, counts, missing
+
+
+def render(root: Path, evidence: list[Evidence], warnings: list[str]) -> tuple[str, str]:
+    status, return_code, counts, missing = classify(evidence)
+    capsule = (
+        "U20ARP1 "
+        f"N-F{len(evidence)}-A{counts['ACCEPTANCE']}-N{counts['NODE']}"
+        f"-R{counts['CAPSULE']}-Z{counts['FREEZE']}-I{counts['INDEPENDENT']}"
+        f"-P{counts['PASS']}-X{counts['FAIL']}-W{len(warnings)} "
+        f"S-{status} {return_code}"
+    )
+    lines = [
+        "UDP002 U2-0A REENTRY PROBE RESULT",
+        "",
+        f"ProbeVersion: {VERSION}",
+        f"Root: {root}",
+        f"Generated: {datetime.now().isoformat(timespec='seconds')}",
+        f"Status: {status}",
+        f"ReturnCode: {return_code}",
+        f"MissingRequiredEvidence: {','.join(missing) if missing else 'NONE'}",
+        f"Capsule: {capsule}",
+        "",
+        "IMPORTANT",
+        "This is a filename/content inventory, not an engineering acceptance decision.",
+        "PASS is emitted only when all required evidence classes are present and no",
+        "failure marker is detected. Review the listed files before freezing U2-0A.",
+        "",
+        "COUNTS",
+    ]
+    for key in ("FIXTURE", "SELFTEST", "ACCEPTANCE", "NODE", "CAPSULE", "FREEZE", "INDEPENDENT", "PASS", "FAIL"):
+        lines.append(f"{key}={counts[key]}")
+    lines.extend(["", "EVIDENCE FILES"])
+    if not evidence:
+        lines.append("NONE")
+    for index, item in enumerate(evidence, 1):
+        lines.extend(
+            [
+                f"[{index:03d}] {item.relative_path}",
+                f"  Categories={','.join(item.categories)} CategorySource={item.category_source}",
+                f"  NameCategories={','.join(item.name_categories) if item.name_categories else 'NONE'}",
+                f"  ScopeSource={item.scope_source} Archived={int(item.archived)}",
+                f"  Size={item.size} Modified={item.modified}",
+                f"  PASS={int(item.pass_marker)} FAIL={int(item.fail_marker)}",
+                f"  SHA256={item.sha256}",
+            ]
+        )
+    lines.extend(["", "WARNINGS"])
+    lines.extend(warnings or ["NONE"])
+    lines.extend(["", "RETURN ONLY THE CAPSULE LINE ABOVE.", ""])
+    return "\n".join(lines), capsule
+
+
+def find_root(argument: str | None) -> Path:
+    if argument:
+        root = Path(argument).expanduser().resolve()
+        if root.is_dir():
+            return root
+        raise FileNotFoundError(f"UDP002 root not found: {root}")
+    candidates = [Path.cwd() / "U-UDP002", Path.cwd()]
+    for candidate in candidates:
+        if candidate.is_dir() and (candidate.name.lower() == "u-udp002" or (candidate / "04_TEMP").is_dir()):
+            return candidate.resolve()
+    raise FileNotFoundError("Run from C-CODE or provide --root U-UDP002")
+
+
+def self_test() -> int:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory) / "U-UDP002"
+        temp = root / "04_TEMP"
+        temp.mkdir(parents=True)
+        samples = {
+            "UDP002_U20A_ACCEPTANCE.txt": "PASS C-0",
+            "UDP002_U20A_NODE_REPORT.txt": "final node report PASS",
+            "UDP002_U20A_RETURN_CAPSULE.txt": "C-0",
+            "UDP002_U20A_FREEZE.txt": "FROZEN PASS",
+            "UDP002_U20A_INDEPENDENT_CLEAN_FOLDER_RERUN.txt": "PASS C-0",
+        }
+        for name, content in samples.items():
+            (temp / name).write_text(content, encoding="utf-8")
+        evidence, warnings = scan(root)
+        status, return_code, _, missing = classify(evidence)
+        if status != "PASS" or return_code != "C-0" or missing or warnings:
+            print("UDP002-U20A-REENTRY-PROBE-SELFTEST-FAIL C-7")
+            return 7
+    print("UDP002-U20A-REENTRY-PROBE-SELFTEST-PASS-5 C-0")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", help="Path to U-UDP002; defaults to ./U-UDP002 when run from C-CODE")
+    parser.add_argument("--self-test", action="store_true")
+    args = parser.parse_args()
+    if args.self_test:
+        return self_test()
+    try:
+        root = find_root(args.root)
+        evidence, warnings = scan(root)
+        report, capsule = render(root, evidence, warnings)
+        output_dir = root / "04_TEMP"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / OUTPUT_NAME
+        output_path.write_text(report, encoding="utf-8")
+        print(capsule)
+        print(f"RESULT={output_path}")
+        return 0
+    except Exception as error:  # fail closed with a compact diagnostic
+        print(f"U20ARP1 ERROR-{type(error).__name__} C-7")
+        print(str(error))
+        return 7
+
+
+if __name__ == "__main__":
+    sys.exit(main())
