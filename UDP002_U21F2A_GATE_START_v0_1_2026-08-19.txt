@@ -1,0 +1,237 @@
+UDP002 U21F2A INDEPENDENT PROTOCOL GATE
+
+Task ID: U21F2A-GATE
+Version: 0.1
+Date: 2026-08-19
+Owner: Zhao Zhili
+Status: APPROVED FOR COMPANY-SIDE IMPLEMENTATION AND EXECUTION
+
+
+1. OBJECTIVE
+
+Independently test the two U21F2A candidates as black-box files:
+
+  u002_module_runtime_protocol_bundle_v0_2.json.txt
+  u002_module_runtime_protocol_validator_v0_2.py.txt
+
+The Gate must launch the validator as a child process. It must not import,
+rewrite, rename, repair or copy candidate source. It must not trust the
+candidate's internal counters as its only evidence.
+
+
+2. IMPLEMENTER INPUTS AND OUTPUT
+
+Give a fresh Copilot chat exactly these three files:
+
+1. this complete Gate instruction;
+2. u002_module_runtime_protocol_bundle_v0_2.json.txt;
+3. u002_module_runtime_protocol_validator_v0_2.py.txt.
+
+Generate exactly one complete downloadable attachment:
+
+  u002_u21f2a_protocol_acceptance_gate_v0_1.py.txt
+
+Do not return only a code block. Do not generate BAT, PowerShell, README, schema,
+validator replacement, Executor, promotion utility or additional diagnostic.
+Use UTF-8/LF, English identifiers, concise English comments and Python standard
+library only. Place the downloaded file directly in U-UDP002\04_TEMP and keep
+its .py.txt transfer suffix.
+
+
+3. CLI
+
+Exactly one action per invocation:
+
+  --self-test
+
+or:
+
+  --acceptance-test
+  --protocol-bundle PATH
+  --protocol-validator PATH
+  --out-dir PATH
+
+The acceptance out-dir must not already exist. The Gate creates it atomically
+under the supplied parent. It never chooses a candidate by name search, newest
+time, glob priority or adjacent-file guessing.
+
+
+4. FAIL-CLOSED PRECHECK
+
+Before creating acceptance evidence require:
+
+- both supplied candidates exist as regular non-symlink files;
+- their basenames exactly match the two names in Section 1;
+- protocol bundle is valid duplicate-key-safe JSON;
+- validator is launchable with the current Python interpreter;
+- output target does not exist;
+- the output parent is writable;
+- neither candidate is located below the output target.
+
+Compute SHA-256 by streaming binary chunks. Record candidate hashes before any
+child process. Never expose absolute paths in the final evidence or capsule.
+
+
+5. CHILD-PROCESS CLASSIFICATION
+
+Use sys.executable and the exact supplied validator path. Never import validator
+functions. Capture bounded stdout/stderr with a hard 30-second timeout.
+
+Accepted validation:
+
+- child return code is exactly 0;
+- the final non-empty stdout line is exactly the expected C-0 capsule;
+- stderr contains no Traceback.
+
+Accepted controlled denial:
+
+- child return code is exactly 7;
+- final non-empty stdout line matches:
+  `U21F2AV REQ-0 C-7 K-<STABLE_REASON>` or
+  `U21F2AV RES-0 C-7 K-<STABLE_REASON>` as appropriate;
+- STABLE_REASON contains only uppercase A-Z, digits and underscore;
+- stderr contains no Traceback.
+
+Do not invent a second CAP flag or reinterpret an actual C-7 line as CAP-0.
+Child return code plus the actual final capsule line are the authoritative pair.
+Exit 2, 9, timeout, missing capsule, malformed capsule or Traceback is an
+uncontrolled Gate failure, not a successful denial.
+
+
+6. ACCEPTANCE MATRIX
+
+6.1 Repeated internal run R2
+
+Launch the candidate validator's exact internal self-test twice:
+
+  --self-test --protocol-bundle <exact supplied bundle>
+
+Both runs must return code 0 and the exact line:
+
+  U21F2A1 N-T24-P4-D16-K4-X0 C-0
+
+The two final lines must be byte-identical.
+
+6.2 Positive black-box cases P4
+
+Construct fixtures independently in a private Gate directory and validate:
+
+1. one valid FRAME_RANGE request;
+2. the same request a second time with identical classification;
+3. one valid SUCCEEDED result with a PRIMARY payload;
+4. one valid FAILED result with an empty Artifacts array.
+
+Expected final capsules are exactly `U21F2AV REQ-1 C-0` or
+`U21F2AV RES-1 C-0`.
+
+6.3 Controlled denial cases D12
+
+Request denials:
+
+1. unknown top-level field;
+2. missing required field;
+3. bool used for TimeoutSeconds;
+4. invalid FRAME_RANGE order;
+5. unsafe input payload RelativePath;
+6. SKIP_OPTIONAL_PATH with RequiredModule true.
+
+Result denials:
+
+7. unknown top-level field;
+8. invalid Status;
+9. SUCCEEDED with no Artifact;
+10. FAILED with an Artifact;
+11. successful Artifact without PRIMARY payload;
+12. unsafe or duplicate output RelativePath.
+
+Every case must meet the exact controlled-denial classification in Section 5.
+Do not call the candidate's private functions and do not reuse its self-test
+fixtures.
+
+6.4 Identity and boundary checks I4
+
+1. protocol-bundle before/after SHA-256 is identical;
+2. protocol-validator before/after SHA-256 is identical;
+3. all Gate fixtures/evidence remain below the exact acceptance out-dir;
+4. repeated candidate self-test and repeated valid request classifications are
+   deterministic.
+
+
+7. EVIDENCE
+
+On success write exactly two evidence files inside the new out-dir:
+
+  u21f2a_gate_acceptance.json
+  u21f2a_gate_capsule.txt
+
+The JSON contains only logical names, SHA-256 values, counts, stable result
+classes, UTC creation time and Gate version. Do not record absolute paths or
+fixture payload values. Write files atomically with deterministic JSON key
+ordering. The capsule file contains only the final Gate capsule.
+
+On failure, write at most one additional `u21f2a_gate_failure.json` containing
+the first failed check, child return code, bounded final stdout line, bounded
+stderr class and candidate before/after hashes. Do not generate a new program
+or modify either candidate.
+
+
+8. GATE SELF-TEST
+
+`--self-test` uses a private temporary directory and synthetic child stubs only.
+It must prove exactly 16 helper assertions:
+
+- P4 positive child/capsule classifications;
+- D8 timeout, return-code, missing/malformed capsule and Traceback denials;
+- I4 hashing, bounded capture, atomic evidence and cleanup guarantees.
+
+Success:
+
+  U21F2AGST N-T16-P4-D8-I4-X0 C-0
+
+Failure:
+
+  U21F2AGST N-T<t>-P<p>-D<d>-I<i>-X<x> C-7 K-<STABLE_REASON>
+
+
+9. ACCEPTANCE RETURN
+
+Print exactly one final line.
+
+Success:
+
+  U21F2AG1 N-R2-P4-D12-I4-X0 C-0
+
+Failure:
+
+  U21F2AG1 N-R<r>-P<p>-D<d>-I<i>-X<x> C-7 K-<STABLE_REASON>
+
+Do not print success unless all exact counts are true.
+
+
+10. CMD EXECUTION FROM C-CODE ROOT
+
+First run Gate self-test:
+
+  python ".\U-UDP002\04_TEMP\u002_u21f2a_protocol_acceptance_gate_v0_1.py.txt" --self-test
+
+If self-test passes, run the independent acceptance test:
+
+  python ".\U-UDP002\04_TEMP\u002_u21f2a_protocol_acceptance_gate_v0_1.py.txt" --acceptance-test --protocol-bundle ".\U-UDP002\04_TEMP\u002_module_runtime_protocol_bundle_v0_2.json.txt" --protocol-validator ".\U-UDP002\04_TEMP\u002_module_runtime_protocol_validator_v0_2.py.txt" --out-dir ".\U-UDP002\05_TESTS\02_ACCEPTANCE\U21F2A_GATE_V01"
+
+If `U21F2A_GATE_V01` already exists because of a failed attempt, do not overwrite
+it. Preserve it and use a versioned correction only after Project Lead review.
+
+
+11. RETURN TO PROJECT LEAD
+
+If Gate self-test fails, return that one C-7 line. Otherwise return only the
+final U21F2AG1 line. Add one short Memo only when STABLE_REASON is insufficient.
+
+
+12. SUCCESS BOUNDARY
+
+C-0 independently accepts the exact two candidate hashes for byte-identical
+promotion. It does not itself promote files and does not authorize U21F2B,
+U21G, real Modules or company data.
+
+END OF U21F2A GATE INSTRUCTION
