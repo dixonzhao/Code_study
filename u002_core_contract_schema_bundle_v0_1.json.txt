@@ -1,0 +1,457 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:u002:core-contract-schema-bundle:0.1",
+  "title": "U002 Core Contract Schema Bundle",
+  "description": "Normative structural contract for U002 Module, Artifact and Run manifests.",
+  "x-BundleVersion": "0.1",
+  "x-Owner": "Zhao Zhili",
+  "oneOf": [
+    {"$ref": "#/$defs/moduleManifest"},
+    {"$ref": "#/$defs/artifactManifest"},
+    {"$ref": "#/$defs/runManifest"}
+  ],
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "stage": {
+      "type": "string",
+      "enum": ["S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"]
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "$comment": "Validator additionally rejects absolute paths and parent traversal."
+    },
+    "extensions": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z][A-Za-z0-9_.-]{2,127}$"
+      },
+      "additionalProperties": true
+    },
+    "signalSelector": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "Channel": {"type": ["integer", "null"], "minimum": 0},
+        "CanId": {"type": ["string", "null"]},
+        "MessageName": {"type": ["string", "null"]},
+        "SignalName": {"type": ["string", "null"]},
+        "CanonicalName": {"type": ["string", "null"]},
+        "Unit": {"type": ["string", "null"]},
+        "ValueKind": {
+          "type": ["string", "null"],
+          "enum": ["NUMERIC", "BOOLEAN", "ENUM", "IDENTIFIER", "COUNTER", "FLAG", "TEXT", null]
+        },
+        "SignalRole": {"type": ["string", "null"]}
+      },
+      "minProperties": 1
+    },
+    "inputPort": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["PortId", "Role", "MinCount", "MaxCount", "Selectors"],
+      "properties": {
+        "PortId": {"$ref": "#/$defs/nonEmptyString"},
+        "Role": {"$ref": "#/$defs/nonEmptyString"},
+        "MinCount": {"type": "integer", "minimum": 0},
+        "MaxCount": {"type": ["integer", "null"], "minimum": 1},
+        "Selectors": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/signalSelector"}
+        }
+      }
+    },
+    "artifactRequirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["PortId", "ArtifactType", "ArtifactSchemaId", "MinimumSchemaVersion", "Cardinality"],
+      "properties": {
+        "PortId": {"$ref": "#/$defs/nonEmptyString"},
+        "ArtifactType": {"$ref": "#/$defs/nonEmptyString"},
+        "ArtifactSchemaId": {"$ref": "#/$defs/nonEmptyString"},
+        "MinimumSchemaVersion": {"$ref": "#/$defs/version"},
+        "Cardinality": {"type": "string", "enum": ["ONE", "ZERO_OR_ONE", "ONE_OR_MORE", "ZERO_OR_MORE"]}
+      }
+    },
+    "artifactProvision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ArtifactType", "ArtifactSchemaId", "ArtifactSchemaVersion", "ExclusiveOutput"],
+      "properties": {
+        "ArtifactType": {"$ref": "#/$defs/nonEmptyString"},
+        "ArtifactSchemaId": {"$ref": "#/$defs/nonEmptyString"},
+        "ArtifactSchemaVersion": {"$ref": "#/$defs/version"},
+        "ExclusiveOutput": {"type": "boolean"}
+      }
+    },
+    "configurationSchemaReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["SchemaId", "SchemaVersion", "RelativePath", "Sha256"],
+      "properties": {
+        "SchemaId": {"$ref": "#/$defs/nonEmptyString"},
+        "SchemaVersion": {"$ref": "#/$defs/version"},
+        "RelativePath": {"$ref": "#/$defs/relativePath"},
+        "Sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "moduleManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ContractType", "ContractVersion", "ModuleId", "ModuleVersion",
+        "DisplayName", "Stage", "ModuleKind", "AlgorithmStatus",
+        "ExecutionRequirement", "ScopeSelector", "RequiredInputs",
+        "OptionalInputs", "RequiresArtifacts", "ProvidesArtifacts",
+        "OutputNamespace", "ConfigurationSchema", "FailurePolicy",
+        "ConflictPolicy", "Entrypoint", "SelfTest", "Compatibility",
+        "ImplementationSha256"
+      ],
+      "properties": {
+        "ContractType": {"const": "U002_MODULE_MANIFEST"},
+        "ContractVersion": {"const": "0.1"},
+        "ModuleId": {
+          "type": "string",
+          "pattern": "^U002\\.[A-Za-z0-9][A-Za-z0-9_.-]{2,95}$"
+        },
+        "ModuleVersion": {"$ref": "#/$defs/version"},
+        "DisplayName": {"$ref": "#/$defs/nonEmptyString"},
+        "Description": {"type": "string"},
+        "Stage": {"$ref": "#/$defs/stage"},
+        "ModuleKind": {
+          "type": "string",
+          "enum": [
+            "INTAKE_GATE", "VALIDITY_PREPROCESSOR", "SEMANTIC_BUILDER",
+            "ARBITRATION", "ANALYSIS_VIEW", "PRIMARY_OUTCOME", "BASELINE",
+            "EVIDENCE", "CANDIDATE_SYNTHESIS", "HANDOFF_EXPORT"
+          ]
+        },
+        "AlgorithmStatus": {
+          "type": "string",
+          "enum": ["FORMAL", "PROVISIONAL", "EXPERIMENTAL", "DEPRECATED"]
+        },
+        "ExecutionRequirement": {"type": "string", "enum": ["REQUIRED", "OPTIONAL"]},
+        "ScopeSelector": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["SignalSelectors", "FrameRangeSupported"],
+          "properties": {
+            "SignalSelectors": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/signalSelector"}
+            },
+            "FrameRangeSupported": {"type": "boolean"}
+          }
+        },
+        "RequiredInputs": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/inputPort"}
+        },
+        "OptionalInputs": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/inputPort"}
+        },
+        "RequiresArtifacts": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/artifactRequirement"}
+        },
+        "ProvidesArtifacts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/artifactProvision"}
+        },
+        "OutputNamespace": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_.-]{2,95}$"
+        },
+        "ConfigurationSchema": {"$ref": "#/$defs/configurationSchemaReference"},
+        "FailurePolicy": {
+          "type": "string",
+          "enum": ["ABORT_RUN", "BLOCK_DEPENDENT_PATH", "SKIP_OPTIONAL_PATH"]
+        },
+        "ConflictPolicy": {
+          "type": "string",
+          "enum": ["ERROR_ON_COLLISION", "REQUIRE_ARBITRATION", "APPEND_ONLY"]
+        },
+        "Entrypoint": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["RelativeFile", "Callable"],
+          "properties": {
+            "RelativeFile": {"$ref": "#/$defs/relativePath"},
+            "Callable": {"$ref": "#/$defs/nonEmptyString"}
+          }
+        },
+        "SelfTest": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["Arguments", "ExpectedExitCode", "ExpectedToken"],
+          "properties": {
+            "Arguments": {"type": "array", "items": {"type": "string"}},
+            "ExpectedExitCode": {"type": "integer"},
+            "ExpectedToken": {"$ref": "#/$defs/nonEmptyString"}
+          }
+        },
+        "Compatibility": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["MinimumEngineVersion", "MaximumEngineVersion"],
+          "properties": {
+            "MinimumEngineVersion": {"$ref": "#/$defs/version"},
+            "MaximumEngineVersion": {"type": ["string", "null"], "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"}
+          }
+        },
+        "ImplementationSha256": {"$ref": "#/$defs/sha256"},
+        "Extensions": {"$ref": "#/$defs/extensions"}
+      }
+    },
+    "producerIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ModuleId", "ModuleVersion", "ModuleManifestSha256"],
+      "properties": {
+        "ModuleId": {"$ref": "#/$defs/nonEmptyString"},
+        "ModuleVersion": {"$ref": "#/$defs/version"},
+        "ModuleManifestSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "parentArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ArtifactId", "ManifestSha256", "ContentSha256"],
+      "properties": {
+        "ArtifactId": {"$ref": "#/$defs/nonEmptyString"},
+        "ManifestSha256": {"$ref": "#/$defs/sha256"},
+        "ContentSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["PayloadId", "Role", "RelativePath", "MediaType", "ByteSize", "Sha256"],
+      "properties": {
+        "PayloadId": {"$ref": "#/$defs/nonEmptyString"},
+        "Role": {"type": "string", "enum": ["PRIMARY", "INDEX", "DIAGNOSTIC", "PRESENTATION"]},
+        "RelativePath": {"$ref": "#/$defs/relativePath"},
+        "MediaType": {"$ref": "#/$defs/nonEmptyString"},
+        "ByteSize": {"type": "integer", "minimum": 0},
+        "Sha256": {"$ref": "#/$defs/sha256"},
+        "RowCount": {"type": ["integer", "null"], "minimum": 0},
+        "PayloadKind": {
+          "type": ["string", "null"],
+          "enum": ["TABLE", "JSON", "MODEL", "POINT_CLOUD_REFERENCE", "VIDEO_REFERENCE", "OTHER", null]
+        }
+      }
+    },
+    "runScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ScopeType", "CaseId", "FrameStart", "FrameEnd"],
+      "properties": {
+        "ScopeType": {"type": "string", "enum": ["FULL_CASE", "FRAME_RANGE"]},
+        "CaseId": {"$ref": "#/$defs/nonEmptyString"},
+        "FrameStart": {"type": ["integer", "null"], "minimum": 0},
+        "FrameEnd": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "clockDomain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ClockDomainId", "ClockKind", "FrameRateHz", "TimeUnit"],
+      "properties": {
+        "ClockDomainId": {"$ref": "#/$defs/nonEmptyString"},
+        "ClockKind": {"type": "string", "enum": ["FRAMECOUNT", "TIMESTAMP", "HYBRID"]},
+        "FrameRateHz": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "TimeUnit": {"type": ["string", "null"]}
+      }
+    },
+    "sourceReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["SourceId", "SourceType", "IdentitySha256"],
+      "properties": {
+        "SourceId": {"$ref": "#/$defs/nonEmptyString"},
+        "SourceType": {"$ref": "#/$defs/nonEmptyString"},
+        "IdentitySha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "artifactManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ContractType", "ContractVersion", "ArtifactId", "ArtifactType",
+        "ArtifactSchemaId", "ArtifactSchemaVersion", "ArtifactStatus", "Stage",
+        "RunId", "CreatedAtUtc", "Producer", "Parents", "Payloads", "Scope",
+        "ClockDomain", "SourceReferences", "Metadata"
+      ],
+      "properties": {
+        "ContractType": {"const": "U002_ARTIFACT_MANIFEST"},
+        "ContractVersion": {"const": "0.1"},
+        "ArtifactId": {
+          "type": "string",
+          "pattern": "^ART_[A-Za-z0-9][A-Za-z0-9_.-]{5,127}$"
+        },
+        "ArtifactType": {"$ref": "#/$defs/nonEmptyString"},
+        "ArtifactSchemaId": {"$ref": "#/$defs/nonEmptyString"},
+        "ArtifactSchemaVersion": {"$ref": "#/$defs/version"},
+        "ArtifactStatus": {"type": "string", "enum": ["COMPLETE", "PARTIAL", "FAILED"]},
+        "Stage": {"$ref": "#/$defs/stage"},
+        "RunId": {
+          "type": "string",
+          "pattern": "^RUN_[A-Za-z0-9][A-Za-z0-9_.-]{5,127}$"
+        },
+        "CreatedAtUtc": {"type": "string", "format": "date-time"},
+        "Producer": {"$ref": "#/$defs/producerIdentity"},
+        "Parents": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/parentArtifact"}
+        },
+        "Payloads": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/payload"}
+        },
+        "Scope": {"$ref": "#/$defs/runScope"},
+        "ClockDomain": {"$ref": "#/$defs/clockDomain"},
+        "SourceReferences": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/sourceReference"}
+        },
+        "CoordinateFrame": {"type": ["string", "null"]},
+        "UncertaintyReference": {"type": ["string", "null"]},
+        "Metadata": {"type": "object", "additionalProperties": true},
+        "Extensions": {"$ref": "#/$defs/extensions"}
+      }
+    },
+    "resolvedModule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "Order", "Stage", "ModuleId", "ModuleVersion", "ModuleManifestSha256",
+        "ResolvedConfigSha256", "ExecutionRequirement", "Status"
+      ],
+      "properties": {
+        "Order": {"type": "integer", "minimum": 0},
+        "Stage": {"$ref": "#/$defs/stage"},
+        "ModuleId": {"$ref": "#/$defs/nonEmptyString"},
+        "ModuleVersion": {"$ref": "#/$defs/version"},
+        "ModuleManifestSha256": {"$ref": "#/$defs/sha256"},
+        "ResolvedConfigSha256": {"$ref": "#/$defs/sha256"},
+        "ExecutionRequirement": {"type": "string", "enum": ["REQUIRED", "OPTIONAL"]},
+        "Status": {"type": "string", "enum": ["PENDING", "RUNNING", "SUCCEEDED", "SKIPPED", "FAILED"]}
+      }
+    },
+    "resolvedProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ProfileType", "ProfileId", "ProfileVersion", "ResolvedSha256"],
+      "properties": {
+        "ProfileType": {"$ref": "#/$defs/nonEmptyString"},
+        "ProfileId": {"$ref": "#/$defs/nonEmptyString"},
+        "ProfileVersion": {"$ref": "#/$defs/version"},
+        "ResolvedSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "stageStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["Stage", "Status", "InputArtifactIds", "OutputArtifactIds", "ErrorCode"],
+      "properties": {
+        "Stage": {"$ref": "#/$defs/stage"},
+        "Status": {"type": "string", "enum": ["PENDING", "RUNNING", "SUCCEEDED", "SKIPPED", "FAILED"]},
+        "InputArtifactIds": {"type": "array", "items": {"type": "string"}},
+        "OutputArtifactIds": {"type": "array", "items": {"type": "string"}},
+        "ErrorCode": {"type": ["string", "null"]}
+      }
+    },
+    "artifactReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ArtifactId", "ManifestRelativePath", "ManifestSha256"],
+      "properties": {
+        "ArtifactId": {"$ref": "#/$defs/nonEmptyString"},
+        "ManifestRelativePath": {"$ref": "#/$defs/relativePath"},
+        "ManifestSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["Platform", "PythonVersion", "Dependencies"],
+      "properties": {
+        "Platform": {"$ref": "#/$defs/nonEmptyString"},
+        "PythonVersion": {"$ref": "#/$defs/nonEmptyString"},
+        "Dependencies": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        }
+      }
+    },
+    "runManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ContractType", "ContractVersion", "RunId", "EngineVersion", "CaseId",
+        "RunStatus", "CreatedAtUtc", "StartedAtUtc", "CompletedAtUtc",
+        "InputPackages", "RunScope", "ClockDomain", "RegistrySnapshotSha256",
+        "ConfigSnapshotSha256", "ResolvedModules", "ResolvedProfiles", "Stages",
+        "Artifacts", "Environment", "DiagnosticsRelativePath"
+      ],
+      "properties": {
+        "ContractType": {"const": "U002_RUN_MANIFEST"},
+        "ContractVersion": {"const": "0.1"},
+        "RunId": {
+          "type": "string",
+          "pattern": "^RUN_[A-Za-z0-9][A-Za-z0-9_.-]{5,127}$"
+        },
+        "EngineVersion": {"$ref": "#/$defs/version"},
+        "CaseId": {"$ref": "#/$defs/nonEmptyString"},
+        "RunStatus": {"type": "string", "enum": ["PENDING", "RUNNING", "SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED"]},
+        "CreatedAtUtc": {"type": "string", "format": "date-time"},
+        "StartedAtUtc": {"type": ["string", "null"], "format": "date-time"},
+        "CompletedAtUtc": {"type": ["string", "null"], "format": "date-time"},
+        "InputPackages": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/sourceReference"}
+        },
+        "RunScope": {"$ref": "#/$defs/runScope"},
+        "ClockDomain": {"$ref": "#/$defs/clockDomain"},
+        "RegistrySnapshotSha256": {"$ref": "#/$defs/sha256"},
+        "ConfigSnapshotSha256": {"$ref": "#/$defs/sha256"},
+        "ResolvedModules": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/resolvedModule"}
+        },
+        "ResolvedProfiles": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/resolvedProfile"}
+        },
+        "Stages": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/stageStatus"}
+        },
+        "Artifacts": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/artifactReference"}
+        },
+        "Environment": {"$ref": "#/$defs/environment"},
+        "DiagnosticsRelativePath": {"type": ["string", "null"]},
+        "ResumeFromArtifactId": {"type": ["string", "null"]},
+        "Extensions": {"$ref": "#/$defs/extensions"}
+      }
+    }
+  }
+}
