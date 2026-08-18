@@ -1,0 +1,146 @@
+UDP002 U21D ACCEPTED RESOLVER PROMOTION
+
+Task ID: U21D-PROMOTION
+Version: 0.1
+Date: 2026-08-18
+Owner: Zhao Zhili
+Status: APPROVED FOR COMPANY-SIDE GENERATION AND EXECUTION
+
+
+1. PURPOSE
+
+Promote only the exact Qualified Module Plan Resolver accepted by the U21D
+independent Gate, then rerun its complete integration self-test after relocation.
+
+Accepted Gate capsule:
+
+  U21DG1 N-R2-M4-O4-F8-E2-P1-X0 C-0
+
+
+2. PROVIDE EXACTLY THREE FILES
+
+1. this promotion START_HERE document;
+2. candidate u002_qualified_module_plan_resolver_v0_1.py.txt;
+3. U21D_ACCEPTANCE_EVIDENCE.json from the passing formal Gate.
+
+Read all three completely before generation.
+
+
+3. GENERATE EXACTLY ONE FILE
+
+Return the complete downloadable Windows CMD file:
+
+  UDP002_U21D_PROMOTE_ACCEPTED_RESOLVER_v0_1.cmd.txt
+
+Initial location:
+
+  U-UDP002/04_TEMP
+
+Do not return only prose, status text or partial code.
+
+
+4. ACCEPTED IDENTITY
+
+Read the actual Gate evidence and locate the exact SHA-256 recorded for the
+tested candidate resolver. Embed it as EXPECTED_RESOLVER_SHA256 in the CMD.
+Do not require the user to type or copy a SHA-256.
+
+Require from actual evidence:
+
+  GateStatus = PASS
+  ReturnCapsule = U21DG1 N-R2-M4-O4-F8-E2-P1-X0 C-0
+
+Use the real evidence field path rather than inventing a replacement schema.
+
+
+5. FIXED PATHS FROM C-CODE ROOT
+
+Source:
+
+  .\U-UDP002\04_TEMP\u002_qualified_module_plan_resolver_v0_1.py.txt
+
+Destination:
+
+  .\U-UDP002\01_PROGRAMS\u002_qualified_module_plan_resolver_v0_1.py
+
+Default Gate evidence:
+
+  .\U-UDP002\05_TESTS\02_ACCEPTANCE\U21D_GATE_20260818\04_GATE_EVIDENCE\U21D_ACCEPTANCE_EVIDENCE.json
+
+Dependencies:
+
+  .\U-UDP002\01_PROGRAMS\u002_module_registry_v0_1.py
+  .\U-UDP002\01_PROGRAMS\u002_module_activation_controller_v0_1.py
+  .\U-UDP002\04_TEMP\u002_core_contract_schema_bundle_v0_1.json.txt
+  .\U-UDP002\04_TEMP\u002_core_contract_validator_v0_1.py.txt
+  .\U-UDP002\05_TESTS\01_FIXTURES\U20A_v0_1\valid_module_manifest.json
+
+If the accepted Gate used an R2 directory, substitute that exact accepted path
+in the generated CMD. Do not silently select among multiple evidence files.
+
+
+6. REQUIRED SEQUENCE
+
+The generated CMD must:
+
+1. verify all required files exist;
+2. parse Gate evidence as UTF-8 JSON;
+3. verify PASS, exact ReturnCapsule and Gate-recorded resolver identity;
+4. compute source SHA-256 and require the embedded accepted value;
+5. copy source bytes to the formal destination;
+6. prove byte identity with fc /B;
+7. verify destination SHA-256;
+8. set destination read-only;
+9. run the relocated resolver full self-test with Registry, Activation
+   Controller, Schema Bundle, Validator and fixture;
+10. require exact stdout line:
+
+      U21D1 N-T24-M3-O3-F6-D1-P1-X0 C-0
+
+11. retain bounded promotion stdout/stderr logs in 04_TEMP;
+12. print success only after all checks pass.
+
+No line-ending normalization or text-mode rewrite is permitted.
+
+
+7. FINAL CAPSULE
+
+Success:
+
+  U21DP1 N-H1-C1-R1-X0 C-0
+
+Meanings:
+
+  H1 = Gate/source/destination identities agree
+  C1 = byte-identical promotion copy completed
+  R1 = relocated resolver integration self-test passed
+  X0 = no unexpected failure
+
+Stable failure format:
+
+  U21DP1-ERROR-<STABLE_REASON> C-7
+
+
+8. EXECUTION
+
+After download into U-UDP002/04_TEMP, run from C-CODE root in Windows CMD:
+
+  .\U-UDP002\04_TEMP\UDP002_U21D_PROMOTE_ACCEPTED_RESOLVER_v0_1.cmd.txt
+
+
+9. RETURN
+
+Return only:
+
+  U21DP1 N-H1-C1-R1-X0 C-0
+
+On failure return the first complete ERROR line and at most one short Memo.
+
+
+10. COMPLETION BOUNDARY
+
+Promotion C-0 freezes U21D and authorizes U21E Run Preflight and Data Binding.
+It does not execute any production analysis Module.
+
+
+END
