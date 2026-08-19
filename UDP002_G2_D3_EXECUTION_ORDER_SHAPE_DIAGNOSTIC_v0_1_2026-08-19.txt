@@ -1,0 +1,45 @@
+UDP002 U21G G2 D3 - ExecutionOrder Shape Diagnostic v0.1
+Date: 2026-08-19
+Status: AUTHORIZED READ-ONLY DIAGNOSTIC
+
+D2 result:
+
+G2D2 N-A11111100-B11111011-C1110-M3-O0-R3-H30-X0 C-0 K-PLAN_EXECUTION_ORDER
+
+Interpretation:
+
+- all Plan type/version/status/binding and selected-Module checks passed;
+- all Preflight type/version/status/plan-hash checks passed;
+- three ResolvedModules and their software/configuration hashes passed;
+- required Signal binding, Scope and FrameCount clock passed;
+- the ExecutionOrder field exists but its item representation was not the
+  object identity shape expected by D2/U21F;
+- QualityDecision needs a secondary scalar-value check because D2's broad text
+  classification may have matched a field name rather than a blocking value.
+
+No component is yet authorized for modification. D3 identifies the exact
+ExecutionOrder JSON representation and classifies QualityDecision scalar
+semantics without exposing Module names or company data.
+
+Place directly in U-UDP002\04_TEMP:
+
+u002_g2_execution_order_shape_diagnostic_v0_1.py.txt
+
+CMD from C-CODE:
+
+python U-UDP002\04_TEMP\u002_g2_execution_order_shape_diagnostic_v0_1.py.txt --self-test
+
+Normal self-test C-0 does not need to be returned. Stop on C-7.
+
+Then:
+
+python U-UDP002\04_TEMP\u002_g2_execution_order_shape_diagnostic_v0_1.py.txt --diagnose --g2-staging U-UDP002\05_TESTS\02_ACCEPTANCE\U21G_G2_VERTICAL_V01.staging
+
+Return only the G2D3 line. Do not open, edit or rerun G2 evidence.
+
+Key fields:
+
+E total ExecutionOrder entries; D/S/L dict/string/list counts; A string entries
+using ModuleId@ModuleVersion; I/V direct dict identity fields; N nested identity;
+PM/IM exact pair or ID-only match; PO zero/one/unknown PlanOrder base;
+Q quality type; QA/QB/QZ acceptable/blocking/zero-block scalar evidence.
