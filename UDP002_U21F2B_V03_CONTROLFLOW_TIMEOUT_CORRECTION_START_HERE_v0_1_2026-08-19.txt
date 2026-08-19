@@ -1,0 +1,220 @@
+UDP002 U21F2B CONTROL-FLOW AND TIMEOUT CORRECTION v0.3
+
+Task ID: U21F2B-V03-CORRECTION
+Instruction Version: 0.1
+Date: 2026-08-19
+Owner: Zhao Zhili
+Status: APPROVED VERSIONED CORRECTION
+
+
+1. PURPOSE
+
+Generate one maintainable v0.3 Executor candidate from the frozen v0.2 source.
+Correct the confirmed ck counter defect and the unresolved child-process runtime
+bound without changing the frozen F2A ABI, U21A/U21D/U21E contracts, S0-S7
+ordering, Artifact semantics or FailurePolicy meanings.
+
+
+2. ACCEPTED DIAGNOSTIC BASIS
+
+  U21F2BD5 N-K1-J6-R1-P1-T0-S0-B9999-U1-I1-X0 C-0
+
+Confirmed:
+
+- six same-line compound suites;
+- one post-raise control-flow defect in ck(v);
+- one reachable subprocess hot call with unresolved timeout;
+- no sleep or selftest recursion;
+- source identity remained unchanged.
+
+
+3. FILES GIVEN TO A FRESH COPILOT CHAT
+
+Give exactly two files:
+
+1. this complete correction instruction;
+2. frozen `u002_controlled_stage_executor_v0_2.py.txt`.
+
+Do not provide company data or archived failed diagnostics.
+
+
+4. GENERATE EXACTLY ONE DOWNLOADABLE FILE
+
+  u002_controlled_stage_executor_v0_3.py.txt
+
+Put it directly in U-UDP002\04_TEMP. Do not overwrite or rename v0.2. Do not
+generate BAT, PowerShell, README, Gate, promotion tool or additional source.
+
+
+5. REQUIRED WORKING SET FOR EXECUTION
+
+All paths are relative to C-CODE.
+
+Direct files in U-UDP002\04_TEMP:
+
+- new candidate: u002_controlled_stage_executor_v0_3.py.txt
+- frozen Core Schema: u002_core_contract_schema_bundle_v0_1.json.txt
+- frozen Core Validator: u002_core_contract_validator_v0_1.py.txt
+- existing D5 audit tool:
+  u002_u21f2b_static_controlflow_budget_audit_v0_1.py.txt
+
+Direct files in U-UDP002\01_PROGRAMS:
+
+- u002_engine_skeleton_v0_1.py
+- u002_module_runtime_protocol_bundle_v0_2.json
+- u002_module_runtime_protocol_validator_v0_2.py
+
+Direct Promotion Evidence under
+U-UDP002\05_TESTS\02_ACCEPTANCE\U21F2A_PROMOTION_V02:
+
+- u21f2a_promotion_acceptance.json
+
+The old v0.2 Executor stays frozen in 04_TEMP until v0.3 internal checks pass;
+it is not selected by any v0.3 command.
+
+
+6. MANDATORY PRESERVED CONTRACTS
+
+Preserve exactly:
+
+- all existing public CLI modes and argument names;
+- dependency-preflight behavior and exact success capsule;
+- F2A request/result field names, status values and validator usage;
+- U21D plan and U21E preflight binding rules;
+- U21A Run initialization and state transitions;
+- fixed serial S0-S7 order and explicit no-op Stage behavior;
+- parent-owned payload hashing, Artifact Manifest validation and atomic commit;
+- ABORT_RUN, BLOCK_DEPENDENT_PATH and SKIP_OPTIONAL_PATH meanings;
+- file-backed bounded stdout/stderr and input immutability checks;
+- exact formal self-test success capsule:
+  `U21F2B1 N-T32-R4-M12-A9-F8-I8-X0 C-0`.
+
+No analysis algorithm, production Module, GUI, multiprocessing, cache, resume or
+real-data operation may be added.
+
+
+7. CORRECTION A - NORMAL CONTROL FLOW
+
+Reformat every executable statement onto its own physical line with normal
+indentation. No semicolon may separate executable simple statements anywhere in
+the generated source. Mechanical expansion must preserve behavior except for
+the two explicit corrections in Sections 8 and 9.
+
+Do not compress function bodies, if/else suites, try/except/finally suites,
+loops, with blocks or CLI dispatch onto one line. Traceback line numbers must
+identify one meaningful statement.
+
+
+8. CORRECTION B - ck SUCCESS COUNTER
+
+Implement ck(value) semantically as:
+
+  if value is false:
+      raise the existing controlled assertion exception
+  append one successful check marker
+  increment the nonlocal test counter exactly once
+
+The append and increment must be outside the failure-only `if` suite. At formal
+self-test completion require both:
+
+  test_counter == 32
+  len(successful_check_markers) == 32
+
+This final consistency check must not increment the counter itself.
+
+
+9. CORRECTION C - BOUNDED CHILD EXECUTION
+
+Replace the unresolved hot `subprocess.run` path with one explicit bounded child
+runner based on subprocess.Popen.
+
+Requirements:
+
+- timeout_seconds is mandatory, numeric, finite and >0 at the helper boundary;
+- stdout and stderr remain file-backed and retained tails remain bounded;
+- Windows children start in a new process group where supported;
+- POSIX children start in a new session;
+- wait/communicate always receives timeout_seconds;
+- on timeout, terminate the entire child process tree, wait briefly, then force
+  kill remaining descendants;
+- Windows may call taskkill `/PID ... /T /F`; POSIX may kill the process group;
+- return one controlled timeout result; never continue waiting indefinitely;
+- no retry loop is allowed;
+- unexpected timeout on a success fixture fails fast and does not execute later
+  Module fixtures;
+- the production CLI default remains 600 seconds and is persisted in Run
+  evidence;
+- dependency-preflight subprocesses use an explicit 30-second bound;
+- normal synthetic self-test child calls use a named literal constant of five
+  seconds;
+- the deliberate timeout fixture uses one second and its child attempts to stay
+  alive for at least three seconds;
+- the formal self-test records monotonic elapsed time and fails closed with
+  stable reason SELFTEST_BUDGET if total elapsed time exceeds 90 seconds.
+
+No subprocess call reachable from selftest may be unbounded.
+
+
+10. INTERNAL SELF-TEST
+
+Keep exactly 32 named assertion results and the formal meanings R4/M12/A9/F8/I8.
+The matrix must include:
+
+- corrected ck success increment and false-value controlled raise;
+- no same-line executable semicolon suites;
+- dependency preflight;
+- complete S0-S7 success;
+- all three FailurePolicy Runs;
+- one controlled one-second timeout and verified tree cleanup;
+- no accepted partial Artifact;
+- deterministic projection and seven-input immutability;
+- total elapsed time <=90 seconds.
+
+Success remains exactly:
+
+  U21F2B1 N-T32-R4-M12-A9-F8-I8-X0 C-0
+
+Failure uses the existing U21F2B1 C-7 schema and a stable reason. Never print a
+Traceback for a controlled denial.
+
+
+11. POST-GENERATION EXECUTION FROM C-CODE ROOT
+
+Step 1 - dependency preflight:
+
+  python ".\U-UDP002\04_TEMP\u002_controlled_stage_executor_v0_3.py.txt" --dependency-preflight --engine ".\U-UDP002\01_PROGRAMS\u002_engine_skeleton_v0_1.py" --protocol-bundle ".\U-UDP002\01_PROGRAMS\u002_module_runtime_protocol_bundle_v0_2.json" --protocol-validator ".\U-UDP002\01_PROGRAMS\u002_module_runtime_protocol_validator_v0_2.py" --protocol-promotion-evidence ".\U-UDP002\05_TESTS\02_ACCEPTANCE\U21F2A_PROMOTION_V02\u21f2a_promotion_acceptance.json" --schema-bundle ".\U-UDP002\04_TEMP\u002_core_contract_schema_bundle_v0_1.json.txt" --contract-validator ".\U-UDP002\04_TEMP\u002_core_contract_validator_v0_1.py.txt"
+
+Require:
+
+  U21F2BDP N-E1-P2-C2-H6-X0 C-0
+
+Step 2 - formal internal self-test with the same six dependency arguments:
+
+  python ".\U-UDP002\04_TEMP\u002_controlled_stage_executor_v0_3.py.txt" --self-test --engine ".\U-UDP002\01_PROGRAMS\u002_engine_skeleton_v0_1.py" --protocol-bundle ".\U-UDP002\01_PROGRAMS\u002_module_runtime_protocol_bundle_v0_2.json" --protocol-validator ".\U-UDP002\01_PROGRAMS\u002_module_runtime_protocol_validator_v0_2.py" --protocol-promotion-evidence ".\U-UDP002\05_TESTS\02_ACCEPTANCE\U21F2A_PROMOTION_V02\u21f2a_promotion_acceptance.json" --schema-bundle ".\U-UDP002\04_TEMP\u002_core_contract_schema_bundle_v0_1.json.txt" --contract-validator ".\U-UDP002\04_TEMP\u002_core_contract_validator_v0_1.py.txt"
+
+This invocation must terminate by itself within 90 seconds.
+
+Step 3 - rerun the already generated D5 static audit against v0.3:
+
+  python ".\U-UDP002\04_TEMP\u002_u21f2b_static_controlflow_budget_audit_v0_1.py.txt" --audit --executor ".\U-UDP002\04_TEMP\u002_controlled_stage_executor_v0_3.py.txt"
+
+
+12. RETURN
+
+Return at most three lines:
+
+1. v0.3 dependency-preflight capsule;
+2. v0.3 U21F2B1 self-test capsule;
+3. v0.3 U21F2BD5 static-audit capsule plus its MEMO1 only when nonzero K/J/R/U
+   requires explanation.
+
+Stop immediately on any C-7. Do not let Copilot repair the generated candidate
+inside the same chat.
+
+
+13. ACCEPTANCE BOUNDARY
+
+Internal C-0 plus D5 K0/J0/R0 is required before an independent U21F2B v0.3
+Gate is designed. This task does not authorize promotion, U21G or real data.
+
+END OF U21F2B v0.3 CORRECTION
