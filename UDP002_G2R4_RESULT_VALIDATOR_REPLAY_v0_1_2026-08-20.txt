@@ -1,0 +1,26 @@
+UDP002 G2R4 RESULT VALIDATOR REPLAY
+Date: 2026-08-20
+Mode: read-only diagnosis
+
+Purpose:
+
+Replay the retained synthetic Module result through the frozen F2A result
+validator and expose its exact stable rejection reason. This command does not
+modify the Executor, Module, protocol, Gate, accepted evidence or source data.
+
+Run from the C-CODE root in Windows CMD:
+
+for /r ".\U-UDP002\05_TESTS\02_ACCEPTANCE\U21G_G2_VERTICAL_V08.staging" %F in (result.json) do @python ".\U-UDP002\01_PROGRAMS\u002_module_runtime_protocol_validator_v0_2.py" --validate-result "%F" --protocol-bundle ".\U-UDP002\01_PROGRAMS\u002_module_runtime_protocol_bundle_v0_2.json"
+
+Return only the line shaped like:
+
+U21F2AV RES-0 C-7 K-<STABLE_REASON>
+
+Do not let Copilot modify any file during this replay.
+
+Stop rule:
+
+If the G2 vertical path is not closed by 09:00, stop patching the inherited
+implementation. Preserve the accepted contracts and architecture evidence, but
+freeze the current U002 implementation as legacy and begin a project-owned
+high-code reconstruction from the contract boundary.
