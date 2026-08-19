@@ -1,0 +1,212 @@
+UDP002 G2R1 - EXECUTOR v0.5 CLEAN RECONSTRUCTION AND VERTICAL ACCEPTANCE
+
+Document version: 0.1
+Date: 2026-08-19
+Owner: Zhao Zhili
+Status: EXECUTE EXACTLY / FAIL CLOSED / NO COPILOT REDESIGN
+
+
+1. DECISION AND ROOT CAUSE
+
+G2F2 installation passed:
+
+  G2F2 N-A4-D2-S2-H2-R1-I8-X0 C-0
+
+but the fresh formal vertical run failed:
+
+  G2V2 N-M0-B0-E0-R0-S0-A0-I0-X1 C-7 K-EXECUTOR_EXIT
+
+Company-side source inspection then confirmed that Executor v0.4 contains an
+intentional formal-execution denial equivalent to:
+
+  execute(...) -> raise FORMAL_EXECUTION_REQUIRES_INDEPENDENT_GATE
+
+The earlier v0.3 source is also an execution framework without the complete
+formal transaction. Therefore v0.3/v0.4 self-test acceptance did not prove the
+public --execute-run path. This is not a U21D Plan, U21E Preflight, Camera/Radar
+algorithm or company-data failure. It is a missing Executor implementation and
+an inadequate self-test/acceptance boundary.
+
+Decision:
+
+- stop patching v0.3/v0.4;
+- retain both as failure-history and rollback evidence;
+- build v0.5 from the formal U21F2A/U21F2B/U21D/U21E contracts;
+- require a source call-graph audit plus the complete existing G2 synthetic
+  vertical run before v0.5 may be accepted.
+
+
+2. THREE TRANSFER FILES
+
+Download exactly these three files directly into:
+
+  C-CODE\U-UDP002\04_TEMP
+
+Files:
+
+1. UDP002_G2R1_EXECUTOR_V05_CLEAN_RECONSTRUCTION_START_HERE_v0_1_2026-08-19.txt
+2. u002_controlled_stage_executor_v0_5.py.txt
+3. u002_executor_v05_independent_vertical_gate_v0_1.py.txt
+
+Do not remove the final .txt transfer suffix. Do not add the word download to
+any filename. Do not place these three files in an extra subdirectory.
+
+
+3. REQUIRED EXISTING COMPANY WORKING SET
+
+The following accepted files must remain in their existing locations.
+
+U-UDP002\01_PROGRAMS:
+
+  u002_engine_skeleton_v0_1.py
+  u002_module_registry_v0_1.py
+  u002_module_activation_controller_v0_1.py
+  u002_qualified_module_plan_resolver_v0_1.py
+  u002_run_preflight_data_binder_v0_1.py
+  u002_module_runtime_protocol_bundle_v0_2.json
+  u002_module_runtime_protocol_validator_v0_2.py
+
+U-UDP002\04_TEMP:
+
+  u002_g2_synthetic_vertical_run_v0_1.py.txt
+  u002_core_contract_schema_bundle_v0_1.json.txt
+  u002_core_contract_validator_v0_1.py.txt
+
+U-UDP002\05_TESTS\02_ACCEPTANCE\U21F2A_PROMOTION_V02:
+
+  u21f2a_promotion_acceptance.json
+
+The accepted U21E synthetic fixture/evidence used by the existing G2 runner
+must also remain below 05_TESTS. Do not move validators, evidence or fixtures
+into A-Archive before G2R1 completes.
+
+
+4. v0.5 RESPONSIBILITY
+
+The new Executor implements only governed execution infrastructure:
+
+- exact Plan/Preflight/U001/Module/config identity revalidation;
+- canonical ModuleId@ModuleVersion execution order;
+- exact PASS/0 QualityDecision;
+- U21A Run initialization through public CLI;
+- S0-S7 serial Stage lifecycle;
+- F2A request/result validation;
+- isolated child Module invocation;
+- parent-owned payload hashing and Artifact Manifest creation;
+- atomic Artifact commit and Run Manifest update;
+- ABORT_RUN, BLOCK_DEPENDENT_PATH and SKIP_OPTIONAL_PATH handling;
+- bounded logs, diagnostics and protected-input immutability.
+
+It contains no Camera/Radar mathematics, baseline, residual, correlation,
+Candidate, SysID or U003 business logic.
+
+
+5. DESIGN-AUTHORITY BOUNDARY
+
+Do not ask Copilot to rewrite, simplify, refactor or complete v0.5 before the
+first G2R1 run.
+
+Copilot may only:
+
+- confirm the three downloaded files exist with exact basenames;
+- provide the exact CMD commands below;
+- report the single final C-0/C-7 capsule;
+- after a C-7 and a new Project-issued correction, apply only the explicitly
+  named adapter-boundary change.
+
+Copilot must not:
+
+- insert another placeholder denial;
+- hard-code PASS counters or final capsules;
+- bypass the F2A or Core validators;
+- modify U21D Plan or U21E Preflight evidence;
+- edit frozen U21A-U21E files;
+- repair output evidence to make a Gate pass;
+- promote v0.5 manually.
+
+
+6. WHY THIS VERSION CANNOT REPEAT THE OLD FALSE PASS
+
+The independent Gate requires all of the following:
+
+1. AST/source audit finds the actual production execution functions;
+2. execute_governed_run contains calls to dependency preflight, Plan/Preflight
+   revalidation, U21A initialization, worker launch, Artifact commit and Run
+   Manifest persistence;
+3. known placeholder/NotImplemented denial tokens are absent;
+4. candidate dependency preflight passes;
+5. candidate self-test passes;
+6. installed bytes equal candidate bytes;
+7. installed dependency preflight and self-test pass;
+8. the existing independent G2 runner creates three real synthetic Modules,
+   Registry, Activation, Software Plan, Preflight, governed Run and Artifacts;
+9. final Run Manifest is Core-contract valid and SUCCEEDED;
+10. all protected inputs remain byte-identical.
+
+Therefore a source that only prints expected counters or deliberately rejects
+--execute-run cannot return G2R1 C-0.
+
+
+7. WINDOWS CMD EXECUTION FROM C-CODE ROOT
+
+Step 1 - Gate local self-test:
+
+  python .\U-UDP002\04_TEMP\u002_executor_v05_independent_vertical_gate_v0_1.py.txt --self-test
+
+Expected:
+
+  G2R1ST N-T18-S4-C4-I4-X0 C-0
+
+Normal Step-1 C-0 does not need to be returned.
+
+Step 2 - independent install plus complete synthetic vertical run:
+
+Before running, confirm neither path exists:
+
+  U-UDP002\05_TESTS\02_ACCEPTANCE\U21G_G2_VERTICAL_V05
+  U-UDP002\05_TESTS\02_ACCEPTANCE\U21G_G2_VERTICAL_V05.staging
+
+Then run:
+
+  python .\U-UDP002\04_TEMP\u002_executor_v05_independent_vertical_gate_v0_1.py.txt --run --workspace-root .\U-UDP002
+
+Expected final success:
+
+  G2R1 N-E1-I1-V1-A1-X0 C-0
+
+Meanings:
+
+  E1  real Executor implementation surface accepted;
+  I1  candidate installed byte-identically as v0.5;
+  V1  full existing G2 synthetic vertical chain accepted;
+  A1  governed acceptance evidence committed;
+  X0  no uncontrolled failure.
+
+
+8. RETURN RULE
+
+Return only the exact Step-2 G2R1 line.
+
+If C-7, return the exact C-7 line and at most one short Memo containing only the
+first stable company-side observation. Do not let Copilot repair the program in
+the same chat. The Project will decide whether the failure is:
+
+- ADAPTER_MISMATCH: one accepted U21D/U21E field shape differs;
+- CONTRACT_FAILURE: v0.5 violated a frozen contract;
+- HARNESS_FAILURE: independent Gate/G2 fixture defect;
+- WORKSPACE_FAILURE: required accepted file missing/moved/output already exists;
+- IMPLEMENTATION_FAILURE: execution/transaction logic defect.
+
+
+9. ACCEPTANCE AND NEXT BOUNDARY
+
+Only G2R1 C-0 authorizes:
+
+- retention of u002_controlled_stage_executor_v0_5.py in 01_PROGRAMS;
+- v0.5 node report and freeze record;
+- U21G foundation closeout continuation.
+
+G2R1 C-0 does not yet authorize company Camera/Radar analysis or U22 real
+algorithm Modules. Those begin only after the U21 control foundation is closed.
+
+END
