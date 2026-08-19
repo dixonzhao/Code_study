@@ -1,0 +1,1661 @@
+#!/usr/bin/env python3
+"""U002 controlled stage executor v0.8.
+
+This implementation intentionally shares one production execution path between
+``--execute-run`` and the transaction exercised by acceptance.  It contains no
+Camera/Radar mathematics; it executes already-qualified Module Packs only.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import hashlib
+import importlib.util
+import json
+import math
+import os
+from pathlib import Path, PurePosixPath
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, MutableMapping, Sequence, Tuple
+
+
+PROGRAM_ID = "U002.ControlledStageExecutor"
+VERSION = "0.8"
+ENGINE_VERSION = "0.1.0"
+STAGES = tuple(f"S{i}" for i in range(8))
+STANDARD_U001_FILES = (
+    "u001_decoded_updates.csv",
+    "u001_frame_values.csv",
+    "u001_signal_catalog.csv",
+    "u001_quality_report.csv",
+    "u001_run_manifest.json",
+    "u001_review_view.csv",
+)
+EXPECTED_ENGINE = "u002_engine_skeleton_v0_1.py"
+EXPECTED_PROTOCOL_BUNDLE = "u002_module_runtime_protocol_bundle_v0_2.json"
+EXPECTED_PROTOCOL_VALIDATOR = "u002_module_runtime_protocol_validator_v0_2.py"
+EXPECTED_GATE_CAPSULE = "U21F2AG1 N-R2-P4-D12-I4-X0 C-0"
+EXPECTED_EVIDENCE_PROTOCOL_SELFTEST = "U21F2A1 N-T24-P4-D16-K4-X0 C-0"
+EXPECTED_PROTOCOL_SELFTEST = "U21F2A1 N-T24-P4-D16-K4-X0 C-0"
+EXPECTED_ENGINE_SELFTEST = "UDP002-U21A-SELFTEST-PASS-24 C-0"
+DEPENDENCY_CAPSULE = "E08DP N-E1-P2-C2-H6-X0 C-0"
+SELFTEST_CAPSULE = "E08ST N-T31-P6-A3-F4-I6-V8-X0 C-0"
+RUN_CAPSULE = "E08RUN"
+SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+STABLE_REASON_RE = re.compile(r"[^A-Z0-9_]+")
+LOG_CHUNK = 1024 * 1024
+D2_COLUMN_KEYS = (
+    "value", "label", "updated", "update_count", "age", "valid", "missing_reason",
+)
+D3_SIGNAL_KEYS = (
+    "CanonicalName", "CanId", "Channel", "MessageName", "SignalName",
+    "Unit", "ValueKind", "SignalRole", "HoldPolicy", "MaxAgeFrames",
+)
+
+
+class ControlledError(RuntimeError):
+    def __init__(self, reason: str, detail: str = ""):
+        self.reason = stable_reason(reason)
+        self.detail = detail[:240]
+        super().__init__(self.reason)
+
+
+@dataclass(frozen=True)
+class Dependencies:
+    engine: Path
+    protocol_bundle: Path
+    protocol_validator: Path
+    protocol_promotion_evidence: Path
+    schema_bundle: Path
+    contract_validator: Path
+
+
+@dataclass(frozen=True)
+class ModuleRecord:
+    order: int
+    module_id: str
+    module_version: str
+    stage: str
+    manifest_path: Path
+    manifest_sha256: str
+    implementation_path: Path
+    implementation_sha256: str
+    configuration_schema_path: Path
+    configuration_schema_sha256: str
+    resolved_config_sha256: str
+    configuration: Mapping[str, Any]
+    execution_requirement: str
+    failure_policy: str
+    callable_name: str
+    required_inputs: Tuple[Mapping[str, Any], ...]
+    optional_inputs: Tuple[Mapping[str, Any], ...]
+    requires_artifacts: Tuple[Mapping[str, Any], ...]
+    provides_artifacts: Tuple[Mapping[str, Any], ...]
+    bound_signals: Tuple[Mapping[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class CommittedArtifact:
+    artifact_id: str
+    artifact_type: str
+    schema_id: str
+    schema_version: str
+    manifest_path: Path
+    manifest_sha256: str
+    content_sha256: str
+    payloads: Tuple[Mapping[str, Any], ...]
+
+
+def stable_reason(value: object) -> str:
+    text = STABLE_REASON_RE.sub("_", str(value).upper()).strip("_")
+    return text[:64] or "INTERNAL"
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def reject_constant(value: str) -> None:
+    raise ValueError("NONFINITE_JSON")
+
+
+def reject_duplicate_pairs(pairs: Sequence[Tuple[str, Any]]) -> dict:
+    result: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("DUPLICATE_JSON_KEY")
+        result[key] = value
+    return result
+
+
+def read_json(path: Path, reason: str) -> dict:
+    require_regular_file(path, reason)
+    try:
+        value = json.loads(
+            path.read_text(encoding="utf-8-sig"),
+            object_pairs_hook=reject_duplicate_pairs,
+            parse_constant=reject_constant,
+        )
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise ControlledError(reason) from exc
+    if not isinstance(value, dict):
+        raise ControlledError(reason)
+    assert_finite_json(value, reason)
+    return value
+
+
+def assert_finite_json(value: Any, reason: str) -> None:
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ControlledError(reason)
+        return
+    if isinstance(value, list):
+        for item in value:
+            assert_finite_json(item, reason)
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ControlledError(reason)
+            assert_finite_json(item, reason)
+        return
+    raise ControlledError(reason)
+
+
+def canonical_bytes(value: Any) -> bytes:
+    assert_finite_json(value, "JSON_VALUE")
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+
+
+def pretty_bytes(value: Any) -> bytes:
+    assert_finite_json(value, "JSON_VALUE")
+    return (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + "\n").encode("utf-8")
+
+
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    if temporary.exists():
+        raise ControlledError("ATOMIC_TEMP_EXISTS")
+    try:
+        with temporary.open("xb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def atomic_write_json(path: Path, value: Any) -> None:
+    atomic_write_bytes(path, pretty_bytes(value))
+
+
+def atomic_write_text(path: Path, value: str) -> None:
+    atomic_write_bytes(path, value.encode("utf-8"))
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(LOG_CHUNK), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def sha256_paths(paths: Iterable[Path]) -> Dict[str, str]:
+    return {str(path.resolve()): sha256_file(path) for path in paths}
+
+
+def require_regular_file(path: Path, reason: str) -> Path:
+    if not path.is_file() or path.is_symlink():
+        raise ControlledError(reason)
+    return path
+
+
+def require_directory(path: Path, reason: str) -> Path:
+    if not path.is_dir() or path.is_symlink():
+        raise ControlledError(reason)
+    return path
+
+
+def safe_relative(value: object, reason: str = "RELATIVE_PATH") -> str:
+    if not isinstance(value, str) or not value or "\\" in value or "\x00" in value:
+        raise ControlledError(reason)
+    if re.match(r"^[A-Za-z]:", value):
+        raise ControlledError(reason)
+    pure = PurePosixPath(value)
+    if pure.is_absolute() or any(part in ("", ".", "..") for part in pure.parts):
+        raise ControlledError(reason)
+    return pure.as_posix()
+
+
+def resolve_below(root: Path, relative: object, reason: str) -> Path:
+    rel = safe_relative(relative, reason)
+    candidate = (root / Path(*PurePosixPath(rel).parts)).resolve()
+    try:
+        candidate.relative_to(root.resolve())
+    except ValueError as exc:
+        raise ControlledError(reason) from exc
+    return candidate
+
+
+def require_nonempty_string(value: object, reason: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ControlledError(reason)
+    return value
+
+
+def require_sha(value: object, reason: str) -> str:
+    if not isinstance(value, str) or not SHA_RE.fullmatch(value):
+        raise ControlledError(reason)
+    return value
+
+
+def require_integer(value: object, reason: str, minimum: int | None = None) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ControlledError(reason)
+    if minimum is not None and value < minimum:
+        raise ControlledError(reason)
+    return value
+
+
+def require_number(value: object, reason: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ControlledError(reason)
+    result = float(value)
+    if not math.isfinite(result):
+        raise ControlledError(reason)
+    return result
+
+
+def find_exact_value(value: Any, expected: Any) -> bool:
+    if value == expected:
+        return True
+    if isinstance(value, dict):
+        return any(find_exact_value(item, expected) for item in value.values())
+    if isinstance(value, list):
+        return any(find_exact_value(item, expected) for item in value)
+    return False
+
+
+def scalar_paths(value: Any, path: str = "") -> Iterator[Tuple[str, Any]]:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            child = f"{path}.{key}" if path else str(key)
+            yield from scalar_paths(item, child)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from scalar_paths(item, f"{path}[{index}]")
+    else:
+        yield path, value
+
+
+def normalized_evidence_path(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.lower())
+
+
+def validate_promotion_evidence(promotion: Mapping[str, Any], deps: Dependencies) -> None:
+    flat = list(scalar_paths(promotion))
+    values = [value for _, value in flat]
+    version_ok = any(
+        normalized_evidence_path(path).endswith("promotiontoolversion") and str(value) == "0.2"
+        for path, value in flat
+    )
+    if not version_ok:
+        raise ControlledError("PROMOTION_VERSION")
+    if EXPECTED_GATE_CAPSULE not in values:
+        raise ControlledError("PROMOTION_GATE_EVIDENCE")
+    if EXPECTED_EVIDENCE_PROTOCOL_SELFTEST not in values:
+        raise ControlledError("PROMOTION_RELOCATED_SELFTEST")
+    runtime_hashes = (sha256_file(deps.protocol_bundle), sha256_file(deps.protocol_validator))
+    if any(item not in values for item in runtime_hashes):
+        raise ControlledError("PROMOTION_IDENTITY")
+    byte_equality = {
+        path for path, value in flat
+        if value is True and (
+            "byteidentical" in normalized_evidence_path(path)
+            or "byteequal" in normalized_evidence_path(path)
+        )
+    }
+    if len(byte_equality) < 2:
+        raise ControlledError("PROMOTION_BYTE_EQUALITY")
+
+
+def collect_mappings(value: Any) -> Iterator[Mapping[str, Any]]:
+    if isinstance(value, dict):
+        yield value
+        for item in value.values():
+            yield from collect_mappings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from collect_mappings(item)
+
+
+def run_bounded(command: Sequence[str], stdout_path: Path, stderr_path: Path,
+                timeout_seconds: int, max_bytes: int, reason: str) -> int:
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    try:
+        with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+            completed = subprocess.run(
+                list(command), stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                timeout=timeout_seconds, check=False,
+            )
+    except subprocess.TimeoutExpired as exc:
+        raise ControlledError(reason + "_TIMEOUT") from exc
+    for path in (stdout_path, stderr_path):
+        bound_log_file(path, max_bytes)
+    _ = started
+    return completed.returncode
+
+
+def bound_log_file(path: Path, max_bytes: int) -> None:
+    if not path.exists() or path.stat().st_size <= max_bytes:
+        return
+    with path.open("rb") as stream:
+        head = stream.read(max_bytes // 2)
+        stream.seek(max(0, path.stat().st_size - max_bytes // 2))
+        tail = stream.read(max_bytes // 2)
+    atomic_write_bytes(path, head + b"\n...[TRUNCATED]...\n" + tail)
+
+
+def read_lines_bounded(path: Path, max_bytes: int = 262144) -> List[str]:
+    if path.stat().st_size > max_bytes:
+        raise ControlledError("CHILD_OUTPUT_LIMIT")
+    return [line.strip() for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
+
+
+def validator_call(program: Path, arguments: Sequence[str], expected_line: str | None,
+                   work: Path, label: str, timeout: int = 120) -> None:
+    stdout = work / f"{label}.stdout.txt"
+    stderr = work / f"{label}.stderr.txt"
+    rc = run_bounded([sys.executable, str(program), *arguments], stdout, stderr,
+                     timeout, 262144, label.upper())
+    if rc != 0:
+        raise ControlledError(label.upper() + "_EXIT")
+    if expected_line is not None and expected_line not in read_lines_bounded(stdout):
+        raise ControlledError(label.upper() + "_CAPSULE")
+
+
+def dependencies_from_args(args: argparse.Namespace) -> Dependencies:
+    return Dependencies(
+        engine=Path(args.engine).resolve(),
+        protocol_bundle=Path(args.protocol_bundle).resolve(),
+        protocol_validator=Path(args.protocol_validator).resolve(),
+        protocol_promotion_evidence=Path(args.protocol_promotion_evidence).resolve(),
+        schema_bundle=Path(args.schema_bundle).resolve(),
+        contract_validator=Path(args.contract_validator).resolve(),
+    )
+
+
+def dependency_preflight(deps: Dependencies, work: Path) -> Dict[str, str]:
+    paths = tuple(deps.__dict__.values())
+    for path in paths:
+        require_regular_file(path, "DEPENDENCY_FILE")
+    if deps.engine.name != EXPECTED_ENGINE:
+        raise ControlledError("ENGINE_BASENAME")
+    if deps.protocol_bundle.name != EXPECTED_PROTOCOL_BUNDLE:
+        raise ControlledError("PROTOCOL_BUNDLE_BASENAME")
+    if deps.protocol_validator.name != EXPECTED_PROTOCOL_VALIDATOR:
+        raise ControlledError("PROTOCOL_VALIDATOR_BASENAME")
+    before = sha256_paths(paths)
+    promotion = read_json(deps.protocol_promotion_evidence, "PROMOTION_EVIDENCE")
+    validate_promotion_evidence(promotion, deps)
+    validator_call(
+        deps.protocol_validator,
+        ["--self-test", "--protocol-bundle", str(deps.protocol_bundle)],
+        EXPECTED_PROTOCOL_SELFTEST,
+        work, "protocol_selftest",
+    )
+    validator_call(
+        deps.engine,
+        ["--self-test", "--schema-bundle", str(deps.schema_bundle),
+         "--contract-validator", str(deps.contract_validator)],
+        EXPECTED_ENGINE_SELFTEST,
+        work, "engine_selftest", timeout=180,
+    )
+    after = sha256_paths(paths)
+    if before != after:
+        raise ControlledError("DEPENDENCY_MUTATION")
+    return before
+
+
+def validate_core(document: Path, deps: Dependencies, work: Path, label: str) -> None:
+    validator_call(
+        deps.contract_validator,
+        ["--schema-bundle", str(deps.schema_bundle), "--validate", str(document)],
+        None, work, label,
+    )
+
+
+def validate_protocol_request(document: Path, deps: Dependencies, work: Path, label: str) -> None:
+    validator_call(
+        deps.protocol_validator,
+        ["--validate-request", str(document), "--protocol-bundle", str(deps.protocol_bundle)],
+        None, work, label,
+    )
+
+
+def validate_protocol_result(document: Path, deps: Dependencies, work: Path, label: str) -> None:
+    validator_call(
+        deps.protocol_validator,
+        ["--validate-result", str(document), "--protocol-bundle", str(deps.protocol_bundle)],
+        None, work, label,
+    )
+
+
+def parse_execution_order(plan: Mapping[str, Any]) -> List[Tuple[str, str]]:
+    raw = plan.get("ExecutionOrder")
+    if not isinstance(raw, list) or not raw:
+        raise ControlledError("PLAN_SEMANTICS")
+    parsed: List[Tuple[str, str]] = []
+    for item in raw:
+        if not isinstance(item, str) or not item or item != item.strip() or item.count("@") != 1:
+            raise ControlledError("PLAN_SEMANTICS")
+        module_id, version = item.rsplit("@", 1)
+        if not module_id or not version:
+            raise ControlledError("PLAN_SEMANTICS")
+        parsed.append((module_id, version))
+    if len(set(parsed)) != len(parsed):
+        raise ControlledError("PLAN_SEMANTICS")
+    selected = plan.get("SelectedModules")
+    if not isinstance(selected, list) or len(selected) != len(parsed):
+        raise ControlledError("PLAN_SEMANTICS")
+    projected: List[Tuple[int, str, str]] = []
+    for item in selected:
+        if not isinstance(item, dict):
+            raise ControlledError("PLAN_SEMANTICS")
+        order = require_integer(item.get("PlanOrder"), "PLAN_SEMANTICS", 0)
+        module_id = require_nonempty_string(item.get("ModuleId"), "PLAN_SEMANTICS")
+        version = require_nonempty_string(item.get("ModuleVersion"), "PLAN_SEMANTICS")
+        projected.append((order, module_id, version))
+    projected.sort(key=lambda item: item[0])
+    if [item[0] for item in projected] != list(range(len(projected))):
+        raise ControlledError("PLAN_SEMANTICS")
+    if [(item[1], item[2]) for item in projected] != parsed:
+        raise ControlledError("PLAN_SEMANTICS")
+    return parsed
+
+
+def validate_quality_decision(preflight: Mapping[str, Any]) -> None:
+    quality = preflight.get("QualityDecision")
+    if not isinstance(quality, dict) or set(quality) != {"BlockingIssues", "Status"}:
+        raise ControlledError("PREFLIGHT_SEMANTICS")
+    if isinstance(quality["BlockingIssues"], bool) or quality["BlockingIssues"] != 0:
+        raise ControlledError("PREFLIGHT_SEMANTICS")
+    if quality["Status"] != "PASS":
+        raise ControlledError("PREFLIGHT_SEMANTICS")
+
+
+def exact_module_map(plan: Mapping[str, Any]) -> Dict[Tuple[str, str], Mapping[str, Any]]:
+    result: Dict[Tuple[str, str], Mapping[str, Any]] = {}
+    for item in plan["SelectedModules"]:
+        key = (item["ModuleId"], item["ModuleVersion"])
+        if key in result:
+            raise ControlledError("PLAN_SEMANTICS")
+        result[key] = item
+    return result
+
+
+def preflight_modules(preflight: Mapping[str, Any]) -> Dict[Tuple[str, str], Mapping[str, Any]]:
+    raw = preflight.get("ResolvedModules")
+    if not isinstance(raw, list) or not raw:
+        raise ControlledError("PREFLIGHT_MODULES")
+    result: Dict[Tuple[str, str], Mapping[str, Any]] = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ControlledError("PREFLIGHT_MODULES")
+        key = (
+            require_nonempty_string(item.get("ModuleId"), "PREFLIGHT_MODULES"),
+            require_nonempty_string(item.get("ModuleVersion"), "PREFLIGHT_MODULES"),
+        )
+        if key in result:
+            raise ControlledError("PREFLIGHT_MODULES")
+        result[key] = item
+    return result
+
+
+def config_by_hash(container: Any, expected_sha: str) -> Mapping[str, Any]:
+    candidates: List[Mapping[str, Any]] = []
+    for item in collect_mappings(container):
+        if hashlib.sha256(canonical_bytes(item)).hexdigest() == expected_sha:
+            candidates.append(item)
+    if not candidates:
+        raise ControlledError("CONFIGURATION_BINDING")
+    canonical = {canonical_bytes(item) for item in candidates}
+    if len(canonical) != 1:
+        raise ControlledError("CONFIGURATION_AMBIGUOUS")
+    return dict(candidates[0])
+
+
+def port_map(manifest: Mapping[str, Any]) -> Dict[str, Tuple[str, bool]]:
+    result: Dict[str, Tuple[str, bool]] = {}
+    for field, required in (("RequiredInputs", True), ("OptionalInputs", False)):
+        raw = manifest.get(field, [])
+        if not isinstance(raw, list):
+            raise ControlledError("MODULE_MANIFEST")
+        for item in raw:
+            if not isinstance(item, dict):
+                raise ControlledError("MODULE_MANIFEST")
+            port_id = require_nonempty_string(item.get("PortId"), "MODULE_MANIFEST")
+            role = require_nonempty_string(item.get("Role"), "MODULE_MANIFEST")
+            if port_id in result:
+                raise ControlledError("MODULE_MANIFEST")
+            result[port_id] = (role, required)
+    return result
+
+
+def binding_candidates(preflight: Mapping[str, Any], module_id: str,
+                       module_version: str) -> List[Mapping[str, Any]]:
+    raw = preflight.get("SignalBindings")
+    if not isinstance(raw, (list, dict)):
+        raise ControlledError("SIGNAL_BINDINGS")
+    output: List[Mapping[str, Any]] = []
+    for item in collect_mappings(raw):
+        if "CanonicalNames" not in item or not ("PortId" in item or "PortName" in item):
+            continue
+        item_id = item.get("ModuleId")
+        item_version = item.get("ModuleVersion")
+        if item_id is not None and item_id != module_id:
+            continue
+        if item_version is not None and item_version != module_version:
+            continue
+        output.append(item)
+    return output
+
+
+def require_semantic_scalar(value: object) -> object:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float) and math.isfinite(value):
+        return value
+    raise ControlledError("SIGNAL_BINDINGS")
+
+
+def normalize_nested_signal_records(item: Mapping[str, Any],
+                                    canonical_names: Sequence[str]) -> Tuple[dict, List[str]]:
+    """Translate accepted U21E Signals[] evidence into the F2A runtime form."""
+    raw_signals = item.get("Signals")
+    if not isinstance(raw_signals, list) or not raw_signals:
+        raise ControlledError("SIGNAL_BINDINGS")
+    by_name: Dict[str, Mapping[str, Any]] = {}
+    for raw_signal in raw_signals:
+        if not isinstance(raw_signal, dict):
+            raise ControlledError("SIGNAL_BINDINGS")
+        name = require_nonempty_string(raw_signal.get("CanonicalName"), "SIGNAL_BINDINGS")
+        if name in by_name:
+            raise ControlledError("SIGNAL_BINDINGS")
+        by_name[name] = raw_signal
+    if set(by_name) != set(canonical_names) or len(by_name) != len(canonical_names):
+        raise ControlledError("SIGNAL_BINDINGS")
+
+    projection: Dict[str, List[object]] = {key: [] for key in D3_SIGNAL_KEYS}
+    d2_columns: List[str] = []
+    for canonical_name in canonical_names:
+        signal = by_name[canonical_name]
+        if any(key not in signal for key in D3_SIGNAL_KEYS):
+            raise ControlledError("SIGNAL_BINDINGS")
+        for key in D3_SIGNAL_KEYS:
+            projection[key].append(require_semantic_scalar(signal[key]))
+        columns = signal.get("Columns")
+        if not isinstance(columns, dict) or set(columns) != set(D2_COLUMN_KEYS):
+            raise ControlledError("SIGNAL_BINDINGS")
+        for key in D2_COLUMN_KEYS:
+            d2_columns.append(require_nonempty_string(columns[key], "SIGNAL_BINDINGS"))
+    if len(set(d2_columns)) != len(d2_columns):
+        raise ControlledError("SIGNAL_BINDINGS")
+    return projection, d2_columns
+
+
+def normalize_bound_signals(preflight: Mapping[str, Any], manifest: Mapping[str, Any],
+                            module_id: str, module_version: str) -> Tuple[Mapping[str, Any], ...]:
+    ports = port_map(manifest)
+    # Artifact-only modules such as S4/S7 intentionally require no signal binding.
+    if not ports:
+        return tuple()
+    normalized: Dict[str, Mapping[str, Any]] = {}
+    for item in binding_candidates(preflight, module_id, module_version):
+        port_name = item.get("PortName", item.get("PortId"))
+        if port_name not in ports:
+            continue
+        role, required = ports[str(port_name)]
+        canonical_names = item.get("CanonicalNames")
+        selection_mode = item.get("SelectionMode")
+        if not isinstance(canonical_names, list) or not all(isinstance(v, str) and v for v in canonical_names):
+            raise ControlledError("SIGNAL_BINDINGS")
+        if len(set(canonical_names)) != len(canonical_names):
+            raise ControlledError("SIGNAL_BINDINGS")
+        if not isinstance(selection_mode, str):
+            raise ControlledError("SIGNAL_BINDINGS")
+        projection, d2_columns = normalize_nested_signal_records(item, canonical_names)
+        record = {
+            "PortName": str(port_name),
+            "Role": role,
+            "Required": required,
+            "SelectionMode": selection_mode,
+            "CanonicalNames": canonical_names,
+            "D3SemanticProjection": projection,
+            "D2Columns": d2_columns,
+        }
+        if port_name in normalized and canonical_bytes(normalized[str(port_name)]) != canonical_bytes(record):
+            raise ControlledError("SIGNAL_BINDINGS")
+        normalized[str(port_name)] = record
+    for port_name, (_, required) in ports.items():
+        if required and port_name not in normalized:
+            raise ControlledError("SIGNAL_BINDINGS")
+    return tuple(normalized[name] for name in sorted(normalized))
+
+
+def normalize_scope(preflight: Mapping[str, Any]) -> Mapping[str, Any]:
+    raw = preflight.get("ResolvedScope")
+    if not isinstance(raw, dict):
+        raise ControlledError("RUN_SCOPE")
+    scope_type = raw.get("ScopeType", raw.get("Mode"))
+    if scope_type not in ("FULL_CASE", "FRAME_RANGE"):
+        raise ControlledError("RUN_SCOPE")
+    start = raw.get("FrameStart", raw.get("StartFrameCount"))
+    end = raw.get("FrameEnd", raw.get("EndFrameCount"))
+    if scope_type == "FULL_CASE":
+        if start is not None and not isinstance(start, int):
+            raise ControlledError("RUN_SCOPE")
+        if end is not None and not isinstance(end, int):
+            raise ControlledError("RUN_SCOPE")
+        # U21E may retain observed package bounds as evidence. The frozen Core
+        # Run contract represents FULL_CASE only with null explicit bounds.
+        start = None
+        end = None
+    else:
+        start = require_integer(start, "RUN_SCOPE", 0)
+        end = require_integer(end, "RUN_SCOPE", 0)
+        if start > end:
+            raise ControlledError("RUN_SCOPE")
+    return {"ScopeType": scope_type, "FrameStart": start, "FrameEnd": end}
+
+
+def normalize_clock(preflight: Mapping[str, Any]) -> Mapping[str, Any]:
+    raw = preflight.get("ResolvedClockDomain")
+    if not isinstance(raw, dict):
+        raise ControlledError("CLOCK_DOMAIN")
+    kind = raw.get("ClockKind", raw.get("ClockType"))
+    if kind != "FRAMECOUNT":
+        raise ControlledError("CLOCK_DOMAIN")
+    domain_id = raw.get("ClockDomainId", "U002_FRAMECOUNT")
+    rate = raw.get("FrameRateHz", raw.get("RateHz"))
+    if rate is not None and require_number(rate, "CLOCK_DOMAIN") <= 0:
+        raise ControlledError("CLOCK_DOMAIN")
+    unit = raw.get("TimeUnit", "frame")
+    return {
+        "ClockDomainId": require_nonempty_string(domain_id, "CLOCK_DOMAIN"),
+        "ClockKind": "FRAMECOUNT",
+        "FrameRateHz": rate,
+        "TimeUnit": unit,
+    }
+
+
+def load_modules(plan: Mapping[str, Any], preflight: Mapping[str, Any],
+                 modules_root: Path) -> List[ModuleRecord]:
+    order = parse_execution_order(plan)
+    plan_map = exact_module_map(plan)
+    preflight_map = preflight_modules(preflight)
+    if list(preflight_map) != order:
+        raise ControlledError("PREFLIGHT_MODULE_ORDER")
+    configurations = preflight.get("ResolvedConfigurations")
+    if not isinstance(configurations, (dict, list)):
+        raise ControlledError("CONFIGURATION_BINDING")
+    records: List[ModuleRecord] = []
+    for index, identity in enumerate(order):
+        planned = plan_map[identity]
+        bound = preflight_map.get(identity)
+        if bound is None:
+            raise ControlledError("PREFLIGHT_MODULE_ORDER")
+        manifest_path = resolve_below(modules_root, planned.get("ManifestRelativePath"), "MODULE_PATH")
+        manifest = read_json(manifest_path, "MODULE_MANIFEST")
+        manifest_sha = sha256_file(manifest_path)
+        if require_sha(planned.get("ManifestSha256"), "MODULE_IDENTITY") != manifest_sha:
+            raise ControlledError("MODULE_IDENTITY")
+        for key in ("ManifestSha256", "ImplementationSha256", "ConfigurationSchemaSha256"):
+            if key in bound and bound[key] != planned.get(key):
+                raise ControlledError("PREFLIGHT_MODULE_IDENTITY")
+        if manifest.get("ModuleId") != identity[0] or manifest.get("ModuleVersion") != identity[1]:
+            raise ControlledError("MODULE_IDENTITY")
+        if manifest.get("Stage") != planned.get("Stage") or manifest.get("Stage") not in STAGES:
+            raise ControlledError("MODULE_IDENTITY")
+        entrypoint = manifest.get("Entrypoint")
+        schema_ref = manifest.get("ConfigurationSchema")
+        if not isinstance(entrypoint, dict) or not isinstance(schema_ref, dict):
+            raise ControlledError("MODULE_MANIFEST")
+        implementation = resolve_below(manifest_path.parent, entrypoint.get("RelativeFile"), "MODULE_PATH")
+        config_schema = resolve_below(manifest_path.parent, schema_ref.get("RelativePath"), "MODULE_PATH")
+        require_regular_file(implementation, "MODULE_FILE")
+        require_regular_file(config_schema, "CONFIG_SCHEMA_FILE")
+        implementation_sha = sha256_file(implementation)
+        config_schema_sha = sha256_file(config_schema)
+        if implementation_sha != require_sha(planned.get("ImplementationSha256"), "MODULE_IDENTITY"):
+            raise ControlledError("MODULE_IDENTITY")
+        if config_schema_sha != require_sha(planned.get("ConfigurationSchemaSha256"), "MODULE_IDENTITY"):
+            raise ControlledError("MODULE_IDENTITY")
+        resolved_config_sha = require_sha(bound.get("ResolvedConfigSha256"), "CONFIGURATION_BINDING")
+        configuration = config_by_hash(configurations, resolved_config_sha)
+        bound_signals = normalize_bound_signals(preflight, manifest, identity[0], identity[1])
+        records.append(ModuleRecord(
+            order=index,
+            module_id=identity[0], module_version=identity[1], stage=str(manifest["Stage"]),
+            manifest_path=manifest_path, manifest_sha256=manifest_sha,
+            implementation_path=implementation, implementation_sha256=implementation_sha,
+            configuration_schema_path=config_schema,
+            configuration_schema_sha256=config_schema_sha,
+            resolved_config_sha256=resolved_config_sha, configuration=configuration,
+            execution_requirement=str(manifest["ExecutionRequirement"]),
+            failure_policy=str(manifest["FailurePolicy"]),
+            callable_name=require_nonempty_string(entrypoint.get("Callable"), "MODULE_MANIFEST"),
+            required_inputs=tuple(manifest.get("RequiredInputs", [])),
+            optional_inputs=tuple(manifest.get("OptionalInputs", [])),
+            requires_artifacts=tuple(manifest.get("RequiresArtifacts", [])),
+            provides_artifacts=tuple(manifest.get("ProvidesArtifacts", [])),
+            bound_signals=bound_signals,
+        ))
+    return records
+
+
+def verify_u001(package: Path, preflight: Mapping[str, Any]) -> Dict[str, str]:
+    require_directory(package, "U001_PACKAGE")
+    paths = [package / name for name in STANDARD_U001_FILES]
+    for path in paths:
+        require_regular_file(path, "U001_PACKAGE")
+    hashes = {path.name: sha256_file(path) for path in paths}
+    identity = preflight.get("U001PackageIdentity")
+    if not isinstance(identity, dict):
+        raise ControlledError("U001_IDENTITY")
+    for name in STANDARD_U001_FILES[1:5]:
+        if not find_exact_value(identity, hashes[name]):
+            raise ControlledError("U001_IDENTITY")
+    return hashes
+
+
+def validate_plan_preflight(plan_path: Path, preflight_path: Path,
+                            modules_root: Path, u001_package: Path) -> Tuple[dict, dict, List[ModuleRecord], Dict[str, str]]:
+    plan = read_json(plan_path, "SOFTWARE_PLAN")
+    preflight = read_json(preflight_path, "RUN_PREFLIGHT")
+    if plan.get("PlanType") != "U002_QUALIFIED_MODULE_PLAN" or plan.get("PlanVersion") != "0.1":
+        raise ControlledError("PLAN_SEMANTICS")
+    if plan.get("PlanStatus") != "SOFTWARE_PLAN_READY" or plan.get("SignalBindingStatus") != "DEFERRED_TO_RUN_PREFLIGHT":
+        raise ControlledError("PLAN_SEMANTICS")
+    if preflight.get("PreflightType") != "U002_RUN_PREFLIGHT_BINDING" or preflight.get("PreflightVersion") != "0.1":
+        raise ControlledError("PREFLIGHT_SEMANTICS")
+    if preflight.get("PreflightStatus") != "RUN_PREFLIGHT_READY":
+        raise ControlledError("PREFLIGHT_SEMANTICS")
+    validate_quality_decision(preflight)
+    if not find_exact_value(preflight.get("SoftwarePlanIdentity"), sha256_file(plan_path)):
+        raise ControlledError("SOFTWARE_PLAN_IDENTITY")
+    _ = normalize_scope(preflight)
+    _ = normalize_clock(preflight)
+    modules = load_modules(plan, preflight, modules_root)
+    hashes = verify_u001(u001_package, preflight)
+    return plan, preflight, modules, hashes
+
+
+def init_run_via_engine(deps: Dependencies, preflight: Mapping[str, Any], u001_hashes: Mapping[str, str],
+                        run_root: Path, work: Path) -> Path:
+    run_root.mkdir(parents=True, exist_ok=True)
+    before = {item.name for item in run_root.iterdir() if item.is_dir()}
+    scope = normalize_scope(preflight)
+    clock = normalize_clock(preflight)
+    case_id = require_nonempty_string(preflight.get("CaseId"), "PREFLIGHT_CASE")
+    u001_identity = preflight.get("U001PackageIdentity")
+    source_id = "U001_CONTROLLED_PROFILE"
+    if isinstance(u001_identity, dict) and isinstance(u001_identity.get("SourceId"), str):
+        source_id = u001_identity["SourceId"]
+    command = [
+        sys.executable, str(deps.engine), "--init-run", "--run-root", str(run_root),
+        "--case-id", case_id, "--input-id", source_id,
+        "--input-type", "U001_CONTROLLED_PROFILE",
+        "--input-sha256", u001_hashes["u001_run_manifest.json"],
+        "--scope", str(scope["ScopeType"]), "--clock-kind", "FRAMECOUNT",
+        "--schema-bundle", str(deps.schema_bundle),
+        "--contract-validator", str(deps.contract_validator),
+    ]
+    if clock["FrameRateHz"] is not None:
+        command.extend(["--frame-rate-hz", str(clock["FrameRateHz"])])
+    rc = run_bounded(command, work / "engine_init.stdout.txt", work / "engine_init.stderr.txt",
+                     180, 262144, "ENGINE_INIT")
+    if rc != 0:
+        raise ControlledError("ENGINE_INIT_EXIT")
+    after = {item.name for item in run_root.iterdir() if item.is_dir()}
+    created = sorted(after - before)
+    if len(created) != 1:
+        raise ControlledError("RUN_DISCOVERY")
+    run_dir = run_root / created[0]
+    require_regular_file(run_dir / "run_manifest.json", "RUN_MANIFEST")
+    validate_core(run_dir / "run_manifest.json", deps, work, "engine_pending_manifest")
+    return run_dir
+
+
+def resolved_module_entry(record: ModuleRecord, status: str) -> dict:
+    return {
+        "Order": record.order,
+        "Stage": record.stage,
+        "ModuleId": record.module_id,
+        "ModuleVersion": record.module_version,
+        "ModuleManifestSha256": record.manifest_sha256,
+        "ResolvedConfigSha256": record.resolved_config_sha256,
+        "ExecutionRequirement": record.execution_requirement,
+        "Status": status,
+    }
+
+
+def stage_entry(stage: str, status: str = "PENDING", inputs: Sequence[str] = (),
+                outputs: Sequence[str] = (), error: str | None = None) -> dict:
+    return {
+        "Stage": stage, "Status": status,
+        "InputArtifactIds": list(inputs), "OutputArtifactIds": list(outputs),
+        "ErrorCode": error,
+    }
+
+
+def persist_run_manifest(run_dir: Path, manifest: MutableMapping[str, Any], deps: Dependencies,
+                         work: Path, label: str) -> None:
+    atomic_write_json(run_dir / "run_manifest.json", manifest)
+    validate_core(run_dir / "run_manifest.json", deps, work, label)
+    status_path = run_dir / "run_status.json"
+    try:
+        status = read_json(status_path, "RUN_STATUS")
+    except ControlledError:
+        status = {}
+    for key in list(status):
+        if key.lower() in ("runstatus", "status"):
+            status[key] = manifest["RunStatus"]
+    status.setdefault("RunId", manifest["RunId"])
+    status.setdefault("RunStatus", manifest["RunStatus"])
+    status["UpdatedAtUtc"] = utc_now()
+    atomic_write_json(status_path, status)
+
+
+def prepare_run(run_dir: Path, manifest: MutableMapping[str, Any], plan: Mapping[str, Any],
+                preflight: Mapping[str, Any], modules: Sequence[ModuleRecord], deps: Dependencies,
+                work: Path, limits: Mapping[str, int]) -> None:
+    config_dir = run_dir / "00_CONFIG"
+    plan_copy = config_dir / "u21f_software_plan.json"
+    preflight_copy = config_dir / "u21f_run_preflight.json"
+    registry_copy = config_dir / "u21f_module_registry_projection.json"
+    resolved_copy = config_dir / "u21f_resolved_execution.json"
+    atomic_write_json(plan_copy, plan)
+    atomic_write_json(preflight_copy, preflight)
+    registry = [{
+        "Order": item.order, "Stage": item.stage, "ModuleId": item.module_id,
+        "ModuleVersion": item.module_version,
+        "ManifestSha256": item.manifest_sha256,
+        "ImplementationSha256": item.implementation_sha256,
+    } for item in modules]
+    atomic_write_json(registry_copy, {"RegistryType": "U21F_SELECTED_MODULES", "Modules": registry})
+    atomic_write_json(resolved_copy, {
+        "ExecutorVersion": VERSION,
+        "ModuleTimeoutSeconds": limits["timeout"],
+        "MaxRetainedLogBytes": limits["log_bytes"],
+        "Configurations": {f"{m.module_id}@{m.module_version}": m.configuration for m in modules},
+    })
+    scope = normalize_scope(preflight)
+    clock = normalize_clock(preflight)
+    scope["CaseId"] = preflight["CaseId"]
+    manifest["RunScope"] = scope
+    manifest["ClockDomain"] = clock
+    manifest["RegistrySnapshotSha256"] = sha256_file(registry_copy)
+    manifest["ConfigSnapshotSha256"] = sha256_file(resolved_copy)
+    manifest["ResolvedModules"] = [resolved_module_entry(item, "PENDING") for item in modules]
+    manifest["Stages"] = [stage_entry(stage) for stage in STAGES]
+    manifest["Artifacts"] = []
+    manifest["RunStatus"] = "PENDING"
+    manifest["StartedAtUtc"] = None
+    manifest["CompletedAtUtc"] = None
+    manifest["DiagnosticsRelativePath"] = None
+    persist_run_manifest(run_dir, manifest, deps, work, "prepared_manifest")
+
+
+def set_module_status(manifest: MutableMapping[str, Any], record: ModuleRecord, status: str) -> None:
+    matches = [item for item in manifest["ResolvedModules"]
+               if item["ModuleId"] == record.module_id and item["ModuleVersion"] == record.module_version]
+    if len(matches) != 1:
+        raise ControlledError("RUN_MODULE_STATE")
+    matches[0]["Status"] = status
+
+
+def stage_record(manifest: MutableMapping[str, Any], stage: str) -> MutableMapping[str, Any]:
+    matches = [item for item in manifest["Stages"] if item["Stage"] == stage]
+    if len(matches) != 1:
+        raise ControlledError("RUN_STAGE_STATE")
+    return matches[0]
+
+
+def semver_tuple(value: object) -> Tuple[int, int, int]:
+    if not isinstance(value, str) or not re.fullmatch(r"\d+\.\d+\.\d+", value):
+        raise ControlledError("SCHEMA_VERSION")
+    return tuple(int(part) for part in value.split("."))  # type: ignore[return-value]
+
+
+def matching_artifacts(requirement: Mapping[str, Any], artifacts: Sequence[CommittedArtifact]) -> List[CommittedArtifact]:
+    result = []
+    minimum = semver_tuple(requirement.get("MinimumSchemaVersion"))
+    for artifact in artifacts:
+        if artifact.artifact_type != requirement.get("ArtifactType"):
+            continue
+        if artifact.schema_id != requirement.get("ArtifactSchemaId"):
+            continue
+        if semver_tuple(artifact.schema_version) >= minimum:
+            result.append(artifact)
+    return result
+
+
+def required_upstream(record: ModuleRecord, artifacts: Sequence[CommittedArtifact]) -> List[CommittedArtifact]:
+    selected: List[CommittedArtifact] = []
+    for requirement in record.requires_artifacts:
+        matches = matching_artifacts(requirement, artifacts)
+        cardinality = requirement.get("Cardinality")
+        valid = {
+            "ONE": len(matches) == 1,
+            "ZERO_OR_ONE": len(matches) <= 1,
+            "ONE_OR_MORE": len(matches) >= 1,
+            "ZERO_OR_MORE": True,
+        }.get(cardinality, False)
+        if not valid:
+            raise ControlledError("UPSTREAM_ARTIFACT")
+        selected.extend(matches)
+    unique = {item.artifact_id: item for item in selected}
+    return [unique[key] for key in sorted(unique)]
+
+
+def stage_input_artifacts(record: ModuleRecord, artifacts: Sequence[CommittedArtifact]) -> List[CommittedArtifact]:
+    return required_upstream(record, artifacts)
+
+
+def materialize_input_artifacts(transaction: Path, artifacts: Sequence[CommittedArtifact]) -> List[dict]:
+    result: List[dict] = []
+    for artifact in artifacts:
+        payload_records: List[dict] = []
+        for payload in artifact.payloads:
+            source = artifact.manifest_path.parent / payload["RelativePath"]
+            require_regular_file(source, "UPSTREAM_PAYLOAD")
+            if sha256_file(source) != payload["Sha256"]:
+                raise ControlledError("UPSTREAM_PAYLOAD_IDENTITY")
+            relative = PurePosixPath("inputs", artifact.artifact_id, Path(payload["RelativePath"]).name).as_posix()
+            destination = resolve_below(transaction, relative, "UPSTREAM_PAYLOAD_PATH")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+            payload_records.append({
+                "RelativePath": relative,
+                "Role": payload["Role"],
+                "MediaType": payload["MediaType"],
+            })
+        result.append({
+            "ArtifactId": artifact.artifact_id,
+            "ArtifactType": artifact.artifact_type,
+            "ArtifactSchemaId": artifact.schema_id,
+            "ArtifactSchemaVersion": artifact.schema_version,
+            "ManifestSha256": artifact.manifest_sha256,
+            "Payloads": payload_records,
+        })
+    return result
+
+
+def runtime_scope(preflight: Mapping[str, Any]) -> dict:
+    scope = normalize_scope(preflight)
+    if scope["ScopeType"] == "FULL_CASE":
+        return {"Mode": "FULL_CASE", "StartFrameCount": None, "EndFrameCount": None}
+    return {"Mode": "FRAME_RANGE", "StartFrameCount": scope["FrameStart"], "EndFrameCount": scope["FrameEnd"]}
+
+
+def runtime_clock(preflight: Mapping[str, Any]) -> dict:
+    clock = normalize_clock(preflight)
+    if clock["FrameRateHz"] is None:
+        raise ControlledError("CLOCK_RATE_REQUIRED")
+    return {"ClockType": "FRAMECOUNT", "PrimaryKey": "FrameCount", "RateHz": clock["FrameRateHz"]}
+
+
+def build_request(run_id: str, case_id: str, record: ModuleRecord,
+                  preflight: Mapping[str, Any], input_artifacts: Sequence[dict],
+                  transaction: Path, u001_package: Path, timeout: int, log_bytes: int) -> dict:
+    return {
+        "ContractType": "U002_MODULE_EXECUTION_REQUEST",
+        "ContractVersion": "0.2",
+        "RunId": run_id,
+        "CaseId": case_id,
+        "Stage": record.stage,
+        "ModuleIdentity": {
+            "ModuleId": record.module_id,
+            "ModuleVersion": record.module_version,
+            "ManifestSha256": record.manifest_sha256,
+            "ImplementationSha256": record.implementation_sha256,
+            "Callable": record.callable_name,
+        },
+        "Scope": runtime_scope(preflight),
+        "ClockDomain": runtime_clock(preflight),
+        "BoundSignals": list(record.bound_signals),
+        "InputArtifacts": list(input_artifacts),
+        "Configuration": record.configuration,
+        "ExecutionPolicy": {
+            "FailurePolicy": record.failure_policy,
+            "RequiredModule": record.execution_requirement == "REQUIRED",
+            "TimeoutSeconds": timeout,
+            "MaxRetainedLogBytes": log_bytes,
+        },
+        "RuntimePaths": {
+            "ModuleFile": str(record.implementation_path),
+            "StagingRoot": str(transaction),
+            "U001PackageRoot": str(u001_package),
+        },
+    }
+
+
+def request_result_identity(request: Mapping[str, Any], result: Mapping[str, Any]) -> None:
+    identity = request["ModuleIdentity"]
+    pairs = (
+        (request["RunId"], result.get("RunId")),
+        (request["Stage"], result.get("Stage")),
+        (identity["ModuleId"], result.get("ModuleId")),
+        (identity["ModuleVersion"], result.get("ModuleVersion")),
+    )
+    if any(left != right for left, right in pairs):
+        raise ControlledError("RESULT_IDENTITY")
+
+
+def count_csv_rows(path: Path) -> int:
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        return max(0, sum(1 for _ in csv.reader(stream)) - 1)
+
+
+def infer_payload_kind(media_type: str, relative: str) -> str:
+    lower = relative.lower()
+    if media_type in ("text/csv", "application/csv") or lower.endswith((".csv", ".tsv", ".parquet")):
+        return "TABLE"
+    if media_type == "application/json" or lower.endswith(".json"):
+        return "JSON"
+    if lower.endswith((".pkl", ".joblib", ".mat")):
+        return "MODEL"
+    return "OTHER"
+
+
+def validate_result_provisions(record: ModuleRecord, result: Mapping[str, Any]) -> None:
+    provided = {(item.get("ArtifactType"), item.get("ArtifactSchemaId"), item.get("ArtifactSchemaVersion"))
+                for item in record.provides_artifacts}
+    observed = {(item.get("ArtifactType"), item.get("ArtifactSchemaId"), item.get("ArtifactSchemaVersion"))
+                for item in result.get("Artifacts", []) if isinstance(item, dict)}
+    if observed != provided:
+        raise ControlledError("RESULT_ARTIFACT_DECLARATION")
+
+
+def commit_result(run_dir: Path, manifest: MutableMapping[str, Any], record: ModuleRecord,
+                  request: Mapping[str, Any], result: Mapping[str, Any], transaction: Path,
+                  parents: Sequence[CommittedArtifact], deps: Dependencies, work: Path,
+                  artifact_counter: int) -> List[CommittedArtifact]:
+    request_result_identity(request, result)
+    if result.get("Status") != "SUCCEEDED":
+        raise ControlledError("MODULE_RESULT_FAILED")
+    validate_result_provisions(record, result)
+    committed: List[CommittedArtifact] = []
+    for local_index, declaration in enumerate(result["Artifacts"], start=1):
+        artifact_id = f"ART_{manifest['RunId'][4:20]}_{record.stage}_{artifact_counter + local_index:04d}"
+        if not ID_RE.fullmatch(artifact_id[4:]):
+            raise ControlledError("ARTIFACT_ID")
+        final_dir = run_dir / "03_ARTIFACTS" / record.stage / artifact_id
+        staging = final_dir.with_name(final_dir.name + ".staging")
+        if final_dir.exists() or staging.exists():
+            raise ControlledError("ARTIFACT_COLLISION")
+        staging.mkdir(parents=True)
+        payload_records: List[dict] = []
+        seen_relative: set[str] = set()
+        try:
+            for payload_index, payload in enumerate(declaration["Payloads"], start=1):
+                relative = safe_relative(payload["RelativePath"], "PAYLOAD_PATH")
+                if relative in seen_relative:
+                    raise ControlledError("PAYLOAD_COLLISION")
+                seen_relative.add(relative)
+                source = resolve_below(transaction, relative, "PAYLOAD_PATH")
+                require_regular_file(source, "PAYLOAD_FILE")
+                destination_relative = PurePosixPath("payloads", relative).as_posix()
+                destination = resolve_below(staging, destination_relative, "PAYLOAD_PATH")
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+                expected_rows = payload.get("RowCount")
+                if expected_rows is not None:
+                    expected_rows = require_integer(expected_rows, "PAYLOAD_ROWCOUNT", 0)
+                    if infer_payload_kind(str(payload["MediaType"]), relative) == "TABLE":
+                        if count_csv_rows(destination) != expected_rows:
+                            raise ControlledError("PAYLOAD_ROWCOUNT")
+                role = payload.get("Role")
+                if role not in ("PRIMARY", "INDEX", "DIAGNOSTIC", "PRESENTATION"):
+                    raise ControlledError("PAYLOAD_ROLE")
+                payload_records.append({
+                    "PayloadId": f"PAYLOAD_{artifact_counter + local_index:04d}_{payload_index:03d}",
+                    "Role": role,
+                    "RelativePath": destination_relative,
+                    "MediaType": require_nonempty_string(payload.get("MediaType"), "PAYLOAD_MEDIA"),
+                    "ByteSize": destination.stat().st_size,
+                    "Sha256": sha256_file(destination),
+                    "RowCount": expected_rows,
+                    "PayloadKind": infer_payload_kind(str(payload["MediaType"]), relative),
+                })
+            if not any(item["Role"] == "PRIMARY" for item in payload_records):
+                raise ControlledError("PRIMARY_PAYLOAD")
+            content_sha = hashlib.sha256(canonical_bytes([
+                {"RelativePath": item["RelativePath"], "Sha256": item["Sha256"]}
+                for item in payload_records
+            ])).hexdigest()
+            artifact_manifest = {
+                "ContractType": "U002_ARTIFACT_MANIFEST",
+                "ContractVersion": "0.1",
+                "ArtifactId": artifact_id,
+                "ArtifactType": declaration["ArtifactType"],
+                "ArtifactSchemaId": declaration["ArtifactSchemaId"],
+                "ArtifactSchemaVersion": declaration["ArtifactSchemaVersion"],
+                "ArtifactStatus": "COMPLETE",
+                "Stage": record.stage,
+                "RunId": manifest["RunId"],
+                "CreatedAtUtc": utc_now(),
+                "Producer": {
+                    "ModuleId": record.module_id,
+                    "ModuleVersion": record.module_version,
+                    "ModuleManifestSha256": record.manifest_sha256,
+                },
+                "Parents": [{
+                    "ArtifactId": item.artifact_id,
+                    "ManifestSha256": item.manifest_sha256,
+                    "ContentSha256": item.content_sha256,
+                } for item in parents],
+                "Payloads": payload_records,
+                "Scope": manifest["RunScope"],
+                "ClockDomain": manifest["ClockDomain"],
+                "SourceReferences": manifest["InputPackages"],
+                "CoordinateFrame": declaration.get("CoordinateFrame"),
+                "UncertaintyReference": declaration.get("UncertaintyReference"),
+                "Metadata": declaration.get("Metadata", {}),
+            }
+            manifest_path = staging / "artifact_manifest.json"
+            atomic_write_json(manifest_path, artifact_manifest)
+            validate_core(manifest_path, deps, work, f"artifact_{artifact_counter + local_index}_manifest")
+            manifest_sha = sha256_file(manifest_path)
+            os.replace(staging, final_dir)
+            committed.append(CommittedArtifact(
+                artifact_id=artifact_id,
+                artifact_type=str(declaration["ArtifactType"]),
+                schema_id=str(declaration["ArtifactSchemaId"]),
+                schema_version=str(declaration["ArtifactSchemaVersion"]),
+                manifest_path=final_dir / "artifact_manifest.json",
+                manifest_sha256=manifest_sha,
+                content_sha256=content_sha,
+                payloads=tuple(payload_records),
+            ))
+        except Exception:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+            raise
+    return committed
+
+
+def artifact_reference(run_dir: Path, artifact: CommittedArtifact) -> dict:
+    relative = artifact.manifest_path.relative_to(run_dir).as_posix()
+    return {
+        "ArtifactId": artifact.artifact_id,
+        "ManifestRelativePath": relative,
+        "ManifestSha256": artifact.manifest_sha256,
+    }
+
+
+def persist_failure_diagnostic(run_dir: Path, record: ModuleRecord | None,
+                               reason: str, stage: str | None) -> None:
+    diagnostic = {
+        "DiagnosticType": "U002_EXECUTOR_FAILURE",
+        "ExecutorVersion": VERSION,
+        "GeneratedAtUtc": utc_now(),
+        "Reason": stable_reason(reason),
+        "Stage": stage,
+        "ModuleId": None if record is None else record.module_id,
+        "ModuleVersion": None if record is None else record.module_version,
+        "RawRowsIncluded": False,
+    }
+    atomic_write_json(run_dir / "02_DIAGNOSTICS" / "u21f_executor_failure.json", diagnostic)
+    atomic_write_text(run_dir / "02_DIAGNOSTICS" / "error_capsule.txt",
+                      f"E08RUN C-7 K-{stable_reason(reason)}\n")
+
+
+def worker_command(executor_path: Path, record: ModuleRecord, request_path: Path,
+                   result_path: Path, deps: Dependencies) -> List[str]:
+    return [
+        sys.executable, str(executor_path), "--module-worker",
+        "--module-file", str(record.implementation_path),
+        "--callable", record.callable_name,
+        "--request", str(request_path), "--result", str(result_path),
+        "--protocol-bundle", str(deps.protocol_bundle),
+        "--protocol-validator", str(deps.protocol_validator),
+    ]
+
+
+def execute_governed_run(plan_path: Path, preflight_path: Path, modules_root: Path,
+                         u001_package: Path, run_root: Path, deps: Dependencies,
+                         module_timeout: int, max_log_bytes: int,
+                         executor_path: Path | None = None) -> Tuple[Path, int, int]:
+    executor_path = Path(__file__).resolve() if executor_path is None else executor_path.resolve()
+    require_regular_file(executor_path, "EXECUTOR_SOURCE")
+    if module_timeout < 1 or module_timeout > 86400:
+        raise ControlledError("RESOURCE_POLICY")
+    if max_log_bytes < 1024 or max_log_bytes > 16777216:
+        raise ControlledError("RESOURCE_POLICY")
+    with tempfile.TemporaryDirectory(prefix="u002_e06_preflight_") as temp_name:
+        dependency_preflight(deps, Path(temp_name))
+    modules_root = require_directory(modules_root.resolve(), "MODULES_ROOT")
+    u001_package = require_directory(u001_package.resolve(), "U001_PACKAGE")
+    plan, preflight, modules, u001_hashes = validate_plan_preflight(
+        plan_path, preflight_path, modules_root, u001_package
+    )
+    protected_paths = tuple(deps.__dict__.values()) + (plan_path, preflight_path,) + tuple(
+        [item.manifest_path for item in modules]
+        + [item.implementation_path for item in modules]
+        + [item.configuration_schema_path for item in modules]
+        + [u001_package / name for name in STANDARD_U001_FILES]
+    )
+    before = sha256_paths(protected_paths)
+    bootstrap_logs = run_root.resolve() / ".u21f_bootstrap_logs"
+    if bootstrap_logs.exists():
+        raise ControlledError("BOOTSTRAP_LOG_EXISTS")
+    bootstrap_logs.mkdir(parents=True)
+    run_dir: Path | None = None
+    committed: List[CommittedArtifact] = []
+    call_count = 0
+    try:
+        run_dir = init_run_via_engine(deps, preflight, u001_hashes, run_root.resolve(), bootstrap_logs)
+        work = run_dir / "01_LOGS" / "u21f"
+        work.mkdir(parents=True, exist_ok=True)
+        for child in bootstrap_logs.iterdir():
+            shutil.move(str(child), str(work / child.name))
+        bootstrap_logs.rmdir()
+        manifest = read_json(run_dir / "run_manifest.json", "RUN_MANIFEST")
+        prepare_run(run_dir, manifest, plan, preflight, modules, deps, work,
+                    {"timeout": module_timeout, "log_bytes": max_log_bytes})
+        manifest["RunStatus"] = "RUNNING"
+        manifest["StartedAtUtc"] = utc_now()
+        persist_run_manifest(run_dir, manifest, deps, work, "running_manifest")
+        partial = False
+        required_failure = False
+        unavailable: set[Tuple[str, str]] = set()
+        for stage in STAGES:
+            current_stage = stage_record(manifest, stage)
+            stage_modules = [item for item in modules if item.stage == stage]
+            current_stage["InputArtifactIds"] = [item.artifact_id for item in committed]
+            if not stage_modules:
+                current_stage["Status"] = "SUCCEEDED"
+                persist_run_manifest(run_dir, manifest, deps, work, f"{stage}_noop_manifest")
+                continue
+            current_stage["Status"] = "RUNNING"
+            persist_run_manifest(run_dir, manifest, deps, work, f"{stage}_running_manifest")
+            stage_failed = False
+            stage_required_failure = False
+            for record in stage_modules:
+                missing_due_failure = any(
+                    (str(req.get("ArtifactType")), str(req.get("ArtifactSchemaId"))) in unavailable
+                    for req in record.requires_artifacts
+                )
+                if missing_due_failure:
+                    set_module_status(manifest, record, "SKIPPED")
+                    partial = True
+                    if record.execution_requirement == "REQUIRED":
+                        required_failure = True
+                        stage_required_failure = True
+                    continue
+                try:
+                    parents = stage_input_artifacts(record, committed)
+                    set_module_status(manifest, record, "RUNNING")
+                    persist_run_manifest(run_dir, manifest, deps, work,
+                                         f"module_{record.order}_running_manifest")
+                    transaction = run_dir / "03_ARTIFACTS" / stage / f".txn_{record.order:04d}"
+                    if transaction.exists():
+                        raise ControlledError("TRANSACTION_EXISTS")
+                    transaction.mkdir(parents=True)
+                    input_artifacts = materialize_input_artifacts(transaction, parents)
+                    request = build_request(
+                        manifest["RunId"], manifest["CaseId"], record, preflight,
+                        input_artifacts, transaction, u001_package,
+                        module_timeout, max_log_bytes,
+                    )
+                    request_path = transaction / "request.json"
+                    result_path = transaction / "result.json"
+                    atomic_write_json(request_path, request)
+                    validate_protocol_request(request_path, deps, work, f"request_{record.order}")
+                    rc = run_bounded(
+                        worker_command(executor_path, record, request_path, result_path, deps),
+                        work / f"module_{record.order}.stdout.txt",
+                        work / f"module_{record.order}.stderr.txt",
+                        module_timeout, max_log_bytes, f"MODULE_{record.order}",
+                    )
+                    call_count += 1
+                    if rc != 0:
+                        raise ControlledError("MODULE_WORKER_EXIT")
+                    validate_protocol_result(result_path, deps, work, f"result_{record.order}")
+                    result = read_json(result_path, "MODULE_RESULT")
+                    new_artifacts = commit_result(
+                        run_dir, manifest, record, request, result, transaction,
+                        parents, deps, work, len(committed),
+                    )
+                    committed.extend(new_artifacts)
+                    set_module_status(manifest, record, "SUCCEEDED")
+                    current_stage["OutputArtifactIds"].extend(item.artifact_id for item in new_artifacts)
+                    manifest["Artifacts"].extend(artifact_reference(run_dir, item) for item in new_artifacts)
+                    shutil.rmtree(transaction, ignore_errors=True)
+                    persist_run_manifest(run_dir, manifest, deps, work,
+                                         f"module_{record.order}_committed_manifest")
+                except ControlledError as exc:
+                    set_module_status(manifest, record,
+                                      "SKIPPED" if record.failure_policy == "SKIP_OPTIONAL_PATH" else "FAILED")
+                    stage_failed = True
+                    partial = True
+                    if record.execution_requirement == "REQUIRED":
+                        required_failure = True
+                        stage_required_failure = True
+                    for provision in record.provides_artifacts:
+                        unavailable.add((str(provision.get("ArtifactType")),
+                                         str(provision.get("ArtifactSchemaId"))))
+                    persist_failure_diagnostic(run_dir, record, exc.reason, stage)
+                    if record.failure_policy == "ABORT_RUN":
+                        current_stage["Status"] = "FAILED"
+                        current_stage["ErrorCode"] = exc.reason
+                        manifest["RunStatus"] = "FAILED"
+                        manifest["CompletedAtUtc"] = utc_now()
+                        manifest["DiagnosticsRelativePath"] = "02_DIAGNOSTICS/u21f_executor_failure.json"
+                        persist_run_manifest(run_dir, manifest, deps, work, "failed_manifest")
+                        raise
+            current_stage["Status"] = "FAILED" if stage_failed and stage_required_failure else "SUCCEEDED"
+            current_stage["ErrorCode"] = "MODULE_PATH_FAILURE" if current_stage["Status"] == "FAILED" else None
+            persist_run_manifest(run_dir, manifest, deps, work, f"{stage}_terminal_manifest")
+        if not committed:
+            raise ControlledError("NO_ARTIFACTS")
+        manifest["RunStatus"] = "FAILED" if required_failure else ("PARTIAL" if partial else "SUCCEEDED")
+        manifest["CompletedAtUtc"] = utc_now()
+        if manifest["RunStatus"] != "SUCCEEDED":
+            manifest["DiagnosticsRelativePath"] = "02_DIAGNOSTICS/u21f_executor_failure.json"
+        persist_run_manifest(run_dir, manifest, deps, work, "terminal_manifest")
+        after = sha256_paths(protected_paths)
+        if before != after:
+            raise ControlledError("INPUT_MUTATION")
+        if manifest["RunStatus"] == "FAILED":
+            raise ControlledError("REQUIRED_MODULE_FAILURE")
+        return run_dir, call_count, len(committed)
+    except Exception as exc:
+        if bootstrap_logs.exists():
+            shutil.rmtree(bootstrap_logs, ignore_errors=True)
+        if run_dir is not None and run_dir.exists() and isinstance(exc, ControlledError):
+            try:
+                manifest = read_json(run_dir / "run_manifest.json", "RUN_MANIFEST")
+                if manifest.get("RunStatus") not in ("FAILED", "PARTIAL", "SUCCEEDED"):
+                    persist_failure_diagnostic(run_dir, None, exc.reason, None)
+                    manifest["RunStatus"] = "FAILED"
+                    manifest["CompletedAtUtc"] = utc_now()
+                    manifest["DiagnosticsRelativePath"] = "02_DIAGNOSTICS/u21f_executor_failure.json"
+                    persist_run_manifest(run_dir, manifest, deps, run_dir / "01_LOGS" / "u21f",
+                                         "outer_failed_manifest")
+            except Exception:
+                pass
+        raise
+
+
+def module_worker(module_file: Path, callable_name: str, request_path: Path,
+                  result_path: Path, protocol_bundle: Path, protocol_validator: Path) -> None:
+    module_file = require_regular_file(module_file.resolve(), "WORKER_MODULE_FILE")
+    request_path = require_regular_file(request_path.resolve(), "WORKER_REQUEST")
+    if result_path.exists():
+        raise ControlledError("WORKER_RESULT_EXISTS")
+    request = read_json(request_path, "WORKER_REQUEST")
+    with tempfile.TemporaryDirectory(prefix="u002_worker_validate_") as temp_name:
+        temp = Path(temp_name)
+        validator_call(
+            protocol_validator.resolve(),
+            ["--validate-request", str(request_path), "--protocol-bundle", str(protocol_bundle.resolve())],
+            None, temp, "worker_request", timeout=120,
+        )
+    identity = request.get("ModuleIdentity")
+    if not isinstance(identity, dict):
+        raise ControlledError("WORKER_IDENTITY")
+    if sha256_file(module_file) != identity.get("ImplementationSha256"):
+        raise ControlledError("WORKER_IDENTITY")
+    if identity.get("Callable") != callable_name:
+        raise ControlledError("WORKER_CALLABLE")
+    module_name = "_u002_module_" + identity["ImplementationSha256"][:16]
+    spec = importlib.util.spec_from_file_location(module_name, module_file)
+    if spec is None or spec.loader is None:
+        raise ControlledError("WORKER_IMPORT_SPEC")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    callable_object = getattr(module, callable_name, None)
+    if not callable(callable_object):
+        raise ControlledError("WORKER_CALLABLE")
+    result = callable_object(request)
+    if not isinstance(result, dict):
+        raise ControlledError("WORKER_RESULT_TYPE")
+    atomic_write_json(result_path, result)
+    with tempfile.TemporaryDirectory(prefix="u002_worker_validate_") as temp_name:
+        temp = Path(temp_name)
+        validator_call(
+            protocol_validator.resolve(),
+            ["--validate-result", str(result_path), "--protocol-bundle", str(protocol_bundle.resolve())],
+            None, temp, "worker_result", timeout=120,
+        )
+
+
+def self_test(deps: Dependencies) -> None:
+    checks: List[str] = []
+
+    def ck(name: str, value: bool) -> None:
+        if not value:
+            raise ControlledError("SELFTEST_" + name)
+        checks.append(name)
+
+    with tempfile.TemporaryDirectory(prefix="u002_e08_selftest_") as raw:
+        root = Path(raw)
+        hashes = dependency_preflight(deps, root / "dependency")
+        ck("dependency_count", len(hashes) == 6)
+        plan = {
+            "ExecutionOrder": ["U002.Test.One@0.1.0", "U002.Test.Two@0.2.0"],
+            "SelectedModules": [
+                {"PlanOrder": 0, "ModuleId": "U002.Test.One", "ModuleVersion": "0.1.0"},
+                {"PlanOrder": 1, "ModuleId": "U002.Test.Two", "ModuleVersion": "0.2.0"},
+            ],
+        }
+        ck("order", parse_execution_order(plan) == [("U002.Test.One", "0.1.0"), ("U002.Test.Two", "0.2.0")])
+        for name, mutation in (
+            ("object_order", [{"ModuleId": "U002.Test.One"}]),
+            ("id_only", ["U002.Test.One"]),
+            ("duplicate", ["U002.Test.One@0.1.0", "U002.Test.One@0.1.0"]),
+        ):
+            bad = dict(plan)
+            bad["ExecutionOrder"] = mutation
+            try:
+                parse_execution_order(bad)
+            except ControlledError:
+                ck(name, True)
+            else:
+                ck(name, False)
+        quality = {"QualityDecision": {"BlockingIssues": 0, "Status": "PASS"}}
+        validate_quality_decision(quality)
+        ck("quality_pass", True)
+        for name, value in (
+            ("quality_bool", {"BlockingIssues": False, "Status": "PASS"}),
+            ("quality_status", {"BlockingIssues": 0, "Status": "pass"}),
+            ("quality_extra", {"BlockingIssues": 0, "Status": "PASS", "Extra": 1}),
+        ):
+            try:
+                validate_quality_decision({"QualityDecision": value})
+            except ControlledError:
+                ck(name, True)
+            else:
+                ck(name, False)
+        ck("safe_relative", safe_relative("a/b.csv") == "a/b.csv")
+        for name, value in (("traversal", "../a"), ("backslash", "a\\b"), ("absolute", "/a")):
+            try:
+                safe_relative(value)
+            except ControlledError:
+                ck(name, True)
+            else:
+                ck(name, False)
+        ck("semver", semver_tuple("1.10.0") > semver_tuple("1.2.9"))
+        ck("canonical", canonical_bytes({"b": 1, "a": 2}) == b'{"a":2,"b":1}')
+        data = root / "atomic.json"
+        atomic_write_json(data, {"ok": True})
+        ck("atomic", read_json(data, "SELFTEST") == {"ok": True})
+        ck("no_temp", not data.with_name(data.name + ".tmp").exists())
+        ck("artifact_kind_json", infer_payload_kind("application/json", "a.json") == "JSON")
+        ck("artifact_kind_table", infer_payload_kind("text/csv", "a.csv") == "TABLE")
+        source_text = Path(__file__).read_text(encoding="utf-8-sig")
+        ck("execute_dispatch", "execute_governed_run(" in source_text and "--execute-run" in source_text)
+        rejected_placeholder = "FORMAL EXECUTION" + " REQUIRES INDEPENDENT GATE"
+        ck("no_placeholder", rejected_placeholder not in source_text)
+        ck("worker_dispatch", "module_worker(" in source_text and "--module-worker" in source_text)
+        ck("version", VERSION == "0.8")
+        binding_manifest = {
+            "RequiredInputs": [{"PortId": "primary_signal", "Role": "PRIMARY"}],
+            "OptionalInputs": [],
+        }
+        binding_preflight = {"SignalBindings": [{
+            "ModuleId": "U002.Test.One", "ModuleVersion": "0.1.0",
+            "PortId": "primary_signal", "SelectionMode": "EXPLICIT",
+            "CanonicalNames": ["Synthetic.Primary"],
+            "Signals": [{
+                "CanonicalName": "Synthetic.Primary", "CanId": 1, "Channel": 2,
+                "MessageName": "SyntheticMessage", "SignalName": "SyntheticSignal",
+                "Unit": "m", "ValueKind": "NUMERIC", "SignalRole": "MEASUREMENT",
+                "HoldPolicy": "BOUNDED", "MaxAgeFrames": 1,
+                "Columns": {
+                    key: "Synthetic.Primary__" + key for key in D2_COLUMN_KEYS
+                },
+            }],
+        }]}
+        bound = normalize_bound_signals(
+            binding_preflight, binding_manifest, "U002.Test.One", "0.1.0"
+        )
+        ck("nested_count", len(bound) == 1)
+        ck("nested_canonical", bound[0]["CanonicalNames"] == ["Synthetic.Primary"])
+        ck("nested_d2", bound[0]["D2Columns"] == [
+            "Synthetic.Primary__" + key for key in D2_COLUMN_KEYS
+        ])
+        ck("nested_d3", bound[0]["D3SemanticProjection"]["SignalName"] == ["SyntheticSignal"])
+        ck("artifact_only", normalize_bound_signals({}, {}, "U002.Test.Two", "0.2.0") == tuple())
+        damaged = json.loads(json.dumps(binding_preflight))
+        del damaged["SignalBindings"][0]["Signals"][0]["Columns"]["valid"]
+        try:
+            normalize_bound_signals(damaged, binding_manifest, "U002.Test.One", "0.1.0")
+        except ControlledError:
+            ck("nested_fail_closed", True)
+        else:
+            ck("nested_fail_closed", False)
+        normalized_full = normalize_scope({
+            "ResolvedScope": {
+                "ScopeType": "FULL_CASE", "FrameStart": 100, "FrameEnd": 200,
+            }
+        })
+        ck("full_scope_null", normalized_full == {
+            "ScopeType": "FULL_CASE", "FrameStart": None, "FrameEnd": None,
+        })
+        ck("count", len(checks) == 30)
+    if len(checks) != 31:
+        raise ControlledError("SELFTEST_COUNT")
+    print(SELFTEST_CAPSULE)
+
+
+def add_dependency_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--engine")
+    parser.add_argument("--protocol-bundle")
+    parser.add_argument("--protocol-validator")
+    parser.add_argument("--protocol-promotion-evidence")
+    parser.add_argument("--schema-bundle")
+    parser.add_argument("--contract-validator")
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="U002 Controlled Stage Executor v0.8")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dependency-preflight", action="store_true")
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--execute-run", action="store_true")
+    mode.add_argument("--module-worker", action="store_true")
+    add_dependency_arguments(parser)
+    parser.add_argument("--preflight")
+    parser.add_argument("--software-plan")
+    parser.add_argument("--modules-root")
+    parser.add_argument("--u001-package")
+    parser.add_argument("--run-root")
+    parser.add_argument("--module-timeout-seconds", type=int, default=600)
+    parser.add_argument("--max-retained-log-bytes", type=int, default=262144)
+    parser.add_argument("--module-file")
+    parser.add_argument("--callable")
+    parser.add_argument("--request")
+    parser.add_argument("--result")
+    args = parser.parse_args(argv)
+    if args.module_worker:
+        required = (args.module_file, args.callable, args.request, args.result,
+                    args.protocol_bundle, args.protocol_validator)
+        if not all(required):
+            parser.error("--module-worker requires module file, callable, request and result")
+    else:
+        dependencies = (args.engine, args.protocol_bundle, args.protocol_validator,
+                        args.protocol_promotion_evidence, args.schema_bundle,
+                        args.contract_validator)
+        if not all(dependencies):
+            parser.error("selected action requires all six frozen dependency paths")
+    if args.execute_run:
+        required = (args.preflight, args.software_plan, args.modules_root, args.u001_package, args.run_root)
+        if not all(required):
+            parser.error("--execute-run requires preflight, plan, modules root, U001 package and run root")
+    return args
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        if args.module_worker:
+            module_worker(
+                Path(args.module_file), args.callable, Path(args.request), Path(args.result),
+                Path(args.protocol_bundle), Path(args.protocol_validator),
+            )
+            return 0
+        deps = dependencies_from_args(args)
+        if args.dependency_preflight:
+            with tempfile.TemporaryDirectory(prefix="u002_e08_dp_") as raw:
+                dependency_preflight(deps, Path(raw))
+            print(DEPENDENCY_CAPSULE)
+            return 0
+        if args.self_test:
+            self_test(deps)
+            return 0
+        run_dir, calls, artifacts = execute_governed_run(
+            Path(args.software_plan).resolve(), Path(args.preflight).resolve(),
+            Path(args.modules_root).resolve(), Path(args.u001_package).resolve(),
+            Path(args.run_root).resolve(), deps,
+            args.module_timeout_seconds, args.max_retained_log_bytes,
+        )
+        print(f"{RUN_CAPSULE} N-R1-M{calls}-A{artifacts}-X0 C-0")
+        return 0
+    except ControlledError as exc:
+        title = "E08WORK" if args.module_worker else (
+            "E08DP" if args.dependency_preflight else ("E08ST" if args.self_test else RUN_CAPSULE)
+        )
+        print(f"{title} N-X1 C-7 K-{exc.reason}")
+        return 7
+    except Exception as exc:
+        title = "E08WORK" if args.module_worker else (
+            "E08DP" if args.dependency_preflight else ("E08ST" if args.self_test else RUN_CAPSULE)
+        )
+        print(f"{title} N-X1 C-7 K-{stable_reason(exc.__class__.__name__)}")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
