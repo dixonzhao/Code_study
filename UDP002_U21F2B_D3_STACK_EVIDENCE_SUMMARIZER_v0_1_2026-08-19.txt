@@ -1,0 +1,145 @@
+UDP002 U21F2B STACK EVIDENCE SUMMARIZER D3
+
+Task ID: U21F2B-D3
+Version: 0.1
+Date: 2026-08-19
+Owner: Zhao Zhili
+Status: READ-ONLY EVIDENCE PARSING ONLY
+
+
+1. PURPOSE
+
+Parse the already retained U21F2B timing diagnostic stack logs and inspect the
+frozen Executor AST to identify the exact repeated project call site and wait
+class. Do not execute, import, edit or copy the Executor.
+
+
+2. REQUIRED WORKING SET
+
+All paths are relative to C-CODE.
+
+Direct frozen Executor file:
+
+  U-UDP002\04_TEMP\u002_controlled_stage_executor_v0_2.py.txt
+
+Existing diagnostic directory:
+
+  U-UDP002\05_TESTS\01_INTERNAL\U21F2B_DIAG01
+
+It must contain `u21f2b_timing_diagnostic.json` and existing `stack_*.log`
+files. No Core, Protocol, Engine or U001 files are required for D3.
+
+Give a fresh Copilot chat only this instruction. It generates one downloadable
+file and reads the working set at execution time.
+
+
+3. GENERATE EXACTLY ONE FILE
+
+  u002_u21f2b_stack_evidence_summarizer_v0_1.py.txt
+
+Use Python standard library only. Put it directly in U-UDP002\04_TEMP. Do not
+generate BAT, PowerShell, corrected Executor, replacement evidence or report.
+
+
+4. READ-ONLY BEHAVIOR
+
+The summarizer must:
+
+- require the Executor and diagnostic directory as explicit CLI paths;
+- reject symlinks and missing/non-regular inputs;
+- hash the Executor before and after parsing and require equality;
+- parse every `stack_*.log` already present, without creating stack logs;
+- parse the Executor with `ast.parse()` but never import/run it;
+- refuse to write inside the diagnostic directory;
+- write no project artifact other than its terminal capsule;
+- redact absolute paths and never print source lines or hashes.
+
+
+5. STACK PARSING
+
+For each stack-log file:
+
+1. split all faulthandler dumps;
+2. extract normalized frames: basename, line number and function;
+3. identify standard-library wait class:
+   SUBPROCESS_WAIT, SLEEP_WAIT, IO_WAIT, LOCK_WAIT or OTHER;
+4. select the nearest project-code caller above that wait;
+5. group identical `(basename, line, function, wait_class)` locations;
+6. record process count, total dumps, wait-classified dumps and unique project
+   call sites.
+
+Do not accept the previous D1 MEMO classification; rebuild from raw logs.
+
+
+6. STATIC AST RESOLUTION
+
+For each grouped Executor location, use the frozen AST to resolve:
+
+- enclosing function;
+- statement kind;
+- direct call target names on that statement;
+- whether the statement constructs or waits for a subprocess;
+- whether a child command contains `--self-test`, `--module-worker`,
+  `--dependency-preflight` or none;
+- whether the same statement is inside a loop and the statically visible loop
+  bound when it is a literal/range/list length.
+
+Do not infer runtime values not present in logs/AST. Use UNKNOWN when unresolved.
+
+
+7. SELF-TEST
+
+`--self-test` uses private synthetic stack text and source text only. It proves
+exactly 14 checks covering multi-PID/multi-dump parsing, five wait classes,
+nearest project caller selection, AST call resolution, CLI-mode detection,
+loop detection, path redaction, source immutability and stable capsule format.
+
+Success:
+
+  U21F2BD3ST N-T14-P4-A5-I2-X0 C-0
+
+
+8. CMD FROM C-CODE ROOT
+
+Self-test:
+
+  python ".\U-UDP002\04_TEMP\u002_u21f2b_stack_evidence_summarizer_v0_1.py.txt" --self-test
+
+If C-0, summarize retained evidence:
+
+  python ".\U-UDP002\04_TEMP\u002_u21f2b_stack_evidence_summarizer_v0_1.py.txt" --summarize --executor ".\U-UDP002\04_TEMP\u002_controlled_stage_executor_v0_2.py.txt" --diagnostic-dir ".\U-UDP002\05_TESTS\01_INTERNAL\U21F2B_DIAG01"
+
+
+9. RETURN
+
+  U21F2BD3 N-P<p>-S<s>-W<w>-A<a>-C<c>-I1-X0 C-0
+
+Meanings:
+
+- P parsed stack-log/PID count;
+- S total parsed dumps;
+- W dumps with a classified wait;
+- A unique project call sites nearest waits;
+- C sites with AST-resolved direct call information;
+- I1 Executor identity unchanged.
+
+Then return at most three short lines for the three highest-count locations:
+
+  MEMO1-L<line>-<function>-CALL-<target>-WAIT-<class>-MODE-<mode>-LOOP-<bound>-N<count>
+  MEMO2-...
+  MEMO3-...
+
+Use only basenames/functions/call names, not source text or absolute paths.
+
+Failure:
+
+  U21F2BD3 N-P<p>-S<s>-W<w>-A<a>-C<c>-I<i>-X<x> C-7 K-<REASON>
+
+
+10. BOUNDARY
+
+D3 C-0 means retained evidence was summarized. It does not accept U21F2B or
+authorize correction. The project lead will decide whether one implementation
+defect has been localized sufficiently for a versioned correction.
+
+END OF D3
