@@ -1,0 +1,67 @@
+UDP002 U22A0 - MODULAR CONTRACT SCAFFOLD
+Date: 2026-08-20
+
+PURPOSE
+
+Create the clean U22 directory structure and authoritative machine contracts
+before any Engine or algorithm implementation is accepted.
+
+IMPORTANT ARCHITECTURE RULE
+
+The downloaded installer is only a transport/bootstrap file. Installed U002
+software is not monolithic. The active workspace is separated into:
+
+  01_PROGRAMS/core
+  01_PROGRAMS/modules/S0
+  01_PROGRAMS/modules/S1
+  ...
+  01_PROGRAMS/modules/S7
+
+Every future Module owns its own directory containing:
+
+  module_manifest.json
+  algorithm_card.json
+  configuration_schema.json (when needed)
+  implementation.py
+  selftest.py
+
+The Engine may discover a manifest but may not activate a Module unless an
+explicit Run Plan selects it.
+
+INSTALLED MACHINE CONTRACTS
+
+1. Architecture and directory contract.
+2. Strict Module Manifest JSON Schema.
+3. Strict Artifact Manifest JSON Schema.
+4. Strict Run Configuration JSON Schema.
+5. Strict Algorithm Card JSON Schema.
+6. Stage Ownership Contract for S0-S7.
+
+No analysis algorithm is installed in U22A0.
+
+RUN FROM C-CODE IN WINDOWS CMD
+
+Download this program directly into .\U-UDP002\04_TEMP:
+
+  udp002_u22a0_contract_scaffold_installer_v0_1.py.txt
+
+Then run:
+
+python .\U-UDP002\04_TEMP\udp002_u22a0_contract_scaffold_installer_v0_1.py.txt --workspace-root .\U-UDP002
+
+EXPECTED
+
+  U22A0 N-D25-C6-M1-R1-X0 C-0
+
+R1 means the completed U22R0 reset utility was moved into the U21 legacy
+archive. R0 is also acceptable only if that utility was already archived.
+
+RETURN
+
+Return only the single U22A0 line.
+
+NEXT
+
+U22A1 will implement and independently test the Core Contract Validator. It
+will not contain Registry, Engine or any S0-S7 algorithm. Each responsibility
+will be introduced and accepted separately.
