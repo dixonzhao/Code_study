@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Read-only diagnosis for a failed G2R1 Executor v0.5 candidate launch."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+import re
+
+
+CAPSULE = "G2R1D1"
+LOG_REL = Path("04_TEMP/.G2R1_V05_GATE_LOGS")
+FILES = (
+    "candidate_dependency.stdout.txt",
+    "candidate_dependency.stderr.txt",
+    "candidate_selftest.stdout.txt",
+    "candidate_selftest.stderr.txt",
+)
+
+
+def compact(value: str, limit: int = 220) -> str:
+    value = re.sub(r"\s+", "_", value.strip())
+    value = re.sub(r"[^A-Za-z0-9_.:@+\-]", "?", value)
+    return (value[:limit] or "EMPTY")
+
+
+def last_nonempty(path: Path) -> str:
+    if not path.is_file():
+        return "MISSING"
+    try:
+        lines = [line for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+                 if line.strip()]
+    except OSError:
+        return "UNREADABLE"
+    return compact(lines[-1]) if lines else "EMPTY"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--workspace-root", required=True)
+    args = parser.parse_args()
+    root = Path(args.workspace_root).resolve()
+    logs = root / LOG_REL
+    if not logs.is_dir():
+        print(f"{CAPSULE} N-L0-X1 C-7 K-GATE_LOG_MISSING")
+        return 7
+    values = [last_nonempty(logs / name) for name in FILES]
+    present = sum(value != "MISSING" for value in values)
+    print(f"{CAPSULE} N-L{present}-X0 C-0")
+    print("D-" + "|".join(values))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
