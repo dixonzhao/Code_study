@@ -1,0 +1,92 @@
+@echo off
+setlocal EnableExtensions DisableDelayedExpansion
+cd /d "%~dp0\..\.."
+
+set "TEMP=U-UDP002\04_TEMP"
+set "PROGRAMS=U-UDP002\01_PROGRAMS"
+set "PROMO=U-UDP002\05_TESTS\02_ACCEPTANCE\U21F2C_PROMOTION_V01"
+set "ARCH=%TEMP%\A-Archive\U21F2C_CLOSEOUT_20260819"
+set "CAP=%PROMO%\u21f2c_promotion_capsule.txt"
+set "RUNTIME=%PROGRAMS%\u002_controlled_stage_executor_v0_3.py"
+set "EXPECTED=U21F2CP1 N-G2-H1-C1-D1-R1-I9-X0 C-0"
+set /a MOVED=0
+set /a MISSING=0
+
+if not exist "%CAP%" goto :BLOCKED
+findstr /x /c:"%EXPECTED%" "%CAP%" >nul 2>&1
+if errorlevel 1 goto :BLOCKED
+if not exist "%RUNTIME%" goto :BLOCKED
+if not exist "%TEMP%\u002_core_contract_schema_bundle_v0_1.json.txt" goto :BLOCKED
+if not exist "%TEMP%\u002_core_contract_validator_v0_1.py.txt" goto :BLOCKED
+if exist "%ARCH%" goto :CONFLICT
+
+mkdir "%ARCH%" >nul 2>&1
+if errorlevel 1 goto :BLOCKED
+>"%ARCH%\u21f2c_temp_closeout_manifest.csv" echo FileName,Result
+
+call :MOVE_ONE "u002_controlled_stage_executor_v0_2.py.txt"
+if errorlevel 1 goto :CONFLICT
+call :MOVE_ONE "u002_controlled_stage_executor_v0_3.py.txt"
+if errorlevel 1 goto :CONFLICT
+call :MOVE_ONE "u002_u21f2b_dependency_path_probe_v0_1.py.txt"
+if errorlevel 1 goto :CONFLICT
+call :MOVE_ONE "u002_u21f2b_selftest_timing_diagnostic_v0_1.py.txt"
+if errorlevel 1 goto :CONFLICT
+call :MOVE_ONE "u002_u21f2b_stack_evidence_summarizer_v0_1.py.txt"
+if errorlevel 1 goto :CONFLICT
+call :MOVE_ONE "u002_u21f2b_line101_static_probe_v0_1.py.txt"
+if errorlevel 1 goto :CONFLICT
+call :MOVE_ONE "u002_u21f2b_static_controlflow_budget_audit_v0_1.py.txt"
+if errorlevel 1 goto :CONFLICT
+call :MOVE_ONE "u002_u21f2c_executor_acceptance_gate_v0_1.py.txt"
+if errorlevel 1 goto :CONFLICT
+call :MOVE_ONE "u002_u21f2c_promote_accepted_executor_v0_1.py.txt"
+if errorlevel 1 goto :CONFLICT
+
+call :MOVE_ONE "UDP002_U21F2B_00_START_HERE_CONTROLLED_STAGE_EXECUTOR_V02_v0_1_2026-08-19.txt"
+if errorlevel 1 goto :CONFLICT
+call :MOVE_ONE "UDP002_U21F2B_D1_DEPENDENCY_FILE_DIAGNOSTIC_v0_1_2026-08-19.txt"
+if errorlevel 1 goto :CONFLICT
+call :MOVE_ONE "UDP002_U21F2B_D2_TIMING_RESULT_EXTRACTION_v0_1_2026-08-19.txt"
+if errorlevel 1 goto :CONFLICT
+call :MOVE_ONE "UDP002_U21F2B_D3_STACK_EVIDENCE_SUMMARIZER_v0_1_2026-08-19.txt"
+if errorlevel 1 goto :CONFLICT
+call :MOVE_ONE "UDP002_U21F2B_D4_LINE101_STATIC_CALL_CHAIN_PROBE_v0_1_2026-08-19.txt"
+if errorlevel 1 goto :CONFLICT
+call :MOVE_ONE "UDP002_U21F2B_D5_STATIC_CONTROL_FLOW_AND_RUNTIME_BUDGET_AUDIT_v0_1_2026-08-19.txt"
+if errorlevel 1 goto :CONFLICT
+call :MOVE_ONE "UDP002_U21F2B_SELFTEST_TIMING_DIAGNOSTIC_START_HERE_v0_1_2026-08-19.txt"
+if errorlevel 1 goto :CONFLICT
+call :MOVE_ONE "UDP002_U21F2B_V03_CONTROLFLOW_TIMEOUT_CORRECTION_START_HERE_v0_1_2026-08-19.txt"
+if errorlevel 1 goto :CONFLICT
+call :MOVE_ONE "UDP002_U21F2C_00_START_HERE_INDEPENDENT_EXECUTOR_GATE_V03_v0_1_2026-08-19.txt"
+if errorlevel 1 goto :CONFLICT
+call :MOVE_ONE "UDP002_U21F2C_PROMOTION_AND_CLOSEOUT_START_HERE_v0_1_2026-08-19.txt"
+if errorlevel 1 goto :CONFLICT
+call :MOVE_ONE "UDP002_U21F2C_TEMP_CLOSEOUT_v0_1_2026-08-19.cmd.txt"
+if errorlevel 1 goto :CONFLICT
+
+echo U21F2CCL N-P1-K2-A1-X0 C-0
+exit /b 0
+
+:MOVE_ONE
+set "NAME=%~1"
+if not exist "%TEMP%\%NAME%" (
+  >>"%ARCH%\u21f2c_temp_closeout_manifest.csv" echo "%NAME%",MISSING
+  set /a MISSING+=1
+  exit /b 0
+)
+if exist "%ARCH%\%NAME%" exit /b 1
+move /y "%TEMP%\%NAME%" "%ARCH%\%NAME%" >nul
+if errorlevel 1 exit /b 1
+>>"%ARCH%\u21f2c_temp_closeout_manifest.csv" echo "%NAME%",MOVED
+set /a MOVED+=1
+exit /b 0
+
+:CONFLICT
+echo U21F2CCL N-P0-K2-A0-X1 C-7 K-ARCHIVE_CONFLICT
+exit /b 7
+
+:BLOCKED
+echo U21F2CCL N-P0-K0-A0-X1 C-7 K-PROMOTION_EVIDENCE
+exit /b 7
