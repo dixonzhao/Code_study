@@ -1,0 +1,37 @@
+UDP002 U21G G2 D4 - QualityDecision Shape Diagnostic v0.1
+Date: 2026-08-19
+Status: FINAL READ-ONLY FIELD EXTRACTION BEFORE CORRECTION
+
+D3 result:
+
+G2D3 N-E3-D0-S3-L0-A3-I0-V0-N0-PM1-IM0-POZ-QD-QK2-QA0-QB0-QZ1-H30-X0 C-0 K-EXEC_ORDER_STRING_IDENTITY_CONTRACT_GAP
+
+Decision already established:
+
+- U21D emits three ordered ModuleId@ModuleVersion strings;
+- those strings exactly match the zero-based SelectedModules order;
+- U21F v0.3 rejected that accepted representation;
+- correction ownership belongs to a versioned U21F Executor v0.4, not U21D,
+  U21E, G2 Module Packs or company data.
+
+D4 extracts only the two generic QualityDecision field names and compact scalar
+types/values. This prevents a v0.4 correction from passing ExecutionOrder and
+then immediately failing the next semantic predicate. No business signal or
+company data is read or printed.
+
+Place directly in U-UDP002\04_TEMP:
+
+u002_g2_quality_decision_shape_diagnostic_v0_1.py.txt
+
+CMD from C-CODE:
+
+python U-UDP002\04_TEMP\u002_g2_quality_decision_shape_diagnostic_v0_1.py.txt --self-test
+
+Normal self-test C-0 does not need to be returned. Stop on C-7.
+
+Then:
+
+python U-UDP002\04_TEMP\u002_g2_quality_decision_shape_diagnostic_v0_1.py.txt --diagnose --g2-staging U-UDP002\05_TESTS\02_ACCEPTANCE\U21G_G2_VERTICAL_V01.staging
+
+Return only the G2D4 line. After D4, no additional evidence probe is planned;
+the next packet will be the versioned U21F v0.4 correction specification.
