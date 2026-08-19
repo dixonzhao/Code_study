@@ -1,0 +1,162 @@
+UDP002 U21F2B SELF-TEST TIMING DIAGNOSTIC
+
+Task ID: U21F2B-DIAG-01
+Instruction Version: 0.1
+Date: 2026-08-19
+Owner: Zhao Zhili
+Status: APPROVED READ-ONLY DIAGNOSIS ONLY
+
+
+1. PURPOSE
+
+Localize why the frozen U21F2B Executor self-test produced no capsule within
+eight minutes. Capture periodic Python stacks from the parent and child
+processes for at most 120 seconds without modifying the Executor or any frozen
+dependency. Do not correct, refactor or optimize the Executor in this task.
+
+
+2. REQUIRED WORKING SET
+
+All paths are relative to C-CODE.
+
+FILE 1 - frozen candidate, direct file in U-UDP002\04_TEMP:
+  u002_controlled_stage_executor_v0_2.py.txt
+
+FILES 2-4 - frozen runtime programs, direct files in U-UDP002\01_PROGRAMS:
+  u002_engine_skeleton_v0_1.py
+  u002_module_runtime_protocol_bundle_v0_2.json
+  u002_module_runtime_protocol_validator_v0_2.py
+
+FILE 5 - frozen Promotion Evidence, direct file under
+U-UDP002\05_TESTS\02_ACCEPTANCE\U21F2A_PROMOTION_V02:
+  u21f2a_promotion_acceptance.json
+
+FILES 6-7 - frozen Core Contract inputs, direct files in U-UDP002\04_TEMP,
+not inside A-Archive:
+  u002_core_contract_schema_bundle_v0_1.json.txt
+  u002_core_contract_validator_v0_1.py.txt
+
+Give a fresh Copilot chat exactly two files:
+
+1. this complete instruction;
+2. the frozen Executor candidate.
+
+The six dependencies are not Copilot inputs. They are read from their declared
+disk locations only when the generated diagnostic executes.
+
+
+3. GENERATE EXACTLY ONE DOWNLOADABLE FILE
+
+  u002_u21f2b_selftest_timing_diagnostic_v0_1.py.txt
+
+Use Python standard library only, UTF-8/LF and English identifiers. Put it
+directly in U-UDP002\04_TEMP. Do not generate BAT, PowerShell, README, corrected
+Executor, replacement dependency or additional tool.
+
+
+4. SAFETY BOUNDARY
+
+The diagnostic must:
+
+- reject symlinks and missing/non-regular inputs;
+- hash the Executor and six dependencies before launch;
+- never import, rewrite or patch the Executor;
+- never create a U002 Run or write into U001/01_PROGRAMS;
+- keep evidence below one fresh diagnostic output directory;
+- launch the unchanged Executor with its original `--self-test` arguments;
+- impose one hard wall-clock limit of 120 seconds;
+- terminate the complete descendant process tree after the limit;
+- hash all seven inputs again and require exact immutability;
+- redact absolute paths from all output evidence.
+
+
+5. DIAGNOSTIC MECHANISM
+
+Implement an outer supervisor and an automatically generated private
+`sitecustomize.py` bootstrap below the diagnostic output directory.
+
+Load the bootstrap only in the supervised process tree through a temporary
+PYTHONPATH entry. In every Python process it must:
+
+- enable faulthandler;
+- create one `stack_<pid>.log` below the diagnostic directory;
+- call `faulthandler.dump_traceback_later(15, repeat=True, file=...)`;
+- never read or alter a project file.
+
+The supervisor sets PYTHONUNBUFFERED=1 and redirects Executor stdout/stderr to
+bounded file-backed logs. On Windows, after 120 seconds terminate the full tree
+with `taskkill /PID <pid> /T /F`; on POSIX use a new process group and kill the
+group. Clean temporary bootstrap state after termination.
+
+
+6. POST-RUN ANALYSIS
+
+Write exactly one structured result:
+
+  u21f2b_timing_diagnostic.json
+
+Record only:
+
+- version, elapsed seconds and child return code or TIME_LIMIT;
+- observed process and stack-dump counts;
+- repeated project-code locations as basename, line and function;
+- dominant repeated location and count;
+- bounded stdout/stderr tails;
+- seven before/after hash-equality booleans;
+- complete-tree termination result;
+- no absolute paths, raw hashes or source contents.
+
+Prefer the deepest repeated frame belonging to the Executor or a generated
+private synthetic Module. Ignore standard-library wait frames when their
+project-code caller is present.
+
+
+7. DIAGNOSTIC SELF-TEST
+
+`--self-test` uses private synthetic quick-exit/sleeper scripts and proves
+exactly 12 checks: stack dumps, shortened test cap, child-tree termination,
+dominant-frame extraction, bounded logs, path redaction, output collision
+denial, seven-input immutability logic, no Run creation, stable capsules,
+Windows/POSIX dispatch and X0 uncontrolled failures.
+
+Success:
+
+  U21F2BD1ST N-T12-P3-D3-I3-X0 C-0
+
+
+8. CMD FROM C-CODE ROOT
+
+Self-test:
+
+  python ".\U-UDP002\04_TEMP\u002_u21f2b_selftest_timing_diagnostic_v0_1.py.txt" --self-test
+
+If C-0, bounded diagnosis:
+
+  python ".\U-UDP002\04_TEMP\u002_u21f2b_selftest_timing_diagnostic_v0_1.py.txt" --diagnose --executor ".\U-UDP002\04_TEMP\u002_controlled_stage_executor_v0_2.py.txt" --engine ".\U-UDP002\01_PROGRAMS\u002_engine_skeleton_v0_1.py" --protocol-bundle ".\U-UDP002\01_PROGRAMS\u002_module_runtime_protocol_bundle_v0_2.json" --protocol-validator ".\U-UDP002\01_PROGRAMS\u002_module_runtime_protocol_validator_v0_2.py" --protocol-promotion-evidence ".\U-UDP002\05_TESTS\02_ACCEPTANCE\U21F2A_PROMOTION_V02\u21f2a_promotion_acceptance.json" --schema-bundle ".\U-UDP002\04_TEMP\u002_core_contract_schema_bundle_v0_1.json.txt" --contract-validator ".\U-UDP002\04_TEMP\u002_core_contract_validator_v0_1.py.txt" --out ".\U-UDP002\05_TESTS\01_INTERNAL\U21F2B_DIAG01"
+
+
+9. RETURN
+
+Completed diagnosis:
+
+  U21F2BD1 N-L1-P<p>-S<s>-R<r>-T<t>-I7-X0 C-0
+
+Add at most two short lines:
+
+  MEMO1-TOP-<basename>@L<line>@<function>-N<count>
+  MEMO2-CHILD-<basename>@L<line>@<function>-N<count>
+
+Failure:
+
+  U21F2BD1 N-L<l>-P<p>-S<s>-R<r>-T<t>-I<i>-X<x> C-7 K-<REASON>
+
+Do not return hashes, tables or logs through the manual channel. Retain the JSON
+and stack logs locally.
+
+
+10. SUCCESS BOUNDARY
+
+Diagnostic C-0 only proves that the repeated wait was localized while all seven
+inputs remained unchanged. It does not accept U21F2B or authorize correction.
+
+END OF U21F2B TIMING DIAGNOSTIC
