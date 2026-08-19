@@ -1,0 +1,351 @@
+#!/usr/bin/env python3
+"""U21G G0 read-only runtime surface probe.
+
+Project-owned reference implementation. It checks exact installed filenames,
+hashes and public CLI options without importing project programs or reading
+company data. Only relative paths and identities are persisted.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
+
+
+VERSION = "0.1"
+SELFTEST_CAPSULE = "G0ST N-T18-P6-C2-S3-H6-A6-X0 C-0"
+PROBE_CAPSULE = "G0P N-P6-C2-S3-H6-A6-X0 C-0"
+MAX_HELP_BYTES = 262_144
+HELP_TIMEOUT_SECONDS = 15.0
+
+PRIMARY_PROGRAMS: Mapping[str, Tuple[str, Tuple[str, ...]]] = {
+    "ENGINE": (
+        "u002_engine_skeleton_v0_1.py",
+        ("--self-test", "--init-run", "--synthetic-smoke", "--synthetic-failure",
+         "--inspect-run", "--schema-bundle", "--contract-validator"),
+    ),
+    "REGISTRY": (
+        "u002_module_registry_v0_1.py",
+        ("--self-test", "--scan", "--modules-root", "--out", "--schema-bundle",
+         "--contract-validator"),
+    ),
+    "ACTIVATION": (
+        "u002_module_activation_controller_v0_1.py",
+        ("--self-test", "--activate-one", "--registry-program", "--modules-root",
+         "--module-id", "--module-version", "--out", "--timeout-seconds"),
+    ),
+    "PLAN": (
+        "u002_qualified_module_plan_resolver_v0_1.py",
+        ("--self-test", "--resolve-plan", "--registry-program",
+         "--activation-controller", "--modules-root", "--activation-evidence-dir",
+         "--select", "--out"),
+    ),
+    "PREFLIGHT": (
+        "u002_run_preflight_data_binder_v0_1.py",
+        ("--self-test", "--bind-run", "--software-plan", "--u001-package",
+         "--modules-root", "--run-request", "--out"),
+    ),
+    "EXECUTOR": (
+        "u002_controlled_stage_executor_v0_3.py",
+        ("--self-test", "--dependency-preflight", "--engine", "--protocol-bundle",
+         "--protocol-validator", "--protocol-promotion-evidence", "--schema-bundle",
+         "--contract-validator"),
+    ),
+}
+
+CORE_FILES = (
+    "u002_core_contract_schema_bundle_v0_1.json.txt",
+    "u002_core_contract_validator_v0_1.py.txt",
+)
+
+SUPPORT_FILES = (
+    ("01_PROGRAMS", "u002_module_runtime_protocol_bundle_v0_2.json"),
+    ("01_PROGRAMS", "u002_module_runtime_protocol_validator_v0_2.py"),
+    ("05_TESTS/02_ACCEPTANCE/U21F2A_PROMOTION_V02", "u21f2a_promotion_acceptance.json"),
+)
+
+
+class ProbeError(Exception):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(text)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+
+
+def relative_posix(path: Path, root: Path) -> str:
+    try:
+        return path.resolve(strict=True).relative_to(root.resolve(strict=True)).as_posix()
+    except (ValueError, OSError) as exc:
+        raise ProbeError("PATH_CONTAINMENT") from exc
+
+
+def require_regular_file(path: Path, reason: str) -> None:
+    if not path.is_file() or path.is_symlink():
+        raise ProbeError(reason)
+
+
+def bounded_help(program: Path) -> Tuple[str, str]:
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(program), "--help"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=HELP_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ProbeError("HELP_TIMEOUT") from exc
+    if completed.returncode != 0:
+        raise ProbeError("HELP_EXIT")
+    if len(completed.stdout) > MAX_HELP_BYTES or len(completed.stderr) > MAX_HELP_BYTES:
+        raise ProbeError("HELP_OVERSIZE")
+    return (
+        completed.stdout.decode("utf-8", errors="replace"),
+        completed.stderr.decode("utf-8", errors="replace"),
+    )
+
+
+def probe(workspace_root: Path, out_dir: Path) -> str:
+    workspace_root = workspace_root.resolve(strict=True)
+    programs_dir = workspace_root / "01_PROGRAMS"
+    temp_dir = workspace_root / "04_TEMP"
+    tests_dir = workspace_root / "05_TESTS"
+    for directory, reason in ((programs_dir, "PROGRAMS_DIR"), (temp_dir, "TEMP_DIR"),
+                              (tests_dir, "TESTS_DIR")):
+        if not directory.is_dir():
+            raise ProbeError(reason)
+    if out_dir.exists():
+        raise ProbeError("OUTPUT_EXISTS")
+
+    primary_records: List[dict] = []
+    for role, (filename, required_flags) in PRIMARY_PROGRAMS.items():
+        path = programs_dir / filename
+        require_regular_file(path, "PRIMARY_FILE")
+        stdout, stderr = bounded_help(path)
+        combined = stdout + "\n" + stderr
+        missing = [flag for flag in required_flags if flag not in combined]
+        if missing:
+            raise ProbeError("CLI_MISMATCH_" + role)
+        primary_records.append({
+            "Role": role,
+            "RelativePath": relative_posix(path, workspace_root),
+            "Sha256": sha256_file(path),
+            "ByteSize": path.stat().st_size,
+            "RequiredFlags": list(required_flags),
+            "HelpExit": 0,
+        })
+
+    core_records: List[dict] = []
+    for filename in CORE_FILES:
+        path = temp_dir / filename
+        require_regular_file(path, "CORE_FILE")
+        core_records.append({
+            "RelativePath": relative_posix(path, workspace_root),
+            "Sha256": sha256_file(path),
+            "ByteSize": path.stat().st_size,
+        })
+
+    support_records: List[dict] = []
+    for relative_parent, filename in SUPPORT_FILES:
+        path = workspace_root / Path(relative_parent) / filename
+        require_regular_file(path, "SUPPORT_FILE")
+        support_records.append({
+            "RelativePath": relative_posix(path, workspace_root),
+            "Sha256": sha256_file(path),
+            "ByteSize": path.stat().st_size,
+        })
+
+    report = {
+        "ProbeType": "U002_U21G_RUNTIME_SURFACE",
+        "ProbeVersion": VERSION,
+        "Status": "RUNTIME_SURFACE_READY",
+        "PrimaryPrograms": primary_records,
+        "CoreFiles": core_records,
+        "SupportFiles": support_records,
+        "Counts": {"Primary": 6, "Core": 2, "Support": 3, "Help": 6, "Cli": 6},
+        "AbsolutePathsPersisted": False,
+    }
+    out_dir.mkdir(parents=True, exist_ok=False)
+    atomic_write_text(out_dir / "u21g0_runtime_surface.json",
+                      json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+    atomic_write_text(out_dir / "u21g0_capsule.txt", PROBE_CAPSULE + "\n")
+    return PROBE_CAPSULE
+
+
+def write_stub(path: Path, flags: Sequence[str], *, exit_code: int = 0) -> None:
+    flag_list = repr(list(flags))
+    source = (
+        "import argparse\n"
+        "p=argparse.ArgumentParser()\n"
+        f"flags={flag_list}\n"
+        "for f in flags: p.add_argument(f, action='store_true')\n"
+        "p.parse_args()\n"
+        f"raise SystemExit({exit_code})\n"
+    )
+    atomic_write_text(path, source)
+
+
+def build_fixture(root: Path) -> None:
+    programs = root / "01_PROGRAMS"
+    temp = root / "04_TEMP"
+    programs.mkdir(parents=True)
+    temp.mkdir(parents=True)
+    for _, (filename, flags) in PRIMARY_PROGRAMS.items():
+        write_stub(programs / filename, flags)
+    for filename in CORE_FILES:
+        atomic_write_text(temp / filename, "{}\n")
+    for relative_parent, filename in SUPPORT_FILES:
+        atomic_write_text(root / relative_parent / filename, "{}\n")
+
+
+def self_test() -> str:
+    checks = 0
+
+    def ck(value: bool) -> None:
+        nonlocal checks
+        if not value:
+            raise AssertionError("SELFTEST_ASSERTION")
+        checks += 1
+
+    with tempfile.TemporaryDirectory(prefix="u21g0_") as raw:
+        base = Path(raw)
+        good = base / "GOOD"
+        build_fixture(good)
+        out = base / "OUT"
+        ck(probe(good, out) == PROBE_CAPSULE)
+        report = json.loads((out / "u21g0_runtime_surface.json").read_text(encoding="utf-8"))
+        ck(report["Status"] == "RUNTIME_SURFACE_READY")
+        ck(len(report["PrimaryPrograms"]) == 6)
+        ck(len(report["CoreFiles"]) == 2)
+        ck(len(report["SupportFiles"]) == 3)
+        ck(all(x["HelpExit"] == 0 for x in report["PrimaryPrograms"]))
+        ck(all(len(x["RequiredFlags"]) > 0 for x in report["PrimaryPrograms"]))
+        ck(report["AbsolutePathsPersisted"] is False)
+        ck(str(good.resolve()) not in (out / "u21g0_runtime_surface.json").read_text(encoding="utf-8"))
+        ck((out / "u21g0_capsule.txt").read_text(encoding="utf-8").strip() == PROBE_CAPSULE)
+
+        try:
+            probe(good, out)
+        except ProbeError as exc:
+            ck(exc.reason == "OUTPUT_EXISTS")
+        else:
+            raise AssertionError("EXISTING_OUTPUT_ACCEPTED")
+
+        missing = base / "MISSING"
+        build_fixture(missing)
+        (missing / "01_PROGRAMS" / PRIMARY_PROGRAMS["ENGINE"][0]).unlink()
+        try:
+            probe(missing, base / "MISSING_OUT")
+        except ProbeError as exc:
+            ck(exc.reason == "PRIMARY_FILE")
+        else:
+            raise AssertionError("MISSING_PRIMARY_ACCEPTED")
+
+        bad_cli = base / "BAD_CLI"
+        build_fixture(bad_cli)
+        write_stub(bad_cli / "01_PROGRAMS" / PRIMARY_PROGRAMS["REGISTRY"][0], ("--self-test",))
+        try:
+            probe(bad_cli, base / "BAD_CLI_OUT")
+        except ProbeError as exc:
+            ck(exc.reason == "CLI_MISMATCH_REGISTRY")
+        else:
+            raise AssertionError("BAD_CLI_ACCEPTED")
+
+        bad_help = base / "BAD_HELP"
+        build_fixture(bad_help)
+        atomic_write_text(
+            bad_help / "01_PROGRAMS" / PRIMARY_PROGRAMS["PLAN"][0],
+            "raise SystemExit(3)\n",
+        )
+        try:
+            probe(bad_help, base / "BAD_HELP_OUT")
+        except ProbeError as exc:
+            ck(exc.reason == "HELP_EXIT")
+        else:
+            raise AssertionError("BAD_HELP_ACCEPTED")
+
+        bad_core = base / "BAD_CORE"
+        build_fixture(bad_core)
+        (bad_core / "04_TEMP" / CORE_FILES[0]).unlink()
+        try:
+            probe(bad_core, base / "BAD_CORE_OUT")
+        except ProbeError as exc:
+            ck(exc.reason == "CORE_FILE")
+        else:
+            raise AssertionError("BAD_CORE_ACCEPTED")
+
+        bad_support = base / "BAD_SUPPORT"
+        build_fixture(bad_support)
+        (bad_support / SUPPORT_FILES[0][0] / SUPPORT_FILES[0][1]).unlink()
+        try:
+            probe(bad_support, base / "BAD_SUPPORT_OUT")
+        except ProbeError as exc:
+            ck(exc.reason == "SUPPORT_FILE")
+        else:
+            raise AssertionError("BAD_SUPPORT_ACCEPTED")
+
+        ck(checks == 16)
+        ck(SELFTEST_CAPSULE.endswith("C-0"))
+
+    if checks != 18:
+        raise AssertionError("SELFTEST_COUNT")
+    return SELFTEST_CAPSULE
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="U21G G0 runtime surface probe")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--probe", action="store_true")
+    parser.add_argument("--workspace-root", type=Path)
+    parser.add_argument("--out-dir", type=Path)
+    args = parser.parse_args(argv)
+    if args.probe and (args.workspace_root is None or args.out_dir is None):
+        parser.error("--probe requires --workspace-root and --out-dir")
+    return args
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        capsule = self_test() if args.self_test else probe(args.workspace_root, args.out_dir)
+        print(capsule)
+        return 0
+    except ProbeError as exc:
+        title = "G0ST" if args.self_test else "G0P"
+        print(f"{title} N-P0-C0-S0-H0-A0-X1 C-7 K-{exc.reason}")
+        return 7
+    except Exception:
+        title = "G0ST" if args.self_test else "G0P"
+        print(f"{title} N-P0-C0-S0-H0-A0-X1 C-7 K-INTERNAL")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
