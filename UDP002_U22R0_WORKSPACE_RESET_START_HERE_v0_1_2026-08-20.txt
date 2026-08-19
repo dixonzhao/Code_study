@@ -1,0 +1,56 @@
+UDP002 U22R0 WORKSPACE RESET - START HERE
+Date: 2026-08-20
+
+DECISION
+
+Stop patching the inherited U21 Executor implementation. Preserve all prior
+work as legacy evidence and restart the U002 implementation in project-owned
+high-code mode. Accepted architectural decisions remain reference inputs, but
+no old executable is automatically promoted into U22.
+
+WHAT THIS RESET DOES
+
+1. Creates:
+   .\U-UDP002\A-Archive\U21_LEGACY_20260820
+2. Moves active U21 contents from 00_CONTROL, 01_DESIGN, 01_PROGRAMS,
+   02_CONFIG, 04_TEMP, 05_TESTS, 06_MANUALS and 07_OUTPUT into that archive.
+3. Moves loose files at the U-UDP002 root into the archive ROOT folder.
+4. Generates archive_manifest.csv with byte size and SHA-256 for every moved
+   file, plus reset_summary.json.
+5. Recreates the clean active directories.
+
+SAFETY BOUNDARY
+
+- 03_CASES is never moved, scanned or modified.
+- Existing A-Archive content is never moved or modified.
+- Unknown root directories are preserved in place.
+- No file is deleted.
+- Symlinks, collisions, changed source identities and partial failures are
+  rejected; completed moves are rolled back on failure.
+- The reset script itself remains in 04_TEMP as the only intentional legacy
+  utility. The first U22 installer will archive it after promotion.
+
+REQUIRED LOCATION
+
+Download this program directly to:
+
+  .\U-UDP002\04_TEMP\udp002_u22r0_workspace_archive_reset_v0_1.py.txt
+
+RUN FROM C-CODE IN WINDOWS CMD
+
+python .\U-UDP002\04_TEMP\udp002_u22r0_workspace_archive_reset_v0_1.py.txt --workspace-root .\U-UDP002
+
+SUCCESS
+
+  U22R0 N-M...-F...-B...-K1-U...-X0 C-0
+
+RETURN
+
+Return only the single U22R0 line. Do not ask Copilot to modify the reset
+program or manually select files.
+
+AFTER SUCCESS
+
+The next task is U22A: install the new authoritative contract baseline and a
+minimal directly executable vertical slice. We will not restore the old
+Executor or continue G2 patching.
