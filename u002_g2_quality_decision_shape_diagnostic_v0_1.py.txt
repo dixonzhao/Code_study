@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""Read-only G2 D4 extraction of generic QualityDecision field semantics."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import tempfile
+from typing import Dict, Optional, Sequence, Tuple
+
+
+SELFTEST_CAPSULE = "G2D4ST N-T12-P4-J4-I4-X0 C-0"
+MAX_FILES = 4096
+MAX_JSON_BYTES = 4_194_304
+SAFE_RE = re.compile(r"[^A-Z0-9_]+")
+
+
+class D4Error(Exception):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_json(path: Path, reason: str) -> dict:
+    if not path.is_file() or path.is_symlink() or path.stat().st_size > MAX_JSON_BYTES:
+        raise D4Error(reason)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise D4Error(reason) from exc
+    if not isinstance(value, dict):
+        raise D4Error(reason)
+    return value
+
+
+def inventory(root: Path) -> Dict[str, Tuple[int, str]]:
+    result = {}
+    count = 0
+    for directory, names, files in os.walk(root, followlinks=False):
+        base = Path(directory)
+        names[:] = sorted(name for name in names if not (base / name).is_symlink())
+        for name in sorted(files):
+            path = base / name
+            if path.is_symlink() or not path.is_file():
+                raise D4Error("EVIDENCE_FILE_TYPE")
+            count += 1
+            if count > MAX_FILES:
+                raise D4Error("EVIDENCE_FILE_LIMIT")
+            result[path.relative_to(root).as_posix()] = (path.stat().st_size, sha256_file(path))
+    return result
+
+
+def safe(value: str, limit: int = 48) -> str:
+    return SAFE_RE.sub("_", value.upper()).strip("_")[:limit] or "EMPTY"
+
+
+def value_code(value: object) -> str:
+    if value is None:
+        return "Z"
+    if isinstance(value, bool):
+        return "B1" if value else "B0"
+    if isinstance(value, int):
+        return "N" + str(value)
+    if isinstance(value, float):
+        return "F" + format(value, ".8g")
+    if isinstance(value, str):
+        return "S" + safe(value, 40)
+    if isinstance(value, list):
+        return "L" + str(len(value))
+    if isinstance(value, dict):
+        return "D" + str(len(value))
+    return "O"
+
+
+def diagnose(staging: Path) -> str:
+    staging = staging.resolve(strict=True)
+    if not staging.is_dir() or staging.is_symlink() or not staging.name.endswith(".staging"):
+        raise D4Error("G2_STAGING_DIR")
+    before = inventory(staging)
+    preflight = read_json(staging / "control" / "run_preflight.json", "PREFLIGHT_JSON")
+    quality = preflight.get("QualityDecision")
+    if not isinstance(quality, dict) or not quality or len(quality) > 8:
+        raise D4Error("QUALITY_DECISION_SHAPE")
+    fields = [f"Q{index}-{safe(str(key))}:{value_code(value)}"
+              for index, (key, value) in enumerate(sorted(quality.items()), start=1)]
+    after = inventory(staging)
+    if before != after:
+        raise D4Error("EVIDENCE_MUTATED")
+    return f"G2D4 N-Q{len(fields)}-H{len(before)}-X0 C-0 " + " ".join(fields)
+
+
+def selftest() -> None:
+    checks = 0
+
+    def ck(value: bool) -> None:
+        nonlocal checks
+        if not value:
+            raise AssertionError("SELFTEST")
+        checks += 1
+
+    with tempfile.TemporaryDirectory() as temporary:
+        staging = Path(temporary) / "G2_TEST.staging"
+        control = staging / "control"
+        control.mkdir(parents=True)
+        document = {
+            "QualityDecision": {"BlockingReasonCount": 0, "Warnings": []},
+        }
+        (control / "run_preflight.json").write_text(json.dumps(document), encoding="utf-8")
+        before = inventory(staging)
+        capsule = diagnose(staging)
+        after = inventory(staging)
+        ck(capsule.startswith("G2D4 "))
+        ck("N-Q2-H1-X0 C-0" in capsule)
+        ck("Q1-BLOCKINGREASONCOUNT:N0" in capsule)
+        ck("Q2-WARNINGS:L0" in capsule)
+        ck(before == after)
+        ck(len(before) == 1)
+        ck(safe("BlockingReasonCount") == "BLOCKINGREASONCOUNT")
+        ck(value_code(0) == "N0")
+        ck(value_code([]) == "L0")
+        ck(value_code(False) == "B0")
+        ck(value_code("ready") == "SREADY")
+        ck(not (staging / "runs").exists())
+    if checks != 12:
+        raise AssertionError("SELFTEST_COUNT")
+    print(SELFTEST_CAPSULE)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--diagnose", action="store_true")
+    parser.add_argument("--g2-staging", type=Path)
+    args = parser.parse_args(argv)
+    try:
+        if args.self_test:
+            if args.g2_staging is not None:
+                raise D4Error("ARGUMENTS")
+            selftest()
+            return 0
+        if args.g2_staging is None:
+            raise D4Error("ARGUMENTS")
+        print(diagnose(args.g2_staging))
+        return 0
+    except D4Error as exc:
+        print(f"G2D4 N-Q0-H0-X1 C-7 K-{exc.reason}")
+        return 7
+    except Exception:
+        print("G2D4 N-Q0-H0-X1 C-7 K-INTERNAL")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
