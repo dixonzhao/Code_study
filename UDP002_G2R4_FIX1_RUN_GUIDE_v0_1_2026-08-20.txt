@@ -1,0 +1,65 @@
+UDP002 G2R4 FIX1 RUN GUIDE
+Date: 2026-08-20
+Mode: deterministic sample-contract correction; no company data
+
+PURPOSE
+
+The retained G2R4 result is valid JSON. The only real validator failure is a
+type mismatch in the three synthetic diagnostic values:
+
+  Artifacts[0].Metadata.Synthetic
+  Artifacts[0].Metadata.Sequence
+  Metrics.SyntheticRows
+
+The accepted protocol permits short scalar arrays. This correction changes
+only those synthetic sample values from scalars to one-element arrays. It does
+not modify Executor v0.8, U001 input, accepted contracts, or company data.
+
+REQUIRED FILES IN .\U-UDP002\04_TEMP
+
+  u002_g2_synthetic_vertical_run_v0_1.py.txt
+  u002_executor_v08_independent_vertical_gate_v0_5.py.txt
+  u002_g2r4_contract_sample_fix_builder_v0_1.py.txt
+
+STEP 1 - BUILD TWO NEW VERSIONED FILES
+
+Run from C-CODE in Windows CMD:
+
+python .\U-UDP002\04_TEMP\u002_g2r4_contract_sample_fix_builder_v0_1.py.txt --workspace-root .\U-UDP002
+
+Expected:
+
+G2R4FIX1 N-R1-G1-X0 C-0 H-...
+
+Created without overwriting earlier versions:
+
+  u002_g2_synthetic_vertical_run_v0_2.py.txt
+  u002_executor_v08_independent_vertical_gate_v0_6.py.txt
+
+STEP 2 - GATE SELF-TEST
+
+python .\U-UDP002\04_TEMP\u002_executor_v08_independent_vertical_gate_v0_6.py.txt --self-test
+
+Expected:
+
+G2R4ST N-T24-S6-C6-I6-X0 C-0
+
+STEP 3 - RUN THE CORRECTED INDEPENDENT VERTICAL GATE
+
+python .\U-UDP002\04_TEMP\u002_executor_v08_independent_vertical_gate_v0_6.py.txt --run --workspace-root .\U-UDP002
+
+Expected final capsule:
+
+G2R4 N-E1-I1-V1-M3-A3-X0 C-0
+
+RETURN
+
+Return only the final G2R4 line. If STEP 1 or STEP 2 fails, return its single
+C-7 line instead and do not continue.
+
+STOP RULE
+
+Do not let Copilot edit Executor, protocol, Gate, sample module, or evidence.
+This builder owns the exact minimal correction. If STEP 3 still fails, stop
+patching this inherited implementation and begin the approved high-code U002
+implementation reconstruction while preserving the accepted contracts.
