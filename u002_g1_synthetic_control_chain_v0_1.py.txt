@@ -1,0 +1,496 @@
+#!/usr/bin/env python3
+"""U21G G1 synthetic Registry -> Activation -> Plan integration.
+
+The project owns the synthetic Module definitions, exact names and expected
+order. Accepted company programs are invoked only through their public CLI.
+No company data or production Module is read.
+"""
+
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
+
+
+VERSION = "0.1"
+ENGINE_VERSION = "0.1.0"
+SELFTEST_CAPSULE = "G1ST N-T20-M3-V3-H6-D4-I4-X0 C-0"
+RUN_CAPSULE = "G1P N-M3-R1-A3-P1-O3-I5-X0 C-0"
+CHILD_TIMEOUT_SECONDS = 90
+MAX_LOG_BYTES = 1_048_576
+
+PROGRAM_NAMES = {
+    "registry": "u002_module_registry_v0_1.py",
+    "activation": "u002_module_activation_controller_v0_1.py",
+    "resolver": "u002_qualified_module_plan_resolver_v0_1.py",
+}
+CORE_NAMES = {
+    "schema": "u002_core_contract_schema_bundle_v0_1.json.txt",
+    "validator": "u002_core_contract_validator_v0_1.py.txt",
+}
+MODULE_IDS = (
+    "U002.SyntheticSemantic",
+    "U002.SyntheticBaseline",
+    "U002.SyntheticHandoff",
+)
+EXPECTED_STAGES = ("S1", "S4", "S7")
+
+
+class G1Error(Exception):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def canonical_bytes(value: object) -> bytes:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("wb") as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    atomic_write_bytes(path, text.encode("utf-8"))
+
+
+def atomic_write_json(path: Path, value: object) -> None:
+    atomic_write_text(path, json.dumps(value, ensure_ascii=False, sort_keys=True,
+                                      indent=2, allow_nan=False) + "\n")
+
+
+def require_file(path: Path, reason: str) -> None:
+    if not path.is_file() or path.is_symlink():
+        raise G1Error(reason)
+
+
+def read_json(path: Path, reason: str) -> dict:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise G1Error(reason) from exc
+    if not isinstance(value, dict):
+        raise G1Error(reason)
+    return value
+
+
+def module_source(token: str) -> str:
+    return f'''from __future__ import annotations
+import argparse
+from pathlib import Path
+
+SELFTEST_TOKEN = {token!r}
+
+def run_module(request):
+    Path("PRODUCTION_CALL_MARKER.txt").write_text("CALLED", encoding="utf-8")
+    return {{"ContractType": "U002_MODULE_EXECUTION_RESULT",
+            "ContractVersion": "0.2", "RunId": request["RunId"],
+            "Stage": request["Stage"],
+            "ModuleId": request["ModuleIdentity"]["ModuleId"],
+            "ModuleVersion": request["ModuleIdentity"]["ModuleVersion"],
+            "Status": "FAILED", "Artifacts": [],
+            "Warnings": ["G1_CONTROL_CHAIN_ONLY"], "Metrics": {{}}}}
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--self-test", action="store_true")
+    args = parser.parse_args()
+    if not args.self_test:
+        return 7
+    print(SELFTEST_TOKEN)
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+def configuration_schema(schema_id: str) -> dict:
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": schema_id,
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {},
+    }
+
+
+def port() -> dict:
+    return {
+        "PortId": "primary_signal",
+        "Role": "PRIMARY_OUTCOME_INPUT",
+        "MinCount": 1,
+        "MaxCount": 1,
+        "Selectors": [{"CanonicalName": "Synthetic.Primary", "ValueKind": "NUMERIC"}],
+    }
+
+
+def requirement(artifact_type: str, schema_id: str) -> dict:
+    return {
+        "PortId": "upstream_artifact",
+        "ArtifactType": artifact_type,
+        "ArtifactSchemaId": schema_id,
+        "MinimumSchemaVersion": "0.1.0",
+        "Cardinality": "ONE",
+    }
+
+
+def provision(artifact_type: str, schema_id: str, exclusive: bool) -> dict:
+    return {
+        "ArtifactType": artifact_type,
+        "ArtifactSchemaId": schema_id,
+        "ArtifactSchemaVersion": "0.1.0",
+        "ExclusiveOutput": exclusive,
+    }
+
+
+def manifest_for(index: int, implementation_hash: str, schema_hash: str) -> dict:
+    definitions = (
+        ("Synthetic Semantic", "S1", "SEMANTIC_BUILDER", [],
+         provision("SYNTHETIC_SEMANTIC", "urn:u002:g1:semantic", False),
+         "u21g.synthetic.semantic"),
+        ("Synthetic Baseline", "S4", "BASELINE",
+         [requirement("SYNTHETIC_SEMANTIC", "urn:u002:g1:semantic")],
+         provision("SYNTHETIC_BASELINE", "urn:u002:g1:baseline", True),
+         "u21g.synthetic.baseline"),
+        ("Synthetic Handoff", "S7", "HANDOFF_EXPORT",
+         [requirement("SYNTHETIC_BASELINE", "urn:u002:g1:baseline")],
+         provision("SYNTHETIC_HANDOFF", "urn:u002:g1:handoff", True),
+         "u21g.synthetic.handoff"),
+    )
+    display, stage, kind, requirements, provides, namespace = definitions[index]
+    token = f"G1-M{index + 1}-SELFTEST-PASS"
+    return {
+        "ContractType": "U002_MODULE_MANIFEST",
+        "ContractVersion": "0.1",
+        "ModuleId": MODULE_IDS[index],
+        "ModuleVersion": "0.1.0",
+        "DisplayName": display,
+        "Description": "Synthetic control-chain acceptance fixture; no business algorithm.",
+        "Stage": stage,
+        "ModuleKind": kind,
+        "AlgorithmStatus": "FORMAL",
+        "ExecutionRequirement": "REQUIRED",
+        "ScopeSelector": {
+            "SignalSelectors": [{"CanonicalName": "Synthetic.Primary", "ValueKind": "NUMERIC"}],
+            "FrameRangeSupported": True,
+        },
+        "RequiredInputs": [port()] if index == 0 else [],
+        "OptionalInputs": [],
+        "RequiresArtifacts": requirements,
+        "ProvidesArtifacts": [provides],
+        "OutputNamespace": namespace,
+        "ConfigurationSchema": {
+            "SchemaId": f"urn:u002:g1:config:m{index + 1}",
+            "SchemaVersion": "0.1.0",
+            "RelativePath": "config_schema.json",
+            "Sha256": schema_hash,
+        },
+        "FailurePolicy": "ABORT_RUN",
+        "ConflictPolicy": "ERROR_ON_COLLISION",
+        "Entrypoint": {"RelativeFile": "module.py", "Callable": "run_module"},
+        "SelfTest": {
+            "Arguments": ["--self-test"],
+            "ExpectedExitCode": 0,
+            "ExpectedToken": token,
+        },
+        "Compatibility": {"MinimumEngineVersion": "0.1.0", "MaximumEngineVersion": None},
+        "ImplementationSha256": implementation_hash,
+    }
+
+
+def build_module_packs(modules_root: Path) -> List[Path]:
+    module_paths: List[Path] = []
+    for index, module_id in enumerate(MODULE_IDS):
+        pack = modules_root / f"M{index + 1}_{module_id.split('.')[-1]}"
+        pack.mkdir(parents=True, exist_ok=False)
+        implementation = pack / "module.py"
+        schema_path = pack / "config_schema.json"
+        atomic_write_text(implementation, module_source(f"G1-M{index + 1}-SELFTEST-PASS"))
+        atomic_write_json(schema_path, configuration_schema(f"urn:u002:g1:config:m{index + 1}"))
+        manifest = manifest_for(index, sha256_file(implementation), sha256_file(schema_path))
+        atomic_write_json(pack / "module_manifest.json", manifest)
+        module_paths.append(pack)
+    return module_paths
+
+
+def verify_pack(pack: Path) -> dict:
+    manifest = read_json(pack / "module_manifest.json", "MANIFEST_JSON")
+    implementation = pack / manifest["Entrypoint"]["RelativeFile"]
+    schema = pack / manifest["ConfigurationSchema"]["RelativePath"]
+    require_file(implementation, "IMPLEMENTATION_FILE")
+    require_file(schema, "CONFIG_SCHEMA_FILE")
+    if sha256_file(implementation) != manifest["ImplementationSha256"]:
+        raise G1Error("IMPLEMENTATION_HASH")
+    if sha256_file(schema) != manifest["ConfigurationSchema"]["Sha256"]:
+        raise G1Error("CONFIG_SCHEMA_HASH")
+    return manifest
+
+
+def run_child(command: Sequence[str], stdout_path: Path, stderr_path: Path,
+              reason: str) -> None:
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+            completed = subprocess.run(
+                list(command), stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                timeout=CHILD_TIMEOUT_SECONDS, check=False,
+            )
+    except subprocess.TimeoutExpired as exc:
+        raise G1Error(reason + "_TIMEOUT") from exc
+    if stdout_path.stat().st_size > MAX_LOG_BYTES or stderr_path.stat().st_size > MAX_LOG_BYTES:
+        raise G1Error(reason + "_LOG_LIMIT")
+    if completed.returncode != 0:
+        raise G1Error(reason + "_EXIT")
+
+
+def normalize_execution_order(plan: dict) -> List[str]:
+    selected = plan.get("SelectedModules")
+    if not isinstance(selected, list):
+        raise G1Error("PLAN_SELECTED_MODULES")
+    ordered = sorted(selected, key=lambda item: item.get("PlanOrder", 10**9))
+    result = [item.get("ModuleId") for item in ordered]
+    if not all(isinstance(item, str) for item in result):
+        raise G1Error("PLAN_ORDER_FORMAT")
+    return result
+
+
+def snapshot_inputs(paths: Iterable[Path]) -> Dict[str, str]:
+    return {path.name: sha256_file(path) for path in paths}
+
+
+def run_control_chain(workspace_root: Path, out_dir: Path) -> str:
+    workspace_root = workspace_root.resolve(strict=True)
+    programs_dir = workspace_root / "01_PROGRAMS"
+    temp_dir = workspace_root / "04_TEMP"
+    program_paths = {name: programs_dir / filename for name, filename in PROGRAM_NAMES.items()}
+    core_paths = {name: temp_dir / filename for name, filename in CORE_NAMES.items()}
+    protected = list(program_paths.values()) + list(core_paths.values())
+    for path in protected:
+        require_file(path, "DEPENDENCY_FILE")
+    if out_dir.exists() or out_dir.with_name(out_dir.name + ".staging").exists():
+        raise G1Error("OUTPUT_EXISTS")
+    before = snapshot_inputs(protected)
+    staging = out_dir.with_name(out_dir.name + ".staging")
+    staging.mkdir(parents=True, exist_ok=False)
+    modules_root = staging / "modules"
+    activations = staging / "activation_evidence"
+    logs = staging / "logs"
+    activations.mkdir()
+    packs = build_module_packs(modules_root)
+
+    registry_out = staging / "registry_snapshot.json"
+    run_child(
+        [sys.executable, str(program_paths["registry"]), "--scan",
+         "--modules-root", str(modules_root), "--engine-version", ENGINE_VERSION,
+         "--schema-bundle", str(core_paths["schema"]),
+         "--contract-validator", str(core_paths["validator"]), "--out", str(registry_out)],
+        logs / "registry.stdout.txt", logs / "registry.stderr.txt", "REGISTRY",
+    )
+    registry = read_json(registry_out, "REGISTRY_JSON")
+    entries = registry.get("Modules")
+    if not isinstance(entries, list) or len(entries) != 3:
+        raise G1Error("REGISTRY_COUNT")
+    if sorted(entry.get("RegistryStatus") for entry in entries) != ["SELFTEST_REQUIRED"] * 3:
+        raise G1Error("REGISTRY_STATUS")
+
+    for index, module_id in enumerate(MODULE_IDS):
+        evidence = activations / f"m{index + 1}_activation.json"
+        run_child(
+            [sys.executable, str(program_paths["activation"]), "--activate-one",
+             "--modules-root", str(modules_root), "--engine-version", ENGINE_VERSION,
+             "--module-id", module_id, "--module-version", "0.1.0",
+             "--registry-program", str(program_paths["registry"]),
+             "--schema-bundle", str(core_paths["schema"]),
+             "--contract-validator", str(core_paths["validator"]),
+             "--out", str(evidence), "--timeout-seconds", "30",
+             "--max-output-bytes", "65536"],
+            logs / f"activation_{index + 1}.stdout.txt",
+            logs / f"activation_{index + 1}.stderr.txt", f"ACTIVATION_M{index + 1}",
+        )
+        evidence_doc = read_json(evidence, "ACTIVATION_JSON")
+        if evidence_doc.get("ActivationStatus") != "SELFTEST_ACCEPTED":
+            raise G1Error("ACTIVATION_STATUS")
+        if evidence_doc.get("ModuleIdentity", {}).get("ModuleId") != module_id:
+            raise G1Error("ACTIVATION_IDENTITY")
+
+    plan_out = staging / "software_plan.json"
+    command = [
+        sys.executable, str(program_paths["resolver"]), "--resolve-plan",
+        "--modules-root", str(modules_root),
+        "--activation-evidence-dir", str(activations),
+        "--engine-version", ENGINE_VERSION,
+        "--registry-program", str(program_paths["registry"]),
+        "--schema-bundle", str(core_paths["schema"]),
+        "--contract-validator", str(core_paths["validator"]),
+    ]
+    for module_id in MODULE_IDS:
+        command.extend(["--select", module_id + "@0.1.0"])
+    command.extend(["--out", str(plan_out)])
+    run_child(command, logs / "resolver.stdout.txt", logs / "resolver.stderr.txt", "RESOLVER")
+    plan = read_json(plan_out, "PLAN_JSON")
+    if plan.get("PlanStatus") != "SOFTWARE_PLAN_READY":
+        raise G1Error("PLAN_STATUS")
+    if plan.get("SignalBindingStatus") != "DEFERRED_TO_RUN_PREFLIGHT":
+        raise G1Error("PLAN_SIGNAL_STATUS")
+    if normalize_execution_order(plan) != list(MODULE_IDS):
+        raise G1Error("PLAN_ORDER")
+    if plan.get("SelectedModuleCount") != 3:
+        raise G1Error("PLAN_COUNT")
+    for pack in packs:
+        if (pack / "PRODUCTION_CALL_MARKER.txt").exists():
+            raise G1Error("PRODUCTION_CALLED")
+        verify_pack(pack)
+
+    after = snapshot_inputs(protected)
+    if before != after:
+        raise G1Error("INPUT_MUTATION")
+    acceptance = {
+        "AcceptanceType": "U002_U21G_G1_CONTROL_CHAIN",
+        "AcceptanceVersion": VERSION,
+        "GeneratedAtUtc": utc_now(),
+        "Status": "CONTROL_CHAIN_READY",
+        "EngineVersion": ENGINE_VERSION,
+        "ModuleIds": list(MODULE_IDS),
+        "StageOrder": list(EXPECTED_STAGES),
+        "RegistrySnapshotSha256": sha256_file(registry_out),
+        "ActivationEvidenceCount": 3,
+        "SoftwarePlanSha256": sha256_file(plan_out),
+        "ProtectedInputCount": 5,
+        "ProtectedInputsUnchanged": True,
+        "ProductionCallableInvoked": False,
+    }
+    atomic_write_json(staging / "u21g1_control_chain_acceptance.json", acceptance)
+    atomic_write_text(staging / "u21g1_capsule.txt", RUN_CAPSULE + "\n")
+    os.replace(staging, out_dir)
+    return RUN_CAPSULE
+
+
+def self_test(schema_bundle: Path, contract_validator: Path) -> str:
+    require_file(schema_bundle, "SCHEMA_FILE")
+    require_file(contract_validator, "VALIDATOR_FILE")
+    checks = 0
+
+    def ck(value: bool) -> None:
+        nonlocal checks
+        if not value:
+            raise AssertionError("SELFTEST_ASSERTION")
+        checks += 1
+
+    with tempfile.TemporaryDirectory(prefix="u21g1_") as raw:
+        root = Path(raw)
+        packs = build_module_packs(root / "modules")
+        ck(len(packs) == 3)
+        manifests = [verify_pack(pack) for pack in packs]
+        ck([m["ModuleId"] for m in manifests] == list(MODULE_IDS))
+        ck([m["Stage"] for m in manifests] == list(EXPECTED_STAGES))
+        ck(manifests[0]["RequiresArtifacts"] == [])
+        ck(len(manifests[1]["RequiresArtifacts"]) == 1)
+        ck(len(manifests[2]["RequiresArtifacts"]) == 1)
+        ck(manifests[0]["ProvidesArtifacts"][0]["ArtifactType"] == "SYNTHETIC_SEMANTIC")
+        ck(manifests[1]["ProvidesArtifacts"][0]["ArtifactType"] == "SYNTHETIC_BASELINE")
+        ck(manifests[2]["ProvidesArtifacts"][0]["ArtifactType"] == "SYNTHETIC_HANDOFF")
+        ck(manifests[0]["RequiredInputs"][0]["Selectors"][0]["CanonicalName"] == "Synthetic.Primary")
+        ck(all(m["Entrypoint"]["Callable"] == "run_module" for m in manifests))
+        ck(all(not (pack / "PRODUCTION_CALL_MARKER.txt").exists() for pack in packs))
+
+        for index, pack in enumerate(packs):
+            stdout = root / f"validator_{index}.stdout.txt"
+            stderr = root / f"validator_{index}.stderr.txt"
+            run_child(
+                [sys.executable, str(contract_validator), "--schema-bundle",
+                 str(schema_bundle), "--validate", str(pack / "module_manifest.json")],
+                stdout, stderr, "MANIFEST_VALIDATION",
+            )
+        ck(True)
+        ck(all(sha256_file(pack / "module.py") == manifests[i]["ImplementationSha256"]
+               for i, pack in enumerate(packs)))
+        ck(all(sha256_file(pack / "config_schema.json") ==
+               manifests[i]["ConfigurationSchema"]["Sha256"] for i, pack in enumerate(packs)))
+
+        atomic = root / "atomic.json"
+        atomic_write_json(atomic, {"b": 2, "a": 1})
+        ck(read_json(atomic, "ATOMIC") == {"a": 1, "b": 2})
+        ck(not atomic.with_name(atomic.name + ".tmp").exists())
+
+        implementation = packs[0] / "module.py"
+        atomic_write_text(implementation, implementation.read_text(encoding="utf-8") + "\n#tamper\n")
+        try:
+            verify_pack(packs[0])
+        except G1Error as exc:
+            ck(exc.reason == "IMPLEMENTATION_HASH")
+        else:
+            raise AssertionError("TAMPER_ACCEPTED")
+        ck(RUN_CAPSULE.endswith("C-0"))
+        ck(checks == 19)
+    if checks != 20:
+        raise AssertionError("SELFTEST_COUNT")
+    return SELFTEST_CAPSULE
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="U21G G1 synthetic control-chain integration")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--run", action="store_true")
+    parser.add_argument("--schema-bundle", type=Path)
+    parser.add_argument("--contract-validator", type=Path)
+    parser.add_argument("--workspace-root", type=Path)
+    parser.add_argument("--out-dir", type=Path)
+    args = parser.parse_args(argv)
+    if args.self_test and (args.schema_bundle is None or args.contract_validator is None):
+        parser.error("--self-test requires --schema-bundle and --contract-validator")
+    if args.run and (args.workspace_root is None or args.out_dir is None):
+        parser.error("--run requires --workspace-root and --out-dir")
+    return args
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        if args.self_test:
+            capsule = self_test(args.schema_bundle, args.contract_validator)
+        else:
+            capsule = run_control_chain(args.workspace_root, args.out_dir)
+        print(capsule)
+        return 0
+    except G1Error as exc:
+        title = "G1ST" if args.self_test else "G1P"
+        print(f"{title} N-M0-R0-A0-P0-O0-I0-X1 C-7 K-{exc.reason}")
+        return 7
+    except Exception:
+        title = "G1ST" if args.self_test else "G1P"
+        print(f"{title} N-M0-R0-A0-P0-O0-I0-X1 C-7 K-INTERNAL")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
