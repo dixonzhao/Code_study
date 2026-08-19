@@ -1,0 +1,846 @@
+#!/usr/bin/env python3
+"""U21G G2 complete synthetic vertical acceptance.
+
+Project-owned code creates runnable synthetic Modules and drives only the
+public CLIs of frozen U21B-F components. It reuses the already accepted U21E
+Gate's synthetic U001 package; no company CAN/DBC/video data is read.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+from datetime import datetime, timezone
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
+
+
+VERSION = "0.1"
+ENGINE_VERSION = "0.1.0"
+SELFTEST_CAPSULE = "G2ST N-T24-M3-P3-F4-I4-X0 C-0"
+RUN_CAPSULE = "G2P N-M3-B1-E1-R1-S8-A3-I17-X0 C-0"
+CHILD_TIMEOUT_SECONDS = 180
+MAX_LOG_BYTES = 2_097_152
+
+PROGRAM_NAMES = {
+    "engine": "u002_engine_skeleton_v0_1.py",
+    "registry": "u002_module_registry_v0_1.py",
+    "activation": "u002_module_activation_controller_v0_1.py",
+    "resolver": "u002_qualified_module_plan_resolver_v0_1.py",
+    "binder": "u002_run_preflight_data_binder_v0_1.py",
+    "executor": "u002_controlled_stage_executor_v0_3.py",
+    "protocol_bundle": "u002_module_runtime_protocol_bundle_v0_2.json",
+    "protocol_validator": "u002_module_runtime_protocol_validator_v0_2.py",
+}
+CORE_NAMES = {
+    "schema": "u002_core_contract_schema_bundle_v0_1.json.txt",
+    "validator": "u002_core_contract_validator_v0_1.py.txt",
+}
+PROMOTION_EVIDENCE = Path(
+    "05_TESTS/02_ACCEPTANCE/U21F2A_PROMOTION_V02/"
+    "u21f2a_promotion_acceptance.json"
+)
+STANDARD_FILES = (
+    "u001_decoded_updates.csv",
+    "u001_frame_values.csv",
+    "u001_signal_catalog.csv",
+    "u001_quality_report.csv",
+    "u001_run_manifest.json",
+    "u001_review_view.csv",
+)
+MODULE_IDS = (
+    "U002.VerticalSemantic",
+    "U002.VerticalBaseline",
+    "U002.VerticalHandoff",
+)
+EXPECTED_STAGES = ("S1", "S4", "S7")
+EXPECTED_ARTIFACT_TYPES = (
+    "SYNTHETIC_SEMANTIC",
+    "SYNTHETIC_BASELINE",
+    "SYNTHETIC_HANDOFF",
+)
+SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+class G2Error(Exception):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def canonical_bytes(value: object) -> bytes:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("wb") as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    atomic_write_bytes(path, text.encode("utf-8"))
+
+
+def atomic_write_json(path: Path, value: object) -> None:
+    atomic_write_text(path, json.dumps(value, ensure_ascii=False, sort_keys=True,
+                                      indent=2, allow_nan=False) + "\n")
+
+
+def require_file(path: Path, reason: str) -> None:
+    if not path.is_file() or path.is_symlink():
+        raise G2Error(reason)
+
+
+def read_json(path: Path, reason: str) -> dict:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise G2Error(reason) from exc
+    if not isinstance(value, dict):
+        raise G2Error(reason)
+    return value
+
+
+def run_child(command: Sequence[str], stdout_path: Path, stderr_path: Path,
+              reason: str, timeout: int = CHILD_TIMEOUT_SECONDS) -> None:
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+            completed = subprocess.run(
+                list(command), stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                timeout=timeout, check=False,
+            )
+    except subprocess.TimeoutExpired as exc:
+        raise G2Error(reason + "_TIMEOUT") from exc
+    if stdout_path.stat().st_size > MAX_LOG_BYTES or stderr_path.stat().st_size > MAX_LOG_BYTES:
+        raise G2Error(reason + "_LOG_LIMIT")
+    if completed.returncode != 0:
+        raise G2Error(reason + "_EXIT")
+
+
+def snapshot_inputs(paths: Iterable[Path]) -> Dict[str, str]:
+    result: Dict[str, str] = {}
+    for path in paths:
+        require_file(path, "DEPENDENCY_FILE")
+        result[str(path.resolve())] = sha256_file(path)
+    return result
+
+
+def contains_exact(value: object, expected: str) -> bool:
+    if value == expected:
+        return True
+    if isinstance(value, dict):
+        return any(contains_exact(item, expected) for item in value.values())
+    if isinstance(value, list):
+        return any(contains_exact(item, expected) for item in value)
+    return False
+
+
+def direct_packages(root: Path) -> List[Path]:
+    packages: List[Path] = []
+    seen = set()
+    for d2 in root.rglob(STANDARD_FILES[1]):
+        parent = d2.parent
+        key = str(parent.resolve())
+        if key in seen:
+            continue
+        if all((parent / name).is_file() and not (parent / name).is_symlink()
+               for name in STANDARD_FILES):
+            seen.add(key)
+            packages.append(parent)
+    return sorted(packages, key=lambda path: str(path).lower())
+
+
+def package_tuple(package: Path) -> Tuple[str, str, str, str]:
+    return tuple(sha256_file(package / name) for name in STANDARD_FILES[1:5])  # type: ignore[return-value]
+
+
+def locate_accepted_u21e_fixture(workspace_root: Path) -> Tuple[Path, dict]:
+    accepted_capsule = "U21EG1 N-R2-P4-F12-I6-X0 C-0"
+    matches: Dict[Tuple[str, str, str, str], List[Tuple[Path, dict]]] = {}
+    for evidence_path in workspace_root.rglob("U21E_ACCEPTANCE_EVIDENCE.json"):
+        try:
+            evidence = read_json(evidence_path, "U21E_EVIDENCE_JSON")
+        except G2Error:
+            continue
+        if not contains_exact(evidence, accepted_capsule):
+            continue
+        gate_root = evidence_path.parent.parent
+        ready_documents: List[dict] = []
+        for candidate in gate_root.rglob("*.json"):
+            try:
+                document = read_json(candidate, "PREFLIGHT_JSON")
+            except G2Error:
+                continue
+            if (document.get("PreflightType") == "U002_RUN_PREFLIGHT_BINDING" and
+                    document.get("PreflightStatus") == "RUN_PREFLIGHT_READY"):
+                ready_documents.append(document)
+        for package in direct_packages(gate_root):
+            hashes = package_tuple(package)
+            for document in ready_documents:
+                serialized = canonical_bytes(document).decode("utf-8")
+                if all(item in serialized for item in hashes):
+                    matches.setdefault(hashes, []).append((package, document))
+                    break
+    if not matches:
+        raise G2Error("U21E_FIXTURE_NOT_FOUND")
+    if len(matches) != 1:
+        raise G2Error("U21E_FIXTURE_AMBIGUOUS")
+    pairs = next(iter(matches.values()))
+    pairs.sort(key=lambda item: str(item[0]).lower())
+    return pairs[0]
+
+
+def read_csv_header(path: Path) -> List[str]:
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.reader(stream)
+        try:
+            return next(reader)
+        except StopIteration as exc:
+            raise G2Error("CSV_HEADER") from exc
+
+
+def read_catalog(path: Path) -> List[dict]:
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        return [dict(row) for row in csv.DictReader(stream)]
+
+
+def collect_binding_names(value: object) -> List[str]:
+    result: List[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "CanonicalNames" and isinstance(item, list):
+                result.extend(name for name in item if isinstance(name, str) and name)
+            else:
+                result.extend(collect_binding_names(item))
+    elif isinstance(value, list):
+        for item in value:
+            result.extend(collect_binding_names(item))
+    return result
+
+
+def choose_signal(package: Path, accepted_preflight: dict) -> str:
+    catalog = read_catalog(package / STANDARD_FILES[2])
+    rows = {row.get("CanonicalName", ""): row for row in catalog if row.get("CanonicalName")}
+    d2_header = set(read_csv_header(package / STANDARD_FILES[1]))
+    names = sorted(set(collect_binding_names(accepted_preflight)))
+    names.extend(sorted(name for name in rows if name not in names))
+    for name in names:
+        row = rows.get(name)
+        if row is None:
+            continue
+        group = {
+            name + suffix for suffix in (
+                "__value", "__label", "__updated", "__update_count",
+                "__age", "__valid", "__missing_reason",
+            )
+        }
+        if group.issubset(d2_header):
+            return name
+    raise G2Error("SYNTHETIC_SIGNAL_NOT_FOUND")
+
+
+def configuration_schema(schema_id: str) -> dict:
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": schema_id,
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {},
+    }
+
+
+def port(canonical_name: str) -> dict:
+    return {
+        "PortId": "primary_signal",
+        "Role": "PRIMARY_OUTCOME_INPUT",
+        "MinCount": 1,
+        "MaxCount": 1,
+        "Selectors": [{"CanonicalName": canonical_name}],
+    }
+
+
+def requirement(artifact_type: str, schema_id: str) -> dict:
+    return {
+        "PortId": "upstream_artifact",
+        "ArtifactType": artifact_type,
+        "ArtifactSchemaId": schema_id,
+        "MinimumSchemaVersion": "0.1.0",
+        "Cardinality": "ONE",
+    }
+
+
+def provision(artifact_type: str, schema_id: str, exclusive: bool) -> dict:
+    return {
+        "ArtifactType": artifact_type,
+        "ArtifactSchemaId": schema_id,
+        "ArtifactSchemaVersion": "0.1.0",
+        "ExclusiveOutput": exclusive,
+    }
+
+
+def module_source(index: int, token: str) -> str:
+    artifact_type = EXPECTED_ARTIFACT_TYPES[index]
+    schema_id = f"urn:u002:g2:{('semantic', 'baseline', 'handoff')[index]}"
+    payload_name = f"g2_{('semantic', 'baseline', 'handoff')[index]}.json"
+    return f'''from __future__ import annotations
+import argparse
+import json
+from pathlib import Path
+
+SELFTEST_TOKEN = {token!r}
+ARTIFACT_TYPE = {artifact_type!r}
+SCHEMA_ID = {schema_id!r}
+PAYLOAD_NAME = {payload_name!r}
+SEQUENCE = {index + 1}
+
+def run_module(request):
+    root = Path(request["RuntimePaths"]["StagingRoot"])
+    root.mkdir(parents=True, exist_ok=True)
+    payload = root / PAYLOAD_NAME
+    document = {{
+        "Synthetic": True,
+        "Sequence": SEQUENCE,
+        "RunId": request["RunId"],
+        "Stage": request["Stage"],
+        "ModuleId": request["ModuleIdentity"]["ModuleId"],
+        "BoundSignalCount": sum(len(x.get("CanonicalNames", [])) for x in request["BoundSignals"]),
+        "InputArtifactCount": len(request["InputArtifacts"]),
+    }}
+    payload.write_text(json.dumps(document, ensure_ascii=False, sort_keys=True,
+                                  separators=(",", ":"), allow_nan=False) + "\\n",
+                       encoding="utf-8")
+    return {{
+        "ContractType": "U002_MODULE_EXECUTION_RESULT",
+        "ContractVersion": "0.2",
+        "RunId": request["RunId"],
+        "Stage": request["Stage"],
+        "ModuleId": request["ModuleIdentity"]["ModuleId"],
+        "ModuleVersion": request["ModuleIdentity"]["ModuleVersion"],
+        "Status": "SUCCEEDED",
+        "Artifacts": [{{
+            "ArtifactType": ARTIFACT_TYPE,
+            "ArtifactSchemaId": SCHEMA_ID,
+            "ArtifactSchemaVersion": "0.1.0",
+            "Payloads": [{{
+                "RelativePath": PAYLOAD_NAME,
+                "Role": "PRIMARY",
+                "MediaType": "application/json",
+                "RowCount": None,
+                "PayloadKind": "PRIMARY",
+            }}],
+            "CoordinateFrame": None,
+            "UncertaintyReference": None,
+            "Metadata": {{"Synthetic": True, "Sequence": SEQUENCE}},
+        }}],
+        "Warnings": [],
+        "Metrics": {{"SyntheticRows": 1}},
+    }}
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--self-test", action="store_true")
+    args = parser.parse_args()
+    if not args.self_test:
+        return 7
+    print(SELFTEST_TOKEN)
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+def manifest_for(index: int, canonical_name: str, implementation_hash: str,
+                 schema_hash: str) -> dict:
+    definitions = (
+        ("Vertical Semantic", "S1", "SEMANTIC_BUILDER", [],
+         provision("SYNTHETIC_SEMANTIC", "urn:u002:g2:semantic", False),
+         "u21g.vertical.semantic"),
+        ("Vertical Baseline", "S4", "BASELINE",
+         [requirement("SYNTHETIC_SEMANTIC", "urn:u002:g2:semantic")],
+         provision("SYNTHETIC_BASELINE", "urn:u002:g2:baseline", True),
+         "u21g.vertical.baseline"),
+        ("Vertical Handoff", "S7", "HANDOFF_EXPORT",
+         [requirement("SYNTHETIC_BASELINE", "urn:u002:g2:baseline")],
+         provision("SYNTHETIC_HANDOFF", "urn:u002:g2:handoff", True),
+         "u21g.vertical.handoff"),
+    )
+    display, stage, kind, requirements, provides, namespace = definitions[index]
+    return {
+        "ContractType": "U002_MODULE_MANIFEST",
+        "ContractVersion": "0.1",
+        "ModuleId": MODULE_IDS[index],
+        "ModuleVersion": "0.1.0",
+        "DisplayName": display,
+        "Description": "Runnable synthetic vertical-acceptance Module; no business algorithm.",
+        "Stage": stage,
+        "ModuleKind": kind,
+        "AlgorithmStatus": "FORMAL",
+        "ExecutionRequirement": "REQUIRED",
+        "ScopeSelector": {
+            "SignalSelectors": [{"CanonicalName": canonical_name}],
+            "FrameRangeSupported": True,
+        },
+        "RequiredInputs": [port(canonical_name)] if index == 0 else [],
+        "OptionalInputs": [],
+        "RequiresArtifacts": requirements,
+        "ProvidesArtifacts": [provides],
+        "OutputNamespace": namespace,
+        "ConfigurationSchema": {
+            "SchemaId": f"urn:u002:g2:config:m{index + 1}",
+            "SchemaVersion": "0.1.0",
+            "RelativePath": "config_schema.json",
+            "Sha256": schema_hash,
+        },
+        "FailurePolicy": "ABORT_RUN",
+        "ConflictPolicy": "ERROR_ON_COLLISION",
+        "Entrypoint": {"RelativeFile": "module.py", "Callable": "run_module"},
+        "SelfTest": {
+            "Arguments": ["--self-test"],
+            "ExpectedExitCode": 0,
+            "ExpectedToken": f"G2-M{index + 1}-SELFTEST-PASS",
+        },
+        "Compatibility": {"MinimumEngineVersion": "0.1.0", "MaximumEngineVersion": None},
+        "ImplementationSha256": implementation_hash,
+    }
+
+
+def build_module_packs(modules_root: Path, canonical_name: str) -> List[Path]:
+    packs: List[Path] = []
+    for index, module_id in enumerate(MODULE_IDS):
+        pack = modules_root / f"M{index + 1}_{module_id.split('.')[-1]}"
+        pack.mkdir(parents=True, exist_ok=False)
+        implementation = pack / "module.py"
+        schema_path = pack / "config_schema.json"
+        atomic_write_text(implementation, module_source(index, f"G2-M{index + 1}-SELFTEST-PASS"))
+        atomic_write_json(schema_path, configuration_schema(f"urn:u002:g2:config:m{index + 1}"))
+        atomic_write_json(
+            pack / "module_manifest.json",
+            manifest_for(index, canonical_name, sha256_file(implementation), sha256_file(schema_path)),
+        )
+        packs.append(pack)
+    return packs
+
+
+def verify_pack(pack: Path) -> dict:
+    manifest = read_json(pack / "module_manifest.json", "MANIFEST_JSON")
+    implementation = pack / manifest["Entrypoint"]["RelativeFile"]
+    schema = pack / manifest["ConfigurationSchema"]["RelativePath"]
+    require_file(implementation, "IMPLEMENTATION_FILE")
+    require_file(schema, "CONFIG_SCHEMA_FILE")
+    if sha256_file(implementation) != manifest["ImplementationSha256"]:
+        raise G2Error("IMPLEMENTATION_HASH")
+    if sha256_file(schema) != manifest["ConfigurationSchema"]["Sha256"]:
+        raise G2Error("CONFIG_SCHEMA_HASH")
+    return manifest
+
+
+def normalize_plan_order(plan: dict) -> List[str]:
+    selected = plan.get("SelectedModules")
+    if not isinstance(selected, list):
+        raise G2Error("PLAN_SELECTED_MODULES")
+    ordered = sorted(selected, key=lambda item: item.get("PlanOrder", 10**9))
+    result = [item.get("ModuleId") for item in ordered]
+    if not all(isinstance(item, str) for item in result):
+        raise G2Error("PLAN_ORDER_FORMAT")
+    return result
+
+
+def control_chain(programs: Mapping[str, Path], core: Mapping[str, Path],
+                  modules_root: Path, work: Path, logs: Path) -> Path:
+    registry_out = work / "registry_snapshot.json"
+    run_child(
+        [sys.executable, str(programs["registry"]), "--scan",
+         "--modules-root", str(modules_root), "--engine-version", ENGINE_VERSION,
+         "--schema-bundle", str(core["schema"]),
+         "--contract-validator", str(core["validator"]), "--out", str(registry_out)],
+        logs / "registry.stdout.txt", logs / "registry.stderr.txt", "REGISTRY",
+    )
+    registry = read_json(registry_out, "REGISTRY_JSON")
+    entries = registry.get("Modules")
+    if not isinstance(entries, list) or len(entries) != 3:
+        raise G2Error("REGISTRY_COUNT")
+
+    activations = work / "activation_evidence"
+    activations.mkdir()
+    for index, module_id in enumerate(MODULE_IDS):
+        evidence = activations / f"m{index + 1}_activation.json"
+        run_child(
+            [sys.executable, str(programs["activation"]), "--activate-one",
+             "--modules-root", str(modules_root), "--engine-version", ENGINE_VERSION,
+             "--module-id", module_id, "--module-version", "0.1.0",
+             "--registry-program", str(programs["registry"]),
+             "--schema-bundle", str(core["schema"]),
+             "--contract-validator", str(core["validator"]),
+             "--out", str(evidence), "--timeout-seconds", "30",
+             "--max-output-bytes", "65536"],
+            logs / f"activation_{index + 1}.stdout.txt",
+            logs / f"activation_{index + 1}.stderr.txt", f"ACTIVATION_M{index + 1}",
+        )
+        if read_json(evidence, "ACTIVATION_JSON").get("ActivationStatus") != "SELFTEST_ACCEPTED":
+            raise G2Error("ACTIVATION_STATUS")
+
+    plan_out = work / "software_plan.json"
+    command = [
+        sys.executable, str(programs["resolver"]), "--resolve-plan",
+        "--modules-root", str(modules_root),
+        "--activation-evidence-dir", str(activations),
+        "--engine-version", ENGINE_VERSION,
+        "--registry-program", str(programs["registry"]),
+        "--schema-bundle", str(core["schema"]),
+        "--contract-validator", str(core["validator"]),
+    ]
+    for module_id in MODULE_IDS:
+        command.extend(["--select", module_id + "@0.1.0"])
+    command.extend(["--out", str(plan_out)])
+    run_child(command, logs / "resolver.stdout.txt", logs / "resolver.stderr.txt", "RESOLVER")
+    plan = read_json(plan_out, "PLAN_JSON")
+    if plan.get("PlanStatus") != "SOFTWARE_PLAN_READY":
+        raise G2Error("PLAN_STATUS")
+    if normalize_plan_order(plan) != list(MODULE_IDS):
+        raise G2Error("PLAN_ORDER")
+    return plan_out
+
+
+def make_run_request(path: Path, canonical_name: str) -> None:
+    atomic_write_json(path, {
+        "RequestType": "U002_RUN_PREFLIGHT_REQUEST",
+        "RequestVersion": "0.1",
+        "CaseId": "U21G_G2_SYNTHETIC",
+        "RunPurpose": "SMOKE",
+        "Scope": {
+            "ScopeType": "FULL_CASE",
+            "FrameStart": None,
+            "FrameEnd": None,
+            "RangeReason": "Complete synthetic vertical acceptance",
+            "SelectionSource": "TEST_PLAN",
+            "SelectedBeforeResults": True,
+        },
+        "ClockDomain": {
+            "ClockKind": "FRAMECOUNT",
+            "ClockDomainId": "U21G_G2_FRAMECOUNT",
+            "FrameRateHz": 20.0,
+            "TimeUnit": "frame",
+        },
+        "InputBindings": [{
+            "ModuleId": MODULE_IDS[0],
+            "ModuleVersion": "0.1.0",
+            "PortId": "primary_signal",
+            "SelectionMode": "EXPLICIT",
+            "CanonicalNames": [canonical_name],
+        }],
+        "ResolvedConfigurations": {module_id + "@0.1.0": {} for module_id in MODULE_IDS},
+        "Notes": "Project-owned synthetic U21G G2 acceptance; no business result.",
+    })
+
+
+def bind_preflight(programs: Mapping[str, Path], plan: Path, modules_root: Path,
+                   package: Path, work: Path, logs: Path, canonical_name: str) -> Path:
+    request = work / "run_request.json"
+    make_run_request(request, canonical_name)
+    output = work / "run_preflight.json"
+    run_child(
+        [sys.executable, str(programs["binder"]), "--bind-run",
+         "--software-plan", str(plan), "--modules-root", str(modules_root),
+         "--u001-package", str(package), "--run-request", str(request),
+         "--out", str(output)],
+        logs / "binder.stdout.txt", logs / "binder.stderr.txt", "BINDER",
+    )
+    document = read_json(output, "BINDER_OUTPUT_JSON")
+    if document.get("PreflightType") != "U002_RUN_PREFLIGHT_BINDING":
+        raise G2Error("PREFLIGHT_TYPE")
+    if document.get("PreflightStatus") != "RUN_PREFLIGHT_READY":
+        raise G2Error("PREFLIGHT_STATUS")
+    if document.get("CaseId") != "U21G_G2_SYNTHETIC":
+        raise G2Error("PREFLIGHT_CASE")
+    return output
+
+
+def execute_run(programs: Mapping[str, Path], core: Mapping[str, Path], promotion: Path,
+                preflight: Path, plan: Path, modules_root: Path, package: Path,
+                run_root: Path, logs: Path) -> Path:
+    run_root.mkdir(parents=True, exist_ok=False)
+    before = {item.name for item in run_root.iterdir() if item.is_dir()}
+    run_child(
+        [sys.executable, str(programs["executor"]), "--execute-run",
+         "--preflight", str(preflight), "--software-plan", str(plan),
+         "--modules-root", str(modules_root), "--u001-package", str(package),
+         "--run-root", str(run_root), "--engine", str(programs["engine"]),
+         "--protocol-bundle", str(programs["protocol_bundle"]),
+         "--protocol-validator", str(programs["protocol_validator"]),
+         "--protocol-promotion-evidence", str(promotion),
+         "--schema-bundle", str(core["schema"]),
+         "--contract-validator", str(core["validator"]),
+         "--module-timeout-seconds", "30", "--max-retained-log-bytes", "65536"],
+        logs / "executor.stdout.txt", logs / "executor.stderr.txt", "EXECUTOR", timeout=360,
+    )
+    after = {item.name for item in run_root.iterdir() if item.is_dir()}
+    created = sorted(after - before)
+    if len(created) != 1:
+        raise G2Error("RUN_DISCOVERY")
+    return run_root / created[0]
+
+
+def safe_relative(root: Path, relative: str) -> Path:
+    if not isinstance(relative, str) or not relative or "\\" in relative:
+        raise G2Error("UNSAFE_RELATIVE_PATH")
+    rel = Path(relative)
+    if rel.is_absolute() or ".." in rel.parts:
+        raise G2Error("UNSAFE_RELATIVE_PATH")
+    candidate = (root / rel).resolve()
+    try:
+        candidate.relative_to(root.resolve())
+    except ValueError as exc:
+        raise G2Error("UNSAFE_RELATIVE_PATH") from exc
+    return candidate
+
+
+def validate_governed_run(run_dir: Path, core: Mapping[str, Path], logs: Path) -> None:
+    manifest_path = run_dir / "run_manifest.json"
+    require_file(manifest_path, "RUN_MANIFEST_FILE")
+    manifest = read_json(manifest_path, "RUN_MANIFEST_JSON")
+    if manifest.get("ContractType") != "U002_RUN_MANIFEST":
+        raise G2Error("RUN_MANIFEST_TYPE")
+    if manifest.get("RunStatus") != "SUCCEEDED":
+        raise G2Error("RUN_STATUS")
+    stages = manifest.get("Stages")
+    if not isinstance(stages, list) or [item.get("Stage") for item in stages] != [f"S{i}" for i in range(8)]:
+        raise G2Error("STAGE_ORDER")
+    if any(item.get("Status") != "SUCCEEDED" for item in stages):
+        raise G2Error("STAGE_STATUS")
+    resolved = manifest.get("ResolvedModules")
+    if not isinstance(resolved, list):
+        raise G2Error("RUN_MODULES")
+    statuses = {item.get("ModuleId"): item.get("Status") for item in resolved}
+    if any(statuses.get(module_id) != "SUCCEEDED" for module_id in MODULE_IDS):
+        raise G2Error("MODULE_STATUS")
+    references = manifest.get("Artifacts")
+    if not isinstance(references, list) or len(references) < 3:
+        raise G2Error("ARTIFACT_COUNT")
+    observed = set()
+    for reference in references:
+        relative = reference.get("ManifestRelativePath")
+        artifact_path = safe_relative(run_dir, relative)
+        require_file(artifact_path, "ARTIFACT_MANIFEST_FILE")
+        if sha256_file(artifact_path) != reference.get("ManifestSha256"):
+            raise G2Error("ARTIFACT_MANIFEST_HASH")
+        artifact = read_json(artifact_path, "ARTIFACT_MANIFEST_JSON")
+        if artifact.get("ArtifactStatus") != "COMPLETE":
+            raise G2Error("ARTIFACT_STATUS")
+        artifact_type = artifact.get("ArtifactType")
+        if artifact_type in EXPECTED_ARTIFACT_TYPES:
+            observed.add(artifact_type)
+    if observed != set(EXPECTED_ARTIFACT_TYPES):
+        raise G2Error("ARTIFACT_TYPES")
+    run_child(
+        [sys.executable, str(core["validator"]), "--schema-bundle", str(core["schema"]),
+         "--validate", str(manifest_path)],
+        logs / "run_manifest_validator.stdout.txt",
+        logs / "run_manifest_validator.stderr.txt", "RUN_MANIFEST_VALIDATOR",
+    )
+
+
+def runtime_paths(workspace_root: Path) -> Tuple[Dict[str, Path], Dict[str, Path], Path]:
+    programs_dir = workspace_root / "01_PROGRAMS"
+    temp_dir = workspace_root / "04_TEMP"
+    programs = {name: programs_dir / filename for name, filename in PROGRAM_NAMES.items()}
+    core = {name: temp_dir / filename for name, filename in CORE_NAMES.items()}
+    promotion = workspace_root / PROMOTION_EVIDENCE
+    for path in list(programs.values()) + list(core.values()) + [promotion]:
+        require_file(path, "DEPENDENCY_FILE")
+    return programs, core, promotion
+
+
+def run_vertical(workspace_root: Path, out_dir: Path) -> str:
+    workspace_root = workspace_root.resolve(strict=True)
+    programs, core, promotion = runtime_paths(workspace_root)
+    package, accepted_preflight = locate_accepted_u21e_fixture(workspace_root)
+    canonical_name = choose_signal(package, accepted_preflight)
+    protected_external = list(programs.values()) + list(core.values()) + [promotion]
+    protected_package = [package / name for name in STANDARD_FILES]
+    before = snapshot_inputs(protected_external + protected_package)
+    if out_dir.exists() or out_dir.with_name(out_dir.name + ".staging").exists():
+        raise G2Error("OUTPUT_EXISTS")
+    staging = out_dir.with_name(out_dir.name + ".staging")
+    staging.mkdir(parents=True, exist_ok=False)
+    work = staging / "control"
+    modules_root = staging / "modules"
+    logs = staging / "logs"
+    work.mkdir()
+    packs = build_module_packs(modules_root, canonical_name)
+    module_before = snapshot_inputs(
+        path for pack in packs for path in (
+            pack / "module_manifest.json", pack / "module.py", pack / "config_schema.json"
+        )
+    )
+    plan = control_chain(programs, core, modules_root, work, logs)
+    preflight = bind_preflight(programs, plan, modules_root, package, work, logs, canonical_name)
+    run_dir = execute_run(
+        programs, core, promotion, preflight, plan, modules_root, package,
+        staging / "runs", logs,
+    )
+    validate_governed_run(run_dir, core, logs)
+    after = snapshot_inputs(protected_external + protected_package)
+    if before != after:
+        raise G2Error("INPUT_MUTATION")
+    module_after = snapshot_inputs(Path(key) for key in module_before)
+    if module_before != module_after:
+        raise G2Error("MODULE_MUTATION")
+    acceptance = {
+        "AcceptanceType": "U002_U21G_G2_SYNTHETIC_VERTICAL",
+        "AcceptanceVersion": VERSION,
+        "GeneratedAtUtc": utc_now(),
+        "Status": "SYNTHETIC_VERTICAL_RUN_ACCEPTED",
+        "ModuleIds": list(MODULE_IDS),
+        "StageOrder": list(EXPECTED_STAGES),
+        "BoundCanonicalName": canonical_name,
+        "U001FixtureFingerprintD2D5": list(package_tuple(package)),
+        "SoftwarePlanSha256": sha256_file(plan),
+        "PreflightSha256": sha256_file(preflight),
+        "RunManifestSha256": sha256_file(run_dir / "run_manifest.json"),
+        "GovernedStageCount": 8,
+        "ExpectedArtifactTypes": list(EXPECTED_ARTIFACT_TYPES),
+        "ProtectedExternalAndPackageInputCount": 17,
+        "InputsUnchanged": True,
+        "CompanyDataUsed": False,
+    }
+    atomic_write_json(staging / "u21g2_vertical_acceptance.json", acceptance)
+    atomic_write_text(staging / "u21g2_capsule.txt", RUN_CAPSULE + "\n")
+    os.replace(staging, out_dir)
+    return RUN_CAPSULE
+
+
+def import_run_module(path: Path):
+    spec = importlib.util.spec_from_file_location("u21g2_selftest_module", path)
+    if spec is None or spec.loader is None:
+        raise AssertionError("IMPORT_SPEC")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.run_module
+
+
+def self_test(schema_bundle: Path, contract_validator: Path) -> str:
+    require_file(schema_bundle, "SCHEMA_FILE")
+    require_file(contract_validator, "VALIDATOR_FILE")
+    checks = 0
+
+    def ck(value: bool) -> None:
+        nonlocal checks
+        if not value:
+            raise AssertionError("SELFTEST_ASSERTION")
+        checks += 1
+
+    with tempfile.TemporaryDirectory(prefix="u21g2_") as raw:
+        root = Path(raw)
+        packs = build_module_packs(root / "modules", "Synthetic.Primary")
+        ck(len(packs) == 3)
+        manifests = [verify_pack(pack) for pack in packs]
+        ck([item["ModuleId"] for item in manifests] == list(MODULE_IDS))
+        ck([item["Stage"] for item in manifests] == list(EXPECTED_STAGES))
+        ck([item["ProvidesArtifacts"][0]["ArtifactType"] for item in manifests] == list(EXPECTED_ARTIFACT_TYPES))
+        ck(manifests[0]["RequiredInputs"][0]["Selectors"][0]["CanonicalName"] == "Synthetic.Primary")
+        ck(manifests[1]["RequiresArtifacts"][0]["ArtifactType"] == "SYNTHETIC_SEMANTIC")
+        ck(manifests[2]["RequiresArtifacts"][0]["ArtifactType"] == "SYNTHETIC_BASELINE")
+        for index, pack in enumerate(packs):
+            run_child(
+                [sys.executable, str(contract_validator), "--schema-bundle", str(schema_bundle),
+                 "--validate", str(pack / "module_manifest.json")],
+                root / f"manifest_{index}.stdout", root / f"manifest_{index}.stderr",
+                "MANIFEST_VALIDATION",
+            )
+        ck(True)
+        for index, pack in enumerate(packs):
+            request_root = root / f"runtime_{index}"
+            request = {
+                "RunId": "RUN_20260819T000000000000Z_A1B2C3",
+                "Stage": EXPECTED_STAGES[index],
+                "ModuleIdentity": {"ModuleId": MODULE_IDS[index], "ModuleVersion": "0.1.0"},
+                "BoundSignals": ([] if index else [{"CanonicalNames": ["Synthetic.Primary"]}]),
+                "InputArtifacts": ([] if index == 0 else [{"ArtifactId": "ART_SYNTHETIC"}]),
+                "RuntimePaths": {"StagingRoot": str(request_root)},
+            }
+            result = import_run_module(pack / "module.py")(request)
+            ck(result["Status"] == "SUCCEEDED")
+            ck(result["Artifacts"][0]["ArtifactType"] == EXPECTED_ARTIFACT_TYPES[index])
+            ck((request_root / result["Artifacts"][0]["Payloads"][0]["RelativePath"]).is_file())
+        ck(all(verify_pack(pack)["ImplementationSha256"] == sha256_file(pack / "module.py") for pack in packs))
+        ck(all(verify_pack(pack)["ConfigurationSchema"]["Sha256"] == sha256_file(pack / "config_schema.json") for pack in packs))
+        request_path = root / "request.json"
+        make_run_request(request_path, "Synthetic.Primary")
+        request = read_json(request_path, "REQUEST")
+        ck(request["RunPurpose"] == "SMOKE")
+        ck(request["InputBindings"][0]["CanonicalNames"] == ["Synthetic.Primary"])
+        ck(len(request["ResolvedConfigurations"]) == 3)
+        ck(RUN_CAPSULE.endswith("C-0"))
+        ck(checks == 23)
+    if checks != 24:
+        raise AssertionError("SELFTEST_COUNT")
+    return SELFTEST_CAPSULE
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="U21G G2 complete synthetic vertical acceptance")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--run", action="store_true")
+    parser.add_argument("--schema-bundle", type=Path)
+    parser.add_argument("--contract-validator", type=Path)
+    parser.add_argument("--workspace-root", type=Path)
+    parser.add_argument("--out-dir", type=Path)
+    args = parser.parse_args(argv)
+    if args.self_test and (args.schema_bundle is None or args.contract_validator is None):
+        parser.error("--self-test requires --schema-bundle and --contract-validator")
+    if args.run and (args.workspace_root is None or args.out_dir is None):
+        parser.error("--run requires --workspace-root and --out-dir")
+    return args
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        if args.self_test:
+            capsule = self_test(args.schema_bundle, args.contract_validator)
+        else:
+            capsule = run_vertical(args.workspace_root, args.out_dir)
+        print(capsule)
+        return 0
+    except G2Error as exc:
+        title = "G2ST" if args.self_test else "G2P"
+        print(f"{title} N-M0-B0-E0-R0-S0-A0-I0-X1 C-7 K-{exc.reason}")
+        return 7
+    except Exception:
+        title = "G2ST" if args.self_test else "G2P"
+        print(f"{title} N-M0-B0-E0-R0-S0-A0-I0-X1 C-7 K-INTERNAL")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
