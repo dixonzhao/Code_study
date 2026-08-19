@@ -1,0 +1,73 @@
+UDP002 U21G G2 D1 - Executor Failure Diagnostic v0.1
+Date: 2026-08-19
+Status: AUTHORIZED READ-ONLY DIAGNOSTIC
+
+1. Why this diagnostic exists
+
+The first company-side G2 formal run returned:
+
+G2P N-M0-B0-E0-R0-S0-A0-I0-X1 C-7 K-EXECUTOR_EXIT
+
+This proves only that the frozen Controlled Stage Executor child process
+returned non-zero. It does not prove that the Executor source is defective.
+The actual failure may be at bootstrap, Module execution, Stage transition,
+Artifact commitment or final Run status. G2 correctly failed closed and kept
+its .staging evidence.
+
+Do not rerun G2. Do not edit the Executor, G2 controller, Modules, manifests,
+Core files or retained .staging directory before D1 completes.
+
+2. Required working set
+
+Place this one transferred program directly in:
+
+U-UDP002\04_TEMP\u002_g2_executor_failure_diagnostic_v0_1.py.txt
+
+The retained evidence must remain at:
+
+U-UDP002\05_TESTS\02_ACCEPTANCE\U21G_G2_VERTICAL_V01.staging
+
+No G2 source or frozen runtime program is required for D1. D1 never imports or
+executes project code and never reads company CAN, DBC or video data.
+
+3. CMD execution from C-CODE
+
+Self-test:
+
+python U-UDP002\04_TEMP\u002_g2_executor_failure_diagnostic_v0_1.py.txt --self-test
+
+If self-test returns C-7, stop and return that one line. Normal self-test C-0
+does not need to be typed back.
+
+Read-only evidence diagnosis:
+
+python U-UDP002\04_TEMP\u002_g2_executor_failure_diagnostic_v0_1.py.txt --diagnose --g2-staging U-UDP002\05_TESTS\02_ACCEPTANCE\U21G_G2_VERTICAL_V01.staging
+
+4. Return rule
+
+Return only the line beginning G2D1. If a second line beginning M1 is printed,
+return that too. Do not manually open or transcribe logs.
+
+Field meaning:
+
+O  executor stdout is non-empty
+E  executor stderr is non-empty
+T  Python traceback was found
+R  retained RUN_* directory count
+J  parseable run_manifest.json count
+S  S0-S7 status mask: S=Succeeded, F=Failed, P=Pending, K=Skipped,
+   R=Running, ?=unknown
+MS/MF/MK/MP  succeeded/failed/skipped/pending Module counts
+A  committed Artifact-reference count in Run Manifest
+D  stable failure tokens found in diagnostics
+X  uncontrolled diagnostic failure count
+K  best stable failure layer/reason found
+
+C-0 means only that D1 read and classified the evidence successfully. It does
+not mean G2 passed and it does not authorize repair or rerun.
+
+5. Success standard
+
+D1 succeeds when it produces one compact classification while proving the
+retained evidence directory is byte-identical before and after diagnosis.
+The next correction decision is made only from that result.
