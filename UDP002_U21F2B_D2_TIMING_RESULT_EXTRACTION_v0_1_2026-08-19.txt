@@ -1,0 +1,91 @@
+UDP002 U21F2B DIAGNOSTIC RESULT EXTRACTION D2
+
+Task ID: U21F2B-D2
+Version: 0.1
+Date: 2026-08-19
+Owner: Zhao Zhili
+Status: READ-ONLY RESULT EXTRACTION
+
+PURPOSE
+
+The bounded diagnostic returned:
+
+  U21F2BD1 N-L1-P5-S8-R0-T1-I7-X0 C-0
+  MEMO1-TOP-u002_controlled_stage_executor_v0_2.py.txt@L101@selftest-N6
+  MEMO2-CHILD-u002_controlled_stage_executor_v0_2.py.txt@L128@main-N6
+
+The supervised Executor ended after one second, so the previous eight-minute
+overrun was not reproduced. Read the structured result to classify the actual
+child outcome. Do not modify or rerun any program.
+
+GIVE TO COPILOT
+
+Provide exactly:
+
+1. this instruction;
+2. `u21f2b_timing_diagnostic.json` from
+   U-UDP002\05_TESTS\01_INTERNAL\U21F2B_DIAG01.
+
+Do not generate Python, BAT, PowerShell or a replacement JSON.
+
+EXTRACT
+
+Read the semantic fields for:
+
+- child return code or TIME_LIMIT;
+- whether the 120-second limit was reached;
+- final non-empty child stdout line;
+- stderr state;
+- whether a Traceback occurred;
+- whether process-tree termination was requested/succeeded.
+
+If a field is absent or ambiguous, use code 9. Do not infer it from the chat
+capsule or MEMO lines.
+
+RETURN EXACTLY
+
+  U21F2BD2 N-R<r>-L<l>-O<o>-E<e>-K<k>-X0 C-0
+
+Codes:
+
+R child outcome:
+  0 = exit code 0
+  1 = nonzero normal exit
+  2 = time-limit termination
+  9 = missing/ambiguous
+
+L time limit reached:
+  0 = no
+  1 = yes
+  9 = missing/ambiguous
+
+O final stdout:
+  0 = empty
+  1 = exact `U21F2B1 ... C-0` success capsule
+  2 = `U21F2B1 ... C-7` failure capsule
+  3 = other non-empty text
+  9 = unavailable
+
+E stderr:
+  0 = empty
+  1 = contains Traceback
+  2 = other non-empty text
+  9 = unavailable
+
+K process-tree termination:
+  0 = not requested because child exited normally
+  1 = requested and succeeded
+  2 = requested and failed/partial
+  9 = unavailable
+
+Add only when O=3:
+
+  MEMO1-OUT-<final line, maximum 100 characters>
+
+Add only when E=2:
+
+  MEMO2-ERR-<final line or class, maximum 100 characters>
+
+C-0 means extraction succeeded, not that U21F2B passed.
+
+END OF D2
