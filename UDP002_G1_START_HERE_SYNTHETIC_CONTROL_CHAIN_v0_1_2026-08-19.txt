@@ -1,0 +1,85 @@
+UDP002 U21G G1 SYNTHETIC CONTROL-CHAIN INTEGRATION
+
+Task: G1
+Version: 0.1
+Date: 2026-08-19
+Owner: Zhao Zhili
+Status: AUTHORIZED AFTER G0P C-0
+
+1. PURPOSE
+
+Execute the first cross-program integration using three project-defined
+synthetic Modules:
+
+  Registry -> Activation x3 -> Qualified Plan Resolver
+
+Expected Module order is fixed as S1 -> S4 -> S7. This proves the promoted
+U21B/U21C/U21D programs exchange real files through their public contracts.
+It does not use U001, company signals, Camera/Radar mathematics or real data.
+
+2. DESIGN OWNERSHIP
+
+The supplied Python file is the complete project-owned implementation. Do not
+ask Copilot to rewrite, simplify or repair it. Copilot may only explain the CMD
+command or identify a missing local path after C-7.
+
+3. DOWNLOAD
+
+Place directly in U-UDP002\04_TEMP:
+
+  u002_g1_synthetic_control_chain_v0_1.py.txt
+
+Keep the two Core files from G0 in the same folder. G0 files may remain until
+G1 closes.
+
+4. REQUIRED WORKING SET
+
+U-UDP002\01_PROGRAMS directly contains:
+
+  u002_module_registry_v0_1.py
+  u002_module_activation_controller_v0_1.py
+  u002_qualified_module_plan_resolver_v0_1.py
+
+U-UDP002\04_TEMP directly contains:
+
+  u002_core_contract_schema_bundle_v0_1.json.txt
+  u002_core_contract_validator_v0_1.py.txt
+  u002_g1_synthetic_control_chain_v0_1.py.txt
+
+5. CMD FROM C-CODE ROOT
+
+Internal self-test (run it, but return it only if C-7):
+
+  python ".\U-UDP002\04_TEMP\u002_g1_synthetic_control_chain_v0_1.py.txt" --self-test --schema-bundle ".\U-UDP002\04_TEMP\u002_core_contract_schema_bundle_v0_1.json.txt" --contract-validator ".\U-UDP002\04_TEMP\u002_core_contract_validator_v0_1.py.txt"
+
+Expected:
+
+  G1ST N-T20-M3-V3-H6-D4-I4-X0 C-0
+
+Final integration run:
+
+  python ".\U-UDP002\04_TEMP\u002_g1_synthetic_control_chain_v0_1.py.txt" --run --workspace-root ".\U-UDP002" --out-dir ".\U-UDP002\05_TESTS\02_ACCEPTANCE\U21G1_CONTROL_V01"
+
+Expected:
+
+  G1P N-M3-R1-A3-P1-O3-I5-X0 C-0
+
+6. OUTPUT
+
+The governed output directory contains generated synthetic Module Packs, one
+Registry Snapshot, three accepted Activation Evidence files, one qualified
+Software Plan, bounded child logs, acceptance JSON and capsule. It contains no
+company data and persists no company absolute path in the acceptance record.
+
+7. RETURN POLICY
+
+If the final integration run is C-0, return only its G1P line. Omit the normal
+self-test line. If self-test is C-7, stop and return that line instead.
+
+8. NEXT
+
+G1P C-0 authorizes G2: construct one synthetic U001 six-file package, bind it
+through U21E and execute the qualified chain through U21F. Real company data
+remains unauthorized.
+
+END
