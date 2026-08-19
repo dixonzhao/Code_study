@@ -1,0 +1,210 @@
+UDP002 U21F2A ACCEPTED PROTOCOL PROMOTION
+
+Task ID: U21F2A-PROMOTION
+Version: 0.1
+Date: 2026-08-19
+Owner: Zhao Zhili
+Status: APPROVED FOR COMPANY-SIDE GENERATION AND EXECUTION
+
+
+1. PURPOSE
+
+Promote only the exact two U21F2A candidates accepted by the independent Gate,
+then execute the relocated validator's complete self-test against the relocated
+protocol bundle.
+
+Accepted Gate capsule:
+
+  U21F2AG1 N-R2-P4-D12-I4-X0 C-0
+
+No Executor, Module, U21G or company-data execution is part of this task.
+
+
+2. PROVIDE TO A FRESH COPILOT CHAT
+
+1. this complete promotion instruction;
+2. the exact passing `u21f2a_gate_acceptance.json` from:
+   U-UDP002\05_TESTS\02_ACCEPTANCE\U21F2A_GATE_V01.
+
+Do not provide a failed Gate directory or manually transcribed SHA-256. Copilot
+must read the actual evidence field structure and embed the two accepted
+candidate hashes in the generated utility.
+
+
+3. GENERATE EXACTLY ONE DOWNLOADABLE FILE
+
+  u002_u21f2a_promote_accepted_protocol_v0_1.py.txt
+
+Return the complete attachment, not only code or prose. Use UTF-8/LF, English
+identifiers, concise English comments and Python standard library only. Place
+it directly in U-UDP002\04_TEMP and retain the .py.txt transfer suffix.
+
+
+4. FIXED LOGICAL IDENTITIES
+
+Candidate sources:
+
+  .\U-UDP002\04_TEMP\u002_module_runtime_protocol_bundle_v0_2.json.txt
+  .\U-UDP002\04_TEMP\u002_module_runtime_protocol_validator_v0_2.py.txt
+
+Formal destinations:
+
+  .\U-UDP002\01_PROGRAMS\u002_module_runtime_protocol_bundle_v0_2.json
+  .\U-UDP002\01_PROGRAMS\u002_module_runtime_protocol_validator_v0_2.py
+
+Passing Gate evidence:
+
+  .\U-UDP002\05_TESTS\02_ACCEPTANCE\U21F2A_GATE_V01\u21f2a_gate_acceptance.json
+
+Promotion evidence directory:
+
+  .\U-UDP002\05_TESTS\02_ACCEPTANCE\U21F2A_PROMOTION_V01
+
+Transfer suffixes are intentionally removed only in the new formal destination
+names. Source files are not renamed or edited.
+
+
+5. GENERATED UTILITY CLI
+
+Exactly one action:
+
+  --self-test
+
+or:
+
+  --promote
+  --protocol-bundle-src PATH
+  --protocol-validator-src PATH
+  --gate-evidence PATH
+  --programs-dir PATH
+  --out-dir PATH
+
+All five promotion arguments are mandatory. No glob, newest-file discovery,
+adjacent-file fallback or implicit CWD search is permitted.
+
+
+6. ACCEPTED IDENTITY
+
+The generated utility must embed both exact SHA-256 values read from the actual
+passing Gate evidence. At runtime it must also independently parse that evidence
+with duplicate-key rejection and require:
+
+- PASS Gate status using the evidence's real field path;
+- exact ReturnCapsule `U21F2AG1 N-R2-P4-D12-I4-X0 C-0`;
+- exact logical candidate basenames;
+- evidence-recorded hashes equal the two embedded accepted hashes;
+- live source hashes equal the embedded accepted hashes.
+
+If the evidence uses a list or nested object, follow its actual structure. Do
+not invent a replacement evidence schema merely to simplify generation.
+
+
+7. REQUIRED PROMOTION SEQUENCE
+
+1. require both source files and Gate evidence as regular non-symlink files;
+2. require programs-dir as an existing real directory;
+3. require the promotion out-dir not to exist;
+4. compute source SHA-256 using streamed binary reads;
+5. validate Gate status, exact capsule, logical names and both hash identities;
+6. reject a non-identical existing formal destination;
+7. create a private staging directory below programs-dir;
+8. copy exact source bytes into staged runtime names without decoding text;
+9. verify staged SHA-256 and byte equality against sources;
+10. run the staged validator with the staged bundle and require exact output:
+
+      U21F2A1 N-T24-P4-D16-K4-X0 C-0
+
+11. atomically replace each absent formal destination from the staged bytes;
+12. verify both final destination hashes and byte equality;
+13. mark both destinations read-only;
+14. run the final relocated validator against the final relocated bundle;
+15. require return code 0, no Traceback and the exact self-test line above;
+16. recheck both source hashes and Gate evidence hash after execution;
+17. write deterministic promotion evidence and the final capsule atomically;
+18. remove only the private staging directory created by this run.
+
+Never overwrite a non-identical destination. Never modify or delete source
+candidates or Gate evidence. Never normalize line endings.
+
+
+8. PROMOTION EVIDENCE
+
+On success create exactly:
+
+  u21f2a_promotion_evidence.json
+  u21f2a_promotion_capsule.txt
+
+inside the new out-dir. Evidence contains Gate evidence SHA-256, accepted source
+hashes, final destination hashes, byte-equality results, relocated self-test
+classification, logical basenames, UTC time and utility version. Do not record
+absolute paths.
+
+On failure create at most one bounded `u21f2a_promotion_failure.json`. Do not
+generate a correction or alter accepted files.
+
+
+9. UTILITY SELF-TEST
+
+Use only private temporary files. Prove 16 named checks covering:
+
+- valid two-file staged promotion;
+- evidence/capsule/hash agreement;
+- non-identical destination refusal;
+- missing/symlink input refusal;
+- byte-identical copying without newline conversion;
+- staged and relocated child self-test classification;
+- read-only destination setting;
+- evidence atomicity and input immutability.
+
+Success:
+
+  U21F2APST N-T16-P2-D8-I6-X0 C-0
+
+Failure:
+
+  U21F2APST N-T<t>-P<p>-D<d>-I<i>-X<x> C-7 K-<STABLE_REASON>
+
+
+10. FINAL RETURN
+
+Success:
+
+  U21F2AP1 N-G1-H2-C2-R1-E1-X0 C-0
+
+Meanings:
+
+  G1  passing Gate evidence and capsule accepted
+  H2  two source hashes match Gate-accepted identities
+  C2  two formal destinations are byte-identical
+  R1  relocated full protocol self-test passed
+  E1  deterministic promotion evidence committed
+  X0  no uncontrolled exception
+
+Failure:
+
+  U21F2AP1 N-G<g>-H<h>-C<c>-R<r>-E<e>-X<x> C-7 K-<STABLE_REASON>
+
+
+11. CMD EXECUTION FROM C-CODE ROOT
+
+First:
+
+  python ".\U-UDP002\04_TEMP\u002_u21f2a_promote_accepted_protocol_v0_1.py.txt" --self-test
+
+Then:
+
+  python ".\U-UDP002\04_TEMP\u002_u21f2a_promote_accepted_protocol_v0_1.py.txt" --promote --protocol-bundle-src ".\U-UDP002\04_TEMP\u002_module_runtime_protocol_bundle_v0_2.json.txt" --protocol-validator-src ".\U-UDP002\04_TEMP\u002_module_runtime_protocol_validator_v0_2.py.txt" --gate-evidence ".\U-UDP002\05_TESTS\02_ACCEPTANCE\U21F2A_GATE_V01\u21f2a_gate_acceptance.json" --programs-dir ".\U-UDP002\01_PROGRAMS" --out-dir ".\U-UDP002\05_TESTS\02_ACCEPTANCE\U21F2A_PROMOTION_V01"
+
+
+12. RETURN TO PROJECT LEAD
+
+If self-test fails, return its C-7 line. Otherwise return only U21F2AP1. Add at
+most one short Memo only when STABLE_REASON is insufficient.
+
+
+13. COMPLETION BOUNDARY
+
+Promotion C-0 freezes U21F2A and authorizes design of U21F2B Controlled Stage
+Executor v0.2. It does not execute production Modules or real company data.
+
+END OF U21F2A PROMOTION INSTRUCTION
