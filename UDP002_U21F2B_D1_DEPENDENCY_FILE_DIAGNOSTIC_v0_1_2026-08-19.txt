@@ -1,0 +1,86 @@
+UDP002 U21F2B DEPENDENCY FILE DIAGNOSTIC D1
+
+Task ID: U21F2B-D1
+Version: 0.1
+Date: 2026-08-19
+Owner: Zhao Zhili
+Status: READ-ONLY DIAGNOSIS AUTHORIZED
+
+
+1. PURPOSE
+
+The first U21F2B dependency preflight returned:
+
+  U21F2BDP N-E0-P0-C0-H0-X0 C-7 K-DEPENDENCY_FILE
+
+Locate which of the six exact CLI dependency paths is not a regular file.
+Do not modify the Executor or any dependency.
+
+
+2. GIVE TO A FRESH COPILOT CHAT
+
+Give only this instruction. Do not attach company data.
+
+Copilot must generate exactly one downloadable file:
+
+  u002_u21f2b_dependency_path_probe_v0_1.py.txt
+
+Place it directly in:
+
+  U-UDP002\04_TEMP
+
+Use Python standard library only. Do not generate BAT, PowerShell, replacement
+Executor, replacement evidence or corrected dependency.
+
+
+3. PROBE BEHAVIOR
+
+The probe is launched from the C-CODE root with no arguments. It must inspect
+these six exact relative paths using pathlib.Path.is_file():
+
+E  .\U-UDP002\01_PROGRAMS\u002_engine_skeleton_v0_1.py
+B  .\U-UDP002\01_PROGRAMS\u002_module_runtime_protocol_bundle_v0_2.json
+V  .\U-UDP002\01_PROGRAMS\u002_module_runtime_protocol_validator_v0_2.py
+P  .\U-UDP002\05_TESTS\02_ACCEPTANCE\U21F2A_PROMOTION_V02\u21f2a_promotion_acceptance.json
+S  .\U-UDP002\04_TEMP\u002_core_contract_schema_bundle_v0_1.json.txt
+C  .\U-UDP002\04_TEMP\u002_core_contract_validator_v0_1.py.txt
+
+For each path output 1 only when it is a regular file; otherwise output 0.
+Do not read file content, calculate hashes, follow fallback names, search other
+directories, copy, rename or write anything.
+
+Also count how many of the six expected parent directories exist as directories
+after path normalization. This is diagnostic information only.
+
+
+4. EXACT RETURN
+
+Print exactly one line:
+
+  U21F2BD1 N-E<e>-B<b>-V<v>-P<p>-S<s>-C<c>-D<d>-X0 C-0
+
+where d is the number of expected parent directories that exist, from 0 to 6.
+
+Example only:
+
+  U21F2BD1 N-E1-B1-V1-P0-S1-C1-D5-X0 C-0
+
+Do not print absolute paths, directory listings, hashes or file contents.
+
+On uncontrolled probe failure print:
+
+  U21F2BD1 N-E0-B0-V0-P0-S0-C0-D0-X1 C-7 K-PROBE
+
+
+5. EXECUTION
+
+From C-CODE root run:
+
+  python ".\U-UDP002\04_TEMP\u002_u21f2b_dependency_path_probe_v0_1.py.txt"
+
+
+6. RETURN TO PROJECT LEAD
+
+Return only the single U21F2BD1 line. Do not let Copilot repair anything yet.
+
+END OF U21F2B-D1
