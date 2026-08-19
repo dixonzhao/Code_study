@@ -1,0 +1,92 @@
+UDP002 G2R2 EXECUTOR v0.6 PROMOTION-EVIDENCE CORRECTION
+
+Task: G2R2
+Date: 2026-08-19
+Owner: Zhao Zhili
+Status: EXECUTION AUTHORIZED
+
+
+1. CORRECTION
+
+G2R1 correctly failed before installation. Executor v0.5 incorrectly required
+the final Promotion v0.2 return capsule to occur inside the promotion JSON.
+The frozen Promotion v0.2 contract intentionally stores instead:
+
+- PromotionToolVersion = 0.2;
+- exact original Gate capsule;
+- exact relocated Protocol Validator self-test capsule;
+- both installed runtime SHA-256 values;
+- two positive byte-equality results.
+
+The read-only G2R1P1 probe confirmed V1-G1-P0-S1-H2-B2. Executor v0.6
+validates these real semantic fields without weakening identity checks.
+
+
+2. DOWNLOAD EXACTLY THREE NEW FILES
+
+Place directly under U-UDP002\04_TEMP:
+
+1. this START_HERE file;
+2. u002_controlled_stage_executor_v0_6.py.txt;
+3. u002_executor_v06_independent_vertical_gate_v0_2.py.txt.
+
+Do not rename them. Do not ask Copilot to regenerate, simplify or adapt code.
+Old v0.5 files and .G2R1 logs may remain; G2R2 uses separate names.
+
+
+3. REQUIRED EXISTING FILE
+
+The following accepted synthetic vertical runner must remain directly in
+04_TEMP:
+
+  u002_g2_synthetic_vertical_run_v0_1.py.txt
+
+The frozen U21A-E programs, U21F2A promotion evidence, Core Contract files and
+accepted U21E fixture remain in their existing governed locations.
+
+
+4. CMD EXECUTION FROM C-CODE
+
+Self-test:
+
+  python .\U-UDP002\04_TEMP\u002_executor_v06_independent_vertical_gate_v0_2.py.txt --self-test
+
+Required result:
+
+  G2R2ST N-T20-S5-C5-I5-X0 C-0
+
+Formal Gate:
+
+  python .\U-UDP002\04_TEMP\u002_executor_v06_independent_vertical_gate_v0_2.py.txt --run --workspace-root .\U-UDP002
+
+Required result:
+
+  G2R2 N-E1-I1-V1-M3-A3-X0 C-0
+
+
+5. WHAT THE FORMAL GATE PROVES
+
+E1: candidate dependency preflight and internal self-test pass using the real
+    frozen Promotion v0.2 evidence semantics.
+I1: v0.6 is installed byte-identically under 01_PROGRAMS only after E1.
+V1: the complete U21A-F vertical execution path succeeds.
+M3: three synthetic sample Module Packs are generated and actually executed:
+    S1 Semantic, S4 Baseline and S7 Handoff.
+A3: the three Modules commit three governed synthetic Artifacts.
+X0: no uncontrolled failure remains.
+
+The sample Modules and output are generated under:
+
+  05_TESTS\02_ACCEPTANCE\U21G_G2_VERTICAL_V06
+
+No company CAN, DBC or video data is used. The Gate verifies the generated
+sample Module identities, S1/S4/S7 order, Artifact types, full S0-S7 Run
+Manifest and input immutability.
+
+
+6. FAILURE RETURN
+
+On C-7, return only the single G2R2 line. v0.2 propagates the candidate child
+reason into K-<REASON>; do not edit source and do not delete retained evidence.
+
+END
