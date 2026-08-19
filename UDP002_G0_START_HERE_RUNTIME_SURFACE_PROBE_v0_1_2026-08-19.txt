@@ -1,0 +1,91 @@
+UDP002 U21G G0 RUNTIME SURFACE PROBE
+
+Task: G0
+Version: 0.1
+Date: 2026-08-19
+Owner: Zhao Zhili
+Status: AUTHORIZED AFTER U21F2C MANUAL CLOSEOUT C-0
+
+1. PURPOSE
+
+Before authoring the U21G vertical integration controller, prove that the
+company-side promoted runtime has the exact filenames and public CLI surface
+owned by the project design. This is a read-only inspection. It imports no U002
+program, reads no company data and changes no accepted program/evidence.
+
+2. DOWNLOAD
+
+Download exactly one new program to the direct folder:
+
+  U-UDP002\04_TEMP\u002_g0_runtime_surface_probe_v0_1.py.txt
+
+The two Core files already retained in 04_TEMP must remain there. Do not give
+this task to Copilot for rewriting.
+
+3. REQUIRED FIXED FILES
+
+01_PROGRAMS must directly contain:
+
+  u002_engine_skeleton_v0_1.py
+  u002_module_registry_v0_1.py
+  u002_module_activation_controller_v0_1.py
+  u002_qualified_module_plan_resolver_v0_1.py
+  u002_run_preflight_data_binder_v0_1.py
+  u002_controlled_stage_executor_v0_3.py
+  u002_module_runtime_protocol_bundle_v0_2.json
+  u002_module_runtime_protocol_validator_v0_2.py
+
+04_TEMP must directly contain:
+
+  u002_core_contract_schema_bundle_v0_1.json.txt
+  u002_core_contract_validator_v0_1.py.txt
+  u002_g0_runtime_surface_probe_v0_1.py.txt
+
+05_TESTS\02_ACCEPTANCE\U21F2A_PROMOTION_V02 must contain:
+
+  u21f2a_promotion_acceptance.json
+
+4. RUN FROM C-CODE ROOT USING CMD
+
+First run the project-authored local self-test:
+
+  python ".\U-UDP002\04_TEMP\u002_g0_runtime_surface_probe_v0_1.py.txt" --self-test
+
+Require:
+
+  G0ST N-T18-P6-C2-S3-H6-A6-X0 C-0
+
+Then run the company-workspace probe:
+
+  python ".\U-UDP002\04_TEMP\u002_g0_runtime_surface_probe_v0_1.py.txt" --probe --workspace-root ".\U-UDP002" --out-dir ".\U-UDP002\05_TESTS\02_ACCEPTANCE\U21G0_SURFACE_V01"
+
+Require:
+
+  G0P N-P6-C2-S3-H6-A6-X0 C-0
+
+5. OUTPUT
+
+The probe writes only:
+
+  U-UDP002\05_TESTS\02_ACCEPTANCE\U21G0_SURFACE_V01\
+    u21g0_runtime_surface.json
+    u21g0_capsule.txt
+
+The JSON stores relative paths, SHA-256 identities, byte sizes and required CLI
+flags. It does not copy source, persist absolute paths or inspect test data.
+
+6. RETURN
+
+Return at most two lines:
+
+  G0ST ...
+  G0P ...
+
+Stop on C-7. Do not let Copilot modify a promoted runtime or the probe.
+
+7. NEXT BOUNDARY
+
+Both C-0 lines authorize project-side authorship of the complete U21G synthetic
+vertical controller. They do not authorize real company data.
+
+END
