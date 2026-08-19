@@ -1,0 +1,422 @@
+#!/usr/bin/env python3
+"""Read-only G2 D2 comparison of Plan, Preflight and Module semantics."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import tempfile
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+
+
+SELFTEST_CAPSULE = "G2D2ST N-T20-P5-J5-I5-X0 C-0"
+MAX_JSON_BYTES = 4_194_304
+MAX_FILES = 4096
+
+
+class D2Error(Exception):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def canonical_sha(value: object) -> str:
+    data = json.dumps(value, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return hashlib.sha256(data).hexdigest()
+
+
+def read_json(path: Path, reason: str) -> dict:
+    if not path.is_file() or path.is_symlink() or path.stat().st_size > MAX_JSON_BYTES:
+        raise D2Error(reason)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise D2Error(reason) from exc
+    if not isinstance(value, dict):
+        raise D2Error(reason)
+    return value
+
+
+def inventory(root: Path) -> Dict[str, Tuple[int, str]]:
+    result: Dict[str, Tuple[int, str]] = {}
+    count = 0
+    for directory, names, files in os.walk(root, followlinks=False):
+        base = Path(directory)
+        names[:] = sorted(name for name in names if not (base / name).is_symlink())
+        for name in sorted(files):
+            path = base / name
+            if path.is_symlink() or not path.is_file():
+                raise D2Error("EVIDENCE_FILE_TYPE")
+            count += 1
+            if count > MAX_FILES:
+                raise D2Error("EVIDENCE_FILE_LIMIT")
+            result[path.relative_to(root).as_posix()] = (path.stat().st_size, sha256_file(path))
+    return result
+
+
+def contains_exact(value: object, expected: str) -> bool:
+    if value == expected:
+        return True
+    if isinstance(value, dict):
+        return any(contains_exact(item, expected) for item in value.values())
+    if isinstance(value, list):
+        return any(contains_exact(item, expected) for item in value)
+    return False
+
+
+def identity(item: object) -> Optional[Tuple[str, str]]:
+    if not isinstance(item, dict):
+        return None
+    source: Mapping[str, object] = item
+    nested = item.get("ModuleIdentity")
+    if isinstance(nested, dict):
+        source = nested
+    module_id = source.get("ModuleId")
+    version = source.get("ModuleVersion")
+    if isinstance(module_id, str) and module_id and isinstance(version, str) and version:
+        return module_id, version
+    return None
+
+
+def ordered_plan_identities(plan: Mapping[str, object]) -> Tuple[List[Tuple[str, str]], bool]:
+    selected = plan.get("SelectedModules")
+    if not isinstance(selected, list) or not selected:
+        return [], False
+    if not all(isinstance(item, dict) and isinstance(item.get("PlanOrder"), int) for item in selected):
+        return [], False
+    ordered = sorted(selected, key=lambda item: item["PlanOrder"])
+    orders = [item["PlanOrder"] for item in ordered]
+    contiguous = orders in (list(range(len(orders))), list(range(1, len(orders) + 1)))
+    identities = [identity(item) for item in ordered]
+    if not all(item is not None for item in identities):
+        return [], False
+    return [item for item in identities if item is not None], contiguous
+
+
+def execution_identities(plan: Mapping[str, object]) -> List[Tuple[str, str]]:
+    raw = plan.get("ExecutionOrder")
+    if not isinstance(raw, list):
+        return []
+    found = [identity(item) for item in raw]
+    return [item for item in found if item is not None] if all(found) else []
+
+
+def resolved_identities(preflight: Mapping[str, object]) -> List[Tuple[str, str]]:
+    raw = preflight.get("ResolvedModules")
+    if not isinstance(raw, list):
+        return []
+    found = [identity(item) for item in raw]
+    return [item for item in found if item is not None] if all(found) else []
+
+
+def selected_by_identity(plan: Mapping[str, object]) -> Dict[Tuple[str, str], dict]:
+    raw = plan.get("SelectedModules")
+    if not isinstance(raw, list):
+        return {}
+    result = {}
+    for item in raw:
+        key = identity(item)
+        if key is not None and isinstance(item, dict):
+            result[key] = item
+    return result
+
+
+def resolved_by_identity(preflight: Mapping[str, object]) -> Dict[Tuple[str, str], dict]:
+    raw = preflight.get("ResolvedModules")
+    if not isinstance(raw, list):
+        return {}
+    result = {}
+    for item in raw:
+        key = identity(item)
+        if key is not None and isinstance(item, dict):
+            result[key] = item
+    return result
+
+
+def hash_agreement(plan: Mapping[str, object], preflight: Mapping[str, object]) -> bool:
+    left = selected_by_identity(plan)
+    right = resolved_by_identity(preflight)
+    if not left or set(left) != set(right):
+        return False
+    keys = ("ManifestSha256", "ImplementationSha256",
+            "ConfigurationSchemaSha256", "ActivationEvidenceSha256")
+    for module_id in left:
+        for key in keys:
+            if key in left[module_id] and left[module_id].get(key) != right[module_id].get(key):
+                return False
+    return True
+
+
+def configurations_valid(preflight: Mapping[str, object]) -> bool:
+    configurations = preflight.get("ResolvedConfigurations")
+    resolved = resolved_by_identity(preflight)
+    if not isinstance(configurations, dict) or not resolved:
+        return False
+    for module_id, item in resolved.items():
+        key = module_id[0] + "@" + module_id[1]
+        config_entry = configurations.get(key)
+        expected = item.get("ResolvedConfigSha256")
+        if isinstance(config_entry, dict) and "Configuration" in config_entry:
+            configuration = config_entry.get("Configuration")
+            embedded = config_entry.get("ResolvedConfigSha256")
+        else:
+            configuration = config_entry
+            embedded = None
+        if configuration is None or not isinstance(expected, str):
+            return False
+        if canonical_sha(configuration) != expected:
+            return False
+        if embedded is not None and embedded != expected:
+            return False
+    return True
+
+
+def required_signals_resolved(plan: Mapping[str, object], preflight: Mapping[str, object]) -> bool:
+    selected = selected_by_identity(plan)
+    bindings = preflight.get("SignalBindings")
+    if not isinstance(bindings, list):
+        return False
+    bound = set()
+    for item in bindings:
+        if not isinstance(item, dict):
+            continue
+        module = identity(item)
+        port_id = item.get("PortId")
+        names = item.get("CanonicalNames")
+        if module and isinstance(port_id, str) and isinstance(names, list) and names:
+            bound.add((module, port_id))
+    for module, item in selected.items():
+        ports = item.get("RequiredInputs")
+        if not isinstance(ports, list):
+            return False
+        for port in ports:
+            if not isinstance(port, dict) or not isinstance(port.get("PortId"), str):
+                return False
+            if (module, port["PortId"]) not in bound:
+                return False
+    return True
+
+
+def quality_nonblocking(preflight: Mapping[str, object]) -> bool:
+    quality = preflight.get("QualityDecision")
+    if quality is None:
+        return False
+    text = json.dumps(quality, sort_keys=True).upper()
+    if "NON_BLOCKING" in text or "NON-BLOCKING" in text:
+        return True
+    return not any(token in text for token in ("BLOCKING", "REJECTED", "DENIED", "FAILED"))
+
+
+def diagnose(staging: Path) -> str:
+    staging = staging.resolve(strict=True)
+    if not staging.is_dir() or staging.is_symlink() or not staging.name.endswith(".staging"):
+        raise D2Error("G2_STAGING_DIR")
+    plan_path = staging / "control" / "software_plan.json"
+    preflight_path = staging / "control" / "run_preflight.json"
+    before = inventory(staging)
+    plan = read_json(plan_path, "PLAN_JSON")
+    preflight = read_json(preflight_path, "PREFLIGHT_JSON")
+
+    plan_ids, contiguous = ordered_plan_identities(plan)
+    exec_ids = execution_identities(plan)
+    resolved_ids = resolved_identities(preflight)
+    selected = plan.get("SelectedModules")
+    selected_count = len(selected) if isinstance(selected, list) else 0
+    declared_count = plan.get("SelectedModuleCount")
+
+    a = [
+        plan.get("PlanType") == "U002_QUALIFIED_MODULE_PLAN",
+        str(plan.get("PlanVersion")) == "0.1",
+        plan.get("PlanStatus") == "SOFTWARE_PLAN_READY",
+        plan.get("SignalBindingStatus") == "DEFERRED_TO_RUN_PREFLIGHT",
+        isinstance(declared_count, int) and declared_count == selected_count,
+        bool(plan_ids),
+        bool(exec_ids),
+        contiguous and plan_ids == exec_ids,
+    ]
+    b = [
+        preflight.get("PreflightType") == "U002_RUN_PREFLIGHT_BINDING",
+        str(preflight.get("PreflightVersion")) == "0.1",
+        preflight.get("PreflightStatus") == "RUN_PREFLIGHT_READY",
+        contains_exact(preflight.get("SoftwarePlanIdentity"), sha256_file(plan_path)),
+        bool(resolved_ids),
+        resolved_ids == exec_ids,
+        hash_agreement(plan, preflight),
+        configurations_valid(preflight),
+    ]
+    scope = preflight.get("ResolvedScope")
+    clock = preflight.get("ResolvedClockDomain")
+    scope_type = scope.get("ScopeType") if isinstance(scope, dict) else None
+    clock_kind = None
+    if isinstance(clock, dict):
+        clock_kind = clock.get("ClockKind", clock.get("ClockType"))
+    c = [
+        required_signals_resolved(plan, preflight),
+        scope_type in {"FULL_CASE", "FRAME_RANGE"},
+        clock_kind == "FRAMECOUNT",
+        quality_nonblocking(preflight),
+    ]
+
+    labels = (
+        "PLAN_TYPE", "PLAN_VERSION", "PLAN_STATUS", "PLAN_BINDING_STATUS",
+        "PLAN_SELECTED_COUNT", "PLAN_SELECTED_MODULES", "PLAN_EXECUTION_ORDER",
+        "PLAN_ORDER",
+        "PREFLIGHT_TYPE", "PREFLIGHT_VERSION", "PREFLIGHT_STATUS",
+        "PREFLIGHT_PLAN_HASH", "PREFLIGHT_RESOLVED_MODULES",
+        "PREFLIGHT_MODULE_ORDER", "PREFLIGHT_MODULE_HASH",
+        "PREFLIGHT_CONFIG_HASH", "PREFLIGHT_REQUIRED_SIGNAL", "PREFLIGHT_SCOPE",
+        "PREFLIGHT_CLOCK", "PREFLIGHT_QUALITY",
+    )
+    checks = a + b + c
+    reason = next((label for label, passed in zip(labels, checks) if not passed),
+                  "SEMANTICS_SPEC_PASS")
+    after = inventory(staging)
+    if before != after:
+        raise D2Error("EVIDENCE_MUTATED")
+    bits_a = "".join("1" if item else "0" for item in a)
+    bits_b = "".join("1" if item else "0" for item in b)
+    bits_c = "".join("1" if item else "0" for item in c)
+    return (
+        f"G2D2 N-A{bits_a}-B{bits_b}-C{bits_c}-M{selected_count}-"
+        f"O{len(exec_ids)}-R{len(resolved_ids)}-H{len(before)}-X0 C-0 K-{reason}"
+    )
+
+
+def selftest() -> None:
+    checks = 0
+
+    def ck(value: bool) -> None:
+        nonlocal checks
+        if not value:
+            raise AssertionError("SELFTEST")
+        checks += 1
+
+    with tempfile.TemporaryDirectory() as temporary:
+        staging = Path(temporary) / "G2_TEST.staging"
+        control = staging / "control"
+        control.mkdir(parents=True)
+        modules = []
+        resolved = []
+        configs = {}
+        bindings = []
+        for index in range(3):
+            module_id = f"U002.Test{index + 1}"
+            version = "0.1.0"
+            config = {}
+            selected = {
+                "PlanOrder": index,
+                "ModuleId": module_id,
+                "ModuleVersion": version,
+                "ManifestSha256": "a" * 64,
+                "ImplementationSha256": "b" * 64,
+                "ConfigurationSchemaSha256": "c" * 64,
+                "ActivationEvidenceSha256": "d" * 64,
+                "RequiredInputs": ([{"PortId": "input"}] if index == 0 else []),
+            }
+            modules.append(selected)
+            resolved.append({
+                "ModuleId": module_id,
+                "ModuleVersion": version,
+                "ManifestSha256": "a" * 64,
+                "ImplementationSha256": "b" * 64,
+                "ConfigurationSchemaSha256": "c" * 64,
+                "ActivationEvidenceSha256": "d" * 64,
+                "ResolvedConfigSha256": canonical_sha(config),
+            })
+            configs[module_id + "@" + version] = config
+            if index == 0:
+                bindings.append({
+                    "ModuleId": module_id, "ModuleVersion": version,
+                    "PortId": "input", "CanonicalNames": ["Synthetic.Primary"],
+                })
+        plan = {
+            "PlanType": "U002_QUALIFIED_MODULE_PLAN", "PlanVersion": "0.1",
+            "PlanStatus": "SOFTWARE_PLAN_READY",
+            "SignalBindingStatus": "DEFERRED_TO_RUN_PREFLIGHT",
+            "SelectedModuleCount": 3, "SelectedModules": modules,
+            "ExecutionOrder": [
+                {"ModuleId": item["ModuleId"], "ModuleVersion": item["ModuleVersion"]}
+                for item in modules
+            ],
+        }
+        plan_path = control / "software_plan.json"
+        plan_path.write_text(json.dumps(plan, sort_keys=True), encoding="utf-8")
+        preflight = {
+            "PreflightType": "U002_RUN_PREFLIGHT_BINDING", "PreflightVersion": "0.1",
+            "PreflightStatus": "RUN_PREFLIGHT_READY",
+            "SoftwarePlanIdentity": {"SoftwarePlanSha256": sha256_file(plan_path)},
+            "ResolvedModules": resolved, "ResolvedConfigurations": configs,
+            "SignalBindings": bindings, "ResolvedScope": {"ScopeType": "FULL_CASE"},
+            "ResolvedClockDomain": {"ClockKind": "FRAMECOUNT"},
+            "QualityDecision": {"Decision": "NON_BLOCKING"},
+        }
+        (control / "run_preflight.json").write_text(
+            json.dumps(preflight, sort_keys=True), encoding="utf-8"
+        )
+        before = inventory(staging)
+        capsule = diagnose(staging)
+        after = inventory(staging)
+        ck(capsule.startswith("G2D2 "))
+        ck("A11111111" in capsule)
+        ck("B11111111" in capsule)
+        ck("C1111" in capsule)
+        ck("M3-O3-R3" in capsule)
+        ck(capsule.endswith("C-0 K-SEMANTICS_SPEC_PASS"))
+        ck(before == after)
+        ck(len(before) == 2)
+        ck(ordered_plan_identities(plan)[1])
+        ck(execution_identities(plan) == ordered_plan_identities(plan)[0])
+        ck(resolved_identities(preflight) == execution_identities(plan))
+        ck(hash_agreement(plan, preflight))
+        ck(configurations_valid(preflight))
+        ck(required_signals_resolved(plan, preflight))
+        ck(quality_nonblocking(preflight))
+        ck(contains_exact(preflight["SoftwarePlanIdentity"], sha256_file(plan_path)))
+        ck(identity(modules[0]) == ("U002.Test1", "0.1.0"))
+        ck(canonical_sha({}) == resolved[0]["ResolvedConfigSha256"])
+        ck(plan["SelectedModuleCount"] == len(modules))
+        ck(preflight["ResolvedClockDomain"]["ClockKind"] == "FRAMECOUNT")
+    if checks != 20:
+        raise AssertionError("SELFTEST_COUNT")
+    print(SELFTEST_CAPSULE)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--diagnose", action="store_true")
+    parser.add_argument("--g2-staging", type=Path)
+    args = parser.parse_args(argv)
+    try:
+        if args.self_test:
+            if args.g2_staging is not None:
+                raise D2Error("ARGUMENTS")
+            selftest()
+            return 0
+        if args.g2_staging is None:
+            raise D2Error("ARGUMENTS")
+        print(diagnose(args.g2_staging))
+        return 0
+    except D2Error as exc:
+        print(f"G2D2 N-A00000000-B00000000-C0000-M0-O0-R0-H0-X1 C-7 K-{exc.reason}")
+        return 7
+    except Exception:
+        print("G2D2 N-A00000000-B00000000-C0000-M0-O0-R0-H0-X1 C-7 K-INTERNAL")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
