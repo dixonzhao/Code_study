@@ -1,0 +1,392 @@
+#!/usr/bin/env python3
+"""Install the U22 modular directory scaffold and authoritative contracts."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+from typing import Dict, List
+
+
+PROGRAM_ID = "UDP002-U22A0-CONTRACT-SCAFFOLD-INSTALLER"
+VERSION = "0.1"
+CONTRACT_VERSION = "U22.0.1"
+STAGES = ["S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"]
+
+
+class InstallError(RuntimeError):
+    pass
+
+
+def stable(value: object) -> str:
+    return re.sub(r"[^A-Z0-9_]+", "_", str(value).upper()).strip("_")[:80] or "INTERNAL"
+
+
+def canonical_bytes(value: object) -> bytes:
+    return (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2,
+                       allow_nan=False) + "\n").encode("utf-8")
+
+
+def sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+ARCHITECTURE = {
+    "ContractId": "U002_U22_ARCHITECTURE",
+    "ContractVersion": CONTRACT_VERSION,
+    "Status": "AUTHORITATIVE_MVP_BASELINE",
+    "ProductMission": "Compress accepted U001 data into a small ranked traceable U003 investigation queue.",
+    "ProgramBoundaries": {
+        "U001": "Source decoding, FrameCount preparation, provenance, validity and bounded hold.",
+        "U002": "Semantic reconstruction, analysis population, outcome, baseline, evidence and candidates.",
+        "U003": "Synchronized video/CAN review and human engineering judgment.",
+    },
+    "StageOrder": STAGES,
+    "Stages": {
+        "S0": "Intake and Contract Gate",
+        "S1": "Semantic Reconstruction and Analysis Preprocessing",
+        "S2": "Analysis View and Population Construction",
+        "S3": "Primary Outcome Construction",
+        "S4": "Baseline and Residual",
+        "S5": "Evidence Engines",
+        "S6": "Candidate Synthesis",
+        "S7": "Handoff and Export",
+    },
+    "RuntimeRules": {
+        "EngineContainsAnalysisAlgorithms": False,
+        "ExplicitRunPlanRequired": True,
+        "DiscoveryDoesNotActivateModules": True,
+        "LatestWriterWinsProhibited": True,
+        "OneModuleMayProvideMultipleTypedArtifacts": True,
+        "MultipleModulesPerStageAllowed": True,
+        "CrossStageOrderFixed": True,
+        "ModuleImplementationIsolated": True,
+        "AcceptedU001InputIsReadOnly": True,
+        "CanonicalMissingValuesAreNeverZeroFilled": True,
+        "S6OwnsFinalCandidateMergingRankingAndDisposition": True,
+        "MachineSuggestionsNeverOverwriteHumanReview": True,
+    },
+    "DirectoryContract": {
+        "Control": "00_CONTROL",
+        "Core": "01_PROGRAMS/core",
+        "Modules": "01_PROGRAMS/modules/<Stage>/<ModuleId>/<ModuleVersion>",
+        "Configuration": "02_CONFIG",
+        "Cases": "03_CASES",
+        "TemporaryTransfer": "04_TEMP",
+        "Tests": "05_TESTS",
+        "Manuals": "06_MANUALS",
+        "RunOutput": "07_OUTPUT/<RunId>",
+        "Archive": "A-Archive",
+    },
+    "NonGoalsForFirstMvp": [
+        "Automatic root-cause declaration", "Real-time vehicle control",
+        "Full System Identification", "All-pairs variable scan",
+        "Unrestricted visual DAG", "Legacy P004 architecture inheritance",
+    ],
+}
+
+
+MODULE_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "urn:u002:u22:module-manifest:0.1",
+    "title": "U002 U22 Module Manifest",
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "ContractVersion", "ModuleId", "ModuleVersion", "Stage", "AlgorithmStatus",
+        "ScopeSelector", "RequiredInputs", "OptionalInputs", "RequiresArtifacts",
+        "ProvidesArtifacts", "OutputNamespace", "ConfigurationSchema",
+        "FailurePolicy", "ConflictPolicy", "EntryPoint", "SelfTestEntryPoint",
+        "AlgorithmCard",
+    ],
+    "properties": {
+        "ContractVersion": {"const": CONTRACT_VERSION},
+        "ModuleId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{2,127}$"},
+        "ModuleVersion": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+        "Stage": {"enum": STAGES},
+        "AlgorithmStatus": {"enum": ["FORMAL", "PROVISIONAL", "EXPERIMENTAL", "DEPRECATED"]},
+        "ScopeSelector": {"type": "object"},
+        "RequiredInputs": {"type": "array", "items": {"type": "string"}, "uniqueItems": True},
+        "OptionalInputs": {"type": "array", "items": {"type": "string"}, "uniqueItems": True},
+        "RequiresArtifacts": {"type": "array", "items": {"type": "string"}, "uniqueItems": True},
+        "ProvidesArtifacts": {"type": "array", "minItems": 1, "items": {"type": "string"}, "uniqueItems": True},
+        "OutputNamespace": {"type": "string", "minLength": 1},
+        "ConfigurationSchema": {"type": ["string", "null"]},
+        "FailurePolicy": {"enum": ["REQUIRED", "OPTIONAL"]},
+        "ConflictPolicy": {"enum": ["EXCLUSIVE", "COEXIST", "ARBITRATION_REQUIRED"]},
+        "EntryPoint": {"const": "implementation.py"},
+        "SelfTestEntryPoint": {"const": "selftest.py"},
+        "AlgorithmCard": {"const": "algorithm_card.json"},
+    },
+}
+
+
+ARTIFACT_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "urn:u002:u22:artifact-manifest:0.1",
+    "title": "U002 U22 Artifact Manifest",
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "ContractVersion", "ArtifactId", "ArtifactType", "SchemaId", "SchemaVersion",
+        "RunId", "Stage", "ProducerModuleId", "ProducerModuleVersion",
+        "ParentArtifactIds", "Payloads", "Metadata",
+    ],
+    "properties": {
+        "ContractVersion": {"const": CONTRACT_VERSION},
+        "ArtifactId": {"type": "string", "minLength": 1},
+        "ArtifactType": {"type": "string", "minLength": 1},
+        "SchemaId": {"type": "string", "minLength": 1},
+        "SchemaVersion": {"type": "string", "minLength": 1},
+        "RunId": {"type": "string", "minLength": 1},
+        "Stage": {"enum": STAGES + ["SOURCE"]},
+        "ProducerModuleId": {"type": "string", "minLength": 1},
+        "ProducerModuleVersion": {"type": "string", "minLength": 1},
+        "ParentArtifactIds": {"type": "array", "items": {"type": "string"}, "uniqueItems": True},
+        "Payloads": {
+            "type": "array", "minItems": 1,
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["RelativePath", "MediaType", "RowCount", "Sha256", "ByteSize", "PayloadKind"],
+                "properties": {
+                    "RelativePath": {"type": "string", "pattern": "^(?![A-Za-z]:|/|\\\\).+"},
+                    "MediaType": {"type": "string", "minLength": 1},
+                    "RowCount": {"type": ["integer", "null"], "minimum": 0},
+                    "Sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "ByteSize": {"type": "integer", "minimum": 0},
+                    "PayloadKind": {"enum": ["PRIMARY", "AUXILIARY", "DIAGNOSTIC"]},
+                },
+            },
+        },
+        "Metadata": {"type": "object"},
+    },
+}
+
+
+RUN_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "urn:u002:u22:run-configuration:0.1",
+    "title": "U002 U22 Run Configuration",
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "ContractVersion", "RunId", "RunPurpose", "RunScope", "FrameStart", "FrameEnd",
+        "InputPackage", "SignalProfile", "ModulePlan", "PrimaryOutcome",
+        "CandidatePolicy", "OutputSelection",
+    ],
+    "properties": {
+        "ContractVersion": {"const": CONTRACT_VERSION},
+        "RunId": {"type": "string", "minLength": 1},
+        "RunPurpose": {"enum": ["SMOKE", "TUNING", "EVALUATION"]},
+        "RunScope": {"enum": ["FULL_CASE", "FRAME_RANGE", "FILTERED_RANGE"]},
+        "FrameStart": {"type": ["integer", "null"], "minimum": 0},
+        "FrameEnd": {"type": ["integer", "null"], "minimum": 0},
+        "InputPackage": {"type": "string", "minLength": 1},
+        "SignalProfile": {"type": "string", "minLength": 1},
+        "ModulePlan": {
+            "type": "array", "minItems": 1,
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["Sequence", "Stage", "ModuleId", "ModuleVersion", "Configuration"],
+                "properties": {
+                    "Sequence": {"type": "integer", "minimum": 1},
+                    "Stage": {"enum": STAGES},
+                    "ModuleId": {"type": "string", "minLength": 1},
+                    "ModuleVersion": {"type": "string", "minLength": 1},
+                    "Configuration": {"type": "object"},
+                },
+            },
+        },
+        "PrimaryOutcome": {
+            "type": "object", "additionalProperties": False,
+            "required": ["Name", "Formula", "Sign", "Unit", "Purpose"],
+            "properties": {
+                "Name": {"type": "string", "minLength": 1},
+                "Formula": {"type": "string", "minLength": 1},
+                "Sign": {"type": "string", "minLength": 1},
+                "Unit": {"type": "string", "minLength": 1},
+                "Purpose": {"enum": ["EXPLORATORY", "CONFIRMATORY"]},
+            },
+        },
+        "CandidatePolicy": {"type": "string", "minLength": 1},
+        "OutputSelection": {"type": "array", "items": {"type": "string"}, "uniqueItems": True},
+    },
+    "allOf": [
+        {"if": {"properties": {"RunScope": {"const": "FULL_CASE"}}},
+         "then": {"properties": {"FrameStart": {"type": "null"}, "FrameEnd": {"type": "null"}}}},
+        {"if": {"properties": {"RunScope": {"enum": ["FRAME_RANGE", "FILTERED_RANGE"]}}},
+         "then": {"properties": {"FrameStart": {"type": "integer"}, "FrameEnd": {"type": "integer"}}}},
+    ],
+}
+
+
+ALGORITHM_CARD_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "urn:u002:u22:algorithm-card:0.1",
+    "title": "U002 U22 Algorithm Card",
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "ContractVersion", "AlgorithmId", "AlgorithmVersion", "Status", "Purpose",
+        "ProblemSolved", "MathematicalDefinition", "Inputs", "Outputs", "Assumptions",
+        "FailureConditions", "Limitations", "Alternatives", "EvaluationPlan", "DecisionReference",
+    ],
+    "properties": {
+        "ContractVersion": {"const": CONTRACT_VERSION},
+        "AlgorithmId": {"type": "string", "minLength": 1},
+        "AlgorithmVersion": {"type": "string", "minLength": 1},
+        "Status": {"enum": ["FORMAL", "PROVISIONAL", "EXPERIMENTAL", "DEPRECATED"]},
+        "Purpose": {"type": "string", "minLength": 1},
+        "ProblemSolved": {"type": "string", "minLength": 1},
+        "MathematicalDefinition": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "Inputs": {"type": "array", "items": {"type": "string"}},
+        "Outputs": {"type": "array", "items": {"type": "string"}},
+        "Assumptions": {"type": "array", "items": {"type": "string"}},
+        "FailureConditions": {"type": "array", "items": {"type": "string"}},
+        "Limitations": {"type": "array", "items": {"type": "string"}},
+        "Alternatives": {"type": "array", "items": {"type": "string"}},
+        "EvaluationPlan": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "DecisionReference": {"type": "string", "minLength": 1},
+    },
+}
+
+
+STAGE_CONTRACT = {
+    "ContractId": "U002_U22_STAGE_OWNERSHIP",
+    "ContractVersion": CONTRACT_VERSION,
+    "StageOrder": STAGES,
+    "Ownership": {
+        "S0": {"Owns": ["Input contract", "RunScope", "source immutability"], "MustNotOwn": ["target selection", "scoring"]},
+        "S1": {"Owns": ["validity", "semantic reconstruction", "arbitration"], "MustNotOwn": ["PrimaryOutcome", "candidate ranking"]},
+        "S2": {"Owns": ["analysis view", "fit/evaluation population"], "MustNotOwn": ["Baseline model", "evidence threshold"]},
+        "S3": {"Owns": ["exactly one PrimaryOutcome", "formula", "sign", "unit"], "MustNotOwn": ["Baseline", "candidate merge"]},
+        "S4": {"Owns": ["BaselinePrediction", "Residual"], "MustNotOwn": ["final candidate list"]},
+        "S5": {"Owns": ["typed Evidence", "score components"], "MustNotOwn": ["persistence merge", "queue cap"]},
+        "S6": {"Owns": ["persistence", "merge", "ranking", "disposition", "queue cap"], "MustNotOwn": ["human judgment"]},
+        "S7": {"Owns": ["U003 handoff", "canonical export", "suggested memo"], "MustNotOwn": ["overwriting human fields"]},
+    },
+    "S1Substages": ["S1A_VALIDITY", "S1B_BUILDERS", "S1B5_ARBITRATION", "S1C_ASSEMBLY"],
+}
+
+
+FILES: Dict[str, dict] = {
+    "00_CONTROL/architecture/u002_u22_architecture_v0_1.json": ARCHITECTURE,
+    "00_CONTROL/contracts/u002_module_manifest_schema_v0_1.json": MODULE_SCHEMA,
+    "00_CONTROL/contracts/u002_artifact_manifest_schema_v0_1.json": ARTIFACT_SCHEMA,
+    "00_CONTROL/contracts/u002_run_configuration_schema_v0_1.json": RUN_SCHEMA,
+    "00_CONTROL/contracts/u002_algorithm_card_schema_v0_1.json": ALGORITHM_CARD_SCHEMA,
+    "00_CONTROL/contracts/u002_stage_ownership_contract_v0_1.json": STAGE_CONTRACT,
+}
+
+
+REQUIRED_DIRS = [
+    "00_CONTROL/architecture", "00_CONTROL/contracts", "00_CONTROL/registry",
+    "01_PROGRAMS/core",
+    *[f"01_PROGRAMS/modules/{stage}" for stage in STAGES],
+    "02_CONFIG/signal_profiles", "02_CONFIG/invalid_value_rules",
+    "02_CONFIG/candidate_policies", "02_CONFIG/run_configs",
+    "03_CASES", "04_TEMP", "05_TESTS/unit", "05_TESTS/integration",
+    "05_TESTS/acceptance", "05_TESTS/fixtures", "06_MANUALS", "07_OUTPUT", "A-Archive",
+]
+
+
+def validate_embedded_contracts() -> None:
+    if ARCHITECTURE["StageOrder"] != STAGES or STAGE_CONTRACT["StageOrder"] != STAGES:
+        raise InstallError("STAGE_ORDER")
+    if set(STAGE_CONTRACT["Ownership"]) != set(STAGES):
+        raise InstallError("STAGE_OWNERSHIP")
+    for name, schema in (("MODULE", MODULE_SCHEMA), ("ARTIFACT", ARTIFACT_SCHEMA),
+                         ("RUN", RUN_SCHEMA), ("ALGORITHM", ALGORITHM_CARD_SCHEMA)):
+        if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
+            raise InstallError(name + "_SCHEMA_DRAFT")
+        if schema.get("type") != "object" or schema.get("additionalProperties") is not False:
+            raise InstallError(name + "_SCHEMA_STRICTNESS")
+    if MODULE_SCHEMA["properties"]["Stage"]["enum"] != STAGES:
+        raise InstallError("MODULE_STAGE_ENUM")
+    if RUN_SCHEMA["properties"]["RunScope"]["enum"] != ["FULL_CASE", "FRAME_RANGE", "FILTERED_RANGE"]:
+        raise InstallError("RUN_SCOPE_ENUM")
+
+
+def install(root: Path) -> str:
+    root = root.resolve()
+    if not root.is_dir() or root.name != "U-UDP002":
+        raise InstallError("WORKSPACE_ROOT")
+    validate_embedded_contracts()
+    created_dirs: List[Path] = []
+    created_files: List[Path] = []
+    try:
+        for relative in REQUIRED_DIRS:
+            path = root / relative
+            if path.exists() and (not path.is_dir() or path.is_symlink()):
+                raise InstallError("DIRECTORY_CONFLICT_" + relative)
+            if not path.exists():
+                path.mkdir(parents=True)
+                created_dirs.append(path)
+        installed = []
+        for relative, payload in FILES.items():
+            path = root / relative
+            data = canonical_bytes(payload)
+            if path.exists():
+                if not path.is_file() or path.is_symlink() or path.read_bytes() != data:
+                    raise InstallError("CONTRACT_CONFLICT_" + path.name)
+            else:
+                temporary = path.with_name(path.name + ".installing")
+                if temporary.exists():
+                    raise InstallError("TEMP_EXISTS_" + path.name)
+                temporary.write_bytes(data)
+                os.replace(temporary, path)
+                created_files.append(path)
+            installed.append((relative, len(data), sha256_bytes(data)))
+        manifest = root / "00_CONTROL/u22a0_contract_manifest.csv"
+        manifest_lines = [["RelativePath", "SizeBytes", "Sha256"]]
+        manifest_lines.extend([[a, str(b), c] for a, b, c in installed])
+        if not manifest.exists():
+            with manifest.open("x", encoding="utf-8", newline="") as stream:
+                csv.writer(stream, lineterminator="\n").writerows(manifest_lines)
+            created_files.append(manifest)
+        reset_script = root / "04_TEMP/udp002_u22r0_workspace_archive_reset_v0_1.py.txt"
+        archived_reset = 0
+        if reset_script.is_file() and not reset_script.is_symlink():
+            destination = root / "A-Archive/U21_LEGACY_20260820/04_TEMP" / reset_script.name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.exists():
+                if destination.read_bytes() != reset_script.read_bytes():
+                    raise InstallError("RESET_ARCHIVE_CONFLICT")
+                reset_script.unlink()
+            else:
+                os.replace(reset_script, destination)
+            archived_reset = 1
+        capsule = f"U22A0 N-D{len(REQUIRED_DIRS)}-C{len(FILES)}-M1-R{archived_reset}-X0 C-0"
+        capsule_path = root / "00_CONTROL/u22a0_return_capsule.txt"
+        if not capsule_path.exists():
+            capsule_path.write_text(capsule + "\n", encoding="utf-8")
+        return capsule
+    except Exception:
+        for path in reversed(created_files):
+            if path.exists():
+                path.unlink()
+        for path in sorted(created_dirs, key=lambda item: len(item.parts), reverse=True):
+            if path.exists() and not any(path.iterdir()):
+                path.rmdir()
+        raise
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--workspace-root", required=True)
+    args = parser.parse_args()
+    try:
+        print(install(Path(args.workspace_root)))
+        return 0
+    except Exception as exc:
+        print(f"U22A0 N-D0-C0-M0-R0-X1 C-7 K-{stable(exc)}")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
