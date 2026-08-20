@@ -1,0 +1,114 @@
+UDP002 U22B1A 执行说明
+版本：v0.1
+日期：2026-08-20
+
+一、这一步在做什么
+
+U22A7 已经通过，U002 Phase A 底层治理骨架现已冻结。
+
+U22B1A 是 Phase B 的第一步，也是第一个真实业务模块：
+
+  S0 U001 Controlled Profile Intake
+
+它负责接收并严格检查 U001 生成的六文件受控数据包，然后向 U002 提供：
+
+  U001_INTAKE_ACCEPTED
+
+它只确认“这份 U001 数据包结构完整、身份一致、质量报告可接受、行数可追溯”。
+它不负责 Camera Target 选择、Radar 有效性判断、Discrepancy、Baseline、异常评分或候选生成。
+
+二、下载文件
+
+从 public GitHub 下载以下三个文件，全部直接放入：
+
+  .\U-UDP002\04_TEMP
+
+文件名：
+
+1. u002_u22b1a_s0_u001_intake_module_installer_v0_1.py.txt
+2. udp002_u22b1a_s0_u001_intake_acceptance_v0_1.py.txt
+3. UDP002_U22B1A_START_HERE_v0_1_2026-08-20.txt
+
+不要修改文件名，不要删除 .txt 尾缀，不要把文件放进 04_TEMP 的子文件夹。
+
+三、正式执行
+
+在 C-CODE 根目录打开 CMD，运行：
+
+python .\U-UDP002\04_TEMP\udp002_u22b1a_s0_u001_intake_acceptance_v0_1.py.txt --workspace-root .\U-UDP002
+
+验收器会自动完成：
+
+1. 审计 U22A7 frozen foundation；
+2. 独立安装并验证 B1A 模块；
+3. 使用 synthetic U001 六文件包执行成功路径；
+4. 验证 replay consistency；
+5. 验证损坏的 quality package 会 fail-close；
+6. 安装并 qualification 正式 B1A 模块；
+7. 再次审计 foundation 未被修改；
+8. 将上一步 A7 的两个程序从 04_TEMP 移入 A-Archive。
+
+四、成功标准
+
+正常情况下应输出一行：
+
+U22B1A N-S1-P1-N1-Q1-V1-F1-H1-T29-I1-A2-X0 C-0
+
+其中 A 表示本次自动归档的 A7 程序数量。若先前已经归档，A0 也可以接受；A1 或 A2 同样有效。
+
+只要满足以下条件即可判定 U22B1A 通过：
+
+  开头为 U22B1A
+  X0
+  C-0
+
+五、安装后确认（仅在正式验收 C-0 后执行）
+
+1. 模块自测：
+
+python .\U-UDP002\01_PROGRAMS\modules\S0\CameraRadar.S0.U001ControlledProfileIntake\0.1.0\selftest.py --module-root .\U-UDP002\01_PROGRAMS\modules\S0\CameraRadar.S0.U001ControlledProfileIntake\0.1.0 --workspace-root .\U-UDP002
+
+预期：
+
+U22B1AM-ST N-T10-F6-K2-R3-X0 C-0
+
+2. 确认模块目录存在：
+
+dir .\U-UDP002\01_PROGRAMS\modules\S0\CameraRadar.S0.U001ControlledProfileIntake\0.1.0
+
+应看到：
+
+  module_manifest.json
+  algorithm_card.json
+  implementation.py
+  selftest.py
+
+3. 确认 qualification evidence 存在：
+
+dir .\U-UDP002\00_CONTROL\registry\qualifications\CameraRadar.S0.U001ControlledProfileIntake\0.1.0
+
+4. 再次确认 frozen foundation：
+
+python .\U-UDP002\05_TESTS\integration\u002_u22_synthetic_vertical_acceptance_v0_1.py --audit-freeze --workspace-root .\U-UDP002
+
+预期：
+
+U22A7FA N-F11-N8-V1-X0 C-0
+
+六、回传规则
+
+如果第三部分正式验收已得到 C-0，只回传该行即可。
+
+例如：
+
+U22B1A N-S1-P1-N1-Q1-V1-F1-H1-T29-I1-A2-X0 C-0
+
+安装后确认无需逐项回传；只有失败时才回传最短错误行。
+
+七、下一步
+
+U22B1A 通过后，进入 U22B1B：
+
+  S1 Camera target reconstruction / arbitration semantics
+
+该步骤才开始处理 Camera 1 / Camera 3 等目标信号的有效性、连续性、切换与 canonical target 构造。
