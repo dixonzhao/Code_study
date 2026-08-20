@@ -1,0 +1,797 @@
+#!/usr/bin/env python3
+"""Run the complete synthetic S0-S7 U22 vertical acceptance and freeze audit."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
+
+
+PROGRAM_ID = "U002-U22-SYNTHETIC-VERTICAL-ACCEPTANCE"
+VERSION = "0.1"
+CONTRACT_VERSION = "U22.0.1"
+PROTOCOL = "U002_U22_MODULE_RUNTIME"
+PROTOCOL_VERSION = "0.1"
+STAGES: Tuple[str, ...] = ("S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7")
+CONTRACT_NAMES: Tuple[str, ...] = (
+    "u002_module_manifest_schema_v0_1.json",
+    "u002_artifact_manifest_schema_v0_1.json",
+    "u002_run_configuration_schema_v0_1.json",
+    "u002_algorithm_card_schema_v0_1.json",
+)
+CORE_NAMES: Tuple[str, ...] = (
+    "u002_u22_contract_validator_v0_1.py",
+    "u002_u22_module_registry_v0_1.py",
+    "u002_u22_artifact_store_v0_1.py",
+    "u002_u22_module_qualification_v0_1.py",
+    "u002_u22_engine_preflight_v0_1.py",
+    "u002_u22_stage_executor_v0_1.py",
+)
+QUALIFICATION = CORE_NAMES[3]
+PREFLIGHT = CORE_NAMES[4]
+EXECUTOR = CORE_NAMES[5]
+ARTIFACT_STORE = CORE_NAMES[2]
+INSTALLED_RELATIVE = Path(
+    "05_TESTS/integration/u002_u22_synthetic_vertical_acceptance_v0_1.py"
+)
+FREEZE_RECEIPT_RELATIVE = Path(
+    "00_CONTROL/foundation/u002_u22_foundation_freeze_receipt_v0_1.json"
+)
+VERTICAL_CAPSULE = "U22A7V N-M8-S8-A8-L7-R1-I1-X0 C-0"
+
+
+class VerticalError(RuntimeError):
+    """Represent one deterministic integration or freeze-audit failure."""
+
+
+def regular_file(path: Path) -> bool:
+    """Accept ordinary files only as governed inputs."""
+
+    return path.is_file() and not path.is_symlink()
+
+
+def canonical_bytes(value: object) -> bytes:
+    """Serialize one control document deterministically."""
+
+    text = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+        allow_nan=False,
+    )
+    return (text + "\n").encode("utf-8")
+
+
+def canonical_text(value: object) -> str:
+    """Return deterministic UTF-8 JSON text."""
+
+    return canonical_bytes(value).decode("utf-8")
+
+
+def sha256_file(path: Path) -> str:
+    """Hash one file without loading it completely into memory."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def sha256_tree(root: Path) -> str:
+    """Hash all regular files under one read-only synthetic package."""
+
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+        if not regular_file(path):
+            continue
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+    return digest.hexdigest()
+
+
+def check(value: bool, reason: str, checks: List[bool]) -> None:
+    """Append a visible check or fail closed."""
+
+    if not value:
+        raise VerticalError(reason)
+    checks.append(True)
+
+
+def run(command: List[str], timeout: int = 120) -> subprocess.CompletedProcess:
+    """Run one bounded dependency process and capture its evidence."""
+
+    return subprocess.run(
+        command,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def require_workspace(path: Path) -> Path:
+    """Validate the fixed U002 workspace identity."""
+
+    root = path.resolve()
+    if not root.is_dir() or root.name != "U-UDP002":
+        raise VerticalError("WORKSPACE_ROOT")
+    return root
+
+
+def algorithm_card(module_id: str, stage: str) -> Dict[str, object]:
+    """Build one explicit synthetic Algorithm Card."""
+
+    return {
+        "ContractVersion": CONTRACT_VERSION,
+        "AlgorithmId": module_id,
+        "AlgorithmVersion": "0.1.0",
+        "Status": "PROVISIONAL",
+        "Purpose": "Exercise the governed " + stage + " runtime boundary",
+        "ProblemSolved": "Transform one synthetic governed Artifact",
+        "MathematicalDefinition": ["y_k = x_k + 1"],
+        "Inputs": ["one synthetic input or parent Artifact"],
+        "Outputs": ["one synthetic child Artifact"],
+        "Assumptions": ["fixture data only"],
+        "FailureConditions": ["contract or lineage violation"],
+        "Limitations": ["not an engineering analysis algorithm"],
+        "Alternatives": ["none for integration acceptance"],
+        "EvaluationPlan": ["execute, audit, and replay the complete chain"],
+        "DecisionReference": "D-U22A7-FOUNDATION-FREEZE",
+    }
+
+
+def module_manifest(
+    module_id: str,
+    stage: str,
+    required_artifacts: List[str],
+    output_type: str,
+) -> Dict[str, object]:
+    """Build one schema-valid synthetic Module Manifest."""
+
+    return {
+        "ContractVersion": CONTRACT_VERSION,
+        "ModuleId": module_id,
+        "ModuleVersion": "0.1.0",
+        "Stage": stage,
+        "AlgorithmStatus": "PROVISIONAL",
+        "ScopeSelector": {},
+        "RequiredInputs": ["Signal.Synthetic"],
+        "OptionalInputs": [],
+        "RequiresArtifacts": required_artifacts,
+        "ProvidesArtifacts": [output_type],
+        "OutputNamespace": module_id.lower(),
+        "ConfigurationSchema": "configuration_schema.json",
+        "FailurePolicy": "REQUIRED",
+        "ConflictPolicy": "EXCLUSIVE",
+        "EntryPoint": "implementation.py",
+        "SelfTestEntryPoint": "selftest.py",
+        "AlgorithmCard": "algorithm_card.json",
+    }
+
+
+def configuration_schema() -> Dict[str, object]:
+    """Build a deliberately small configuration contract."""
+
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["Increment"],
+        "properties": {
+            "Increment": {
+                "type": "number",
+                "minimum": 0,
+            }
+        },
+    }
+
+
+def implementation_source(stage: str) -> str:
+    """Return a readable standard-library synthetic Module implementation."""
+
+    return f'''#!/usr/bin/env python3
+"""Synthetic {stage} Module used only for U22 foundation integration tests."""
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+
+
+CONTRACT_VERSION = "U22.0.1"
+PROTOCOL = "U002_U22_MODULE_RUNTIME"
+PROTOCOL_VERSION = "0.1"
+
+
+def canonical_text(value):
+    """Serialize one synthetic control document deterministically."""
+
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+        allow_nan=False,
+    ) + "\\n"
+
+
+def main():
+    """Transform one request into one governed synthetic Artifact package."""
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--request-json", required=True)
+    parser.add_argument("--result-json", required=True)
+    args = parser.parse_args()
+    request = json.loads(
+        Path(args.request_json).read_text(encoding="utf-8")
+    )
+    output_root = Path(request["OutputRoot"])
+    package_root = output_root / "artifact_01"
+    package_root.mkdir(parents=True)
+    parent_ids = [
+        item["ArtifactId"]
+        for item in request["InputArtifacts"]
+    ]
+    payload = {{
+        "Stage": request["Stage"],
+        "Sequence": request["Sequence"],
+        "Increment": request["Configuration"]["Increment"],
+        "ParentArtifactIds": parent_ids,
+    }}
+    payload_path = package_root / "payload.json"
+    payload_path.write_text(canonical_text(payload), encoding="utf-8")
+    payload_bytes = payload_path.read_bytes()
+    artifact_id = (
+        request["RunId"]
+        + "."
+        + request["ModuleId"]
+        + "."
+        + str(request["Sequence"])
+    )
+    manifest = {{
+        "ContractVersion": CONTRACT_VERSION,
+        "ArtifactId": artifact_id,
+        "ArtifactType": request["ExpectedOutputTypes"][0],
+        "SchemaId": "U22A7_SYNTHETIC_PAYLOAD",
+        "SchemaVersion": "0.1",
+        "RunId": request["RunId"],
+        "Stage": request["Stage"],
+        "ProducerModuleId": request["ModuleId"],
+        "ProducerModuleVersion": request["ModuleVersion"],
+        "ParentArtifactIds": parent_ids,
+        "Payloads": [
+            {{
+                "RelativePath": "payload.json",
+                "MediaType": "application/json",
+                "RowCount": None,
+                "Sha256": hashlib.sha256(payload_bytes).hexdigest(),
+                "ByteSize": len(payload_bytes),
+                "PayloadKind": "PRIMARY",
+            }}
+        ],
+        "Metadata": {{"Synthetic": True}},
+    }}
+    manifest_path = package_root / "artifact_manifest.json"
+    manifest_path.write_text(canonical_text(manifest), encoding="utf-8")
+    result = {{
+        "Protocol": PROTOCOL,
+        "ProtocolVersion": PROTOCOL_VERSION,
+        "ContractVersion": CONTRACT_VERSION,
+        "RunId": request["RunId"],
+        "Sequence": request["Sequence"],
+        "Stage": request["Stage"],
+        "ModuleId": request["ModuleId"],
+        "ModuleVersion": request["ModuleVersion"],
+        "Status": "SUCCEEDED",
+        "ProducedPackages": ["artifact_01"],
+        "Capsule": "U22A7-SYNTHETIC-{stage}-PASS C-0",
+        "Diagnostics": [],
+    }}
+    Path(args.result_json).write_text(
+        canonical_text(result),
+        encoding="utf-8",
+    )
+    print("U22A7-SYNTHETIC-{stage}-PASS C-0")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+def write_module(
+    root: Path,
+    stage: str,
+    required_artifacts: List[str],
+    output_type: str,
+) -> str:
+    """Write one complete synthetic Module package and return its identity."""
+
+    module_id = "Synthetic." + stage + ".Vertical"
+    directory = root / "01_PROGRAMS/modules" / stage / module_id / "0.1.0"
+    directory.mkdir(parents=True)
+    documents = {
+        "module_manifest.json": module_manifest(
+            module_id,
+            stage,
+            required_artifacts,
+            output_type,
+        ),
+        "algorithm_card.json": algorithm_card(module_id, stage),
+        "configuration_schema.json": configuration_schema(),
+    }
+    for name, document in documents.items():
+        (directory / name).write_text(
+            canonical_text(document),
+            encoding="utf-8",
+        )
+    (directory / "implementation.py").write_text(
+        implementation_source(stage),
+        encoding="utf-8",
+    )
+    selftest_source = "\n".join(
+        [
+            "import argparse",
+            "parser = argparse.ArgumentParser()",
+            "parser.add_argument('--module-root', required=True)",
+            "parser.add_argument('--workspace-root', required=True)",
+            "parser.parse_args()",
+            f"print('U22A7-SYNTHETIC-{stage}-SELFTEST C-0')",
+            "raise SystemExit(0)",
+            "",
+        ]
+    )
+    (directory / "selftest.py").write_text(
+        selftest_source,
+        encoding="utf-8",
+    )
+    return module_id
+
+
+def copy_environment(source: Path, target: Path) -> None:
+    """Build an isolated U22 workspace without copying company data."""
+
+    target.mkdir(parents=True)
+    for relative in (
+        "00_CONTROL/contracts",
+        "00_CONTROL/registry",
+        "01_PROGRAMS/core",
+        "02_CONFIG/run_configs",
+        "03_CASES",
+        "05_TESTS/integration",
+        "07_OUTPUT",
+    ):
+        (target / relative).mkdir(parents=True, exist_ok=True)
+    for stage in STAGES:
+        (target / "01_PROGRAMS/modules" / stage).mkdir(parents=True)
+    for name in CONTRACT_NAMES:
+        source_file = source / "00_CONTROL/contracts" / name
+        if not regular_file(source_file):
+            raise VerticalError("CONTRACT_MISSING_" + name)
+        shutil.copy2(source_file, target / "00_CONTROL/contracts" / name)
+    for name in CORE_NAMES:
+        source_file = source / "01_PROGRAMS/core" / name
+        if not regular_file(source_file):
+            raise VerticalError("CORE_MISSING_" + name)
+        shutil.copy2(source_file, target / "01_PROGRAMS/core" / name)
+
+
+def qualify(root: Path, module_id: str) -> subprocess.CompletedProcess:
+    """Qualify one Module through the accepted A4 Core responsibility."""
+
+    return run(
+        [
+            sys.executable,
+            str(root / "01_PROGRAMS/core" / QUALIFICATION),
+            "--qualify-module",
+            module_id + "@0.1.0",
+            "--workspace-root",
+            str(root),
+        ]
+    )
+
+
+def run_configuration(module_ids: Sequence[str]) -> Dict[str, object]:
+    """Build one full S0-S7 synthetic Run Configuration."""
+
+    module_plan = []
+    for sequence, module_id in enumerate(module_ids, start=1):
+        stage = STAGES[sequence - 1]
+        module_plan.append(
+            {
+                "Sequence": sequence,
+                "Stage": stage,
+                "ModuleId": module_id,
+                "ModuleVersion": "0.1.0",
+                "Configuration": {"Increment": float(sequence)},
+            }
+        )
+    return {
+        "ContractVersion": CONTRACT_VERSION,
+        "RunId": "U22A7_VERTICAL",
+        "RunPurpose": "SMOKE",
+        "RunScope": "FULL_CASE",
+        "FrameStart": None,
+        "FrameEnd": None,
+        "InputPackage": "03_CASES/SYNTHETIC_U001_PACKAGE",
+        "SignalProfile": "SyntheticVerticalProfile@0.1",
+        "ModulePlan": module_plan,
+        "PrimaryOutcome": {
+            "Name": "SyntheticVerticalOutcome",
+            "Formula": "S7(S6(...S0(x)))",
+            "Sign": "NOT_APPLICABLE",
+            "Unit": "1",
+            "Purpose": "EXPLORATORY",
+        },
+        "CandidatePolicy": "SyntheticVerticalPolicy@0.1",
+        "OutputSelection": ["SYNTHETIC_S7_HANDOFF"],
+    }
+
+
+def prepare(root: Path, configuration: Mapping[str, object]) -> subprocess.CompletedProcess:
+    """Prepare one full synthetic Run through accepted A5."""
+
+    path = root / "02_CONFIG/run_configs/u22a7_vertical.json"
+    path.write_text(canonical_text(configuration), encoding="utf-8")
+    return run(
+        [
+            sys.executable,
+            str(root / "01_PROGRAMS/core" / PREFLIGHT),
+            "--prepare-run",
+            str(path),
+            "--workspace-root",
+            str(root),
+        ]
+    )
+
+
+def execute(root: Path) -> subprocess.CompletedProcess:
+    """Execute the prepared synthetic Run through accepted A6."""
+
+    return run(
+        [
+            sys.executable,
+            str(root / "01_PROGRAMS/core" / EXECUTOR),
+            "--execute-run",
+            str(root / "07_OUTPUT/U22A7_VERTICAL"),
+            "--workspace-root",
+            str(root),
+            "--module-timeout-seconds",
+            "20",
+        ],
+        timeout=180,
+    )
+
+
+def audit(root: Path) -> subprocess.CompletedProcess:
+    """Audit the complete Run through accepted A3."""
+
+    return run(
+        [
+            sys.executable,
+            str(root / "01_PROGRAMS/core" / ARTIFACT_STORE),
+            "--audit-run",
+            "--run-root",
+            str(root / "07_OUTPUT/U22A7_VERTICAL"),
+            "--workspace-root",
+            str(root),
+        ]
+    )
+
+
+def run_vertical(workspace_root: Path) -> str:
+    """Prove all eight Stage boundaries using one isolated Golden Run."""
+
+    checks: List[bool] = []
+    with tempfile.TemporaryDirectory(prefix="u22a7_vertical_") as temporary:
+        root = Path(temporary) / "U-UDP002"
+        copy_environment(workspace_root, root)
+        input_package = root / "03_CASES/SYNTHETIC_U001_PACKAGE"
+        input_package.mkdir()
+        (input_package / "package_identity.txt").write_text(
+            "U22A7 SYNTHETIC READ ONLY INPUT\n",
+            encoding="utf-8",
+        )
+        input_hash_before = sha256_tree(input_package)
+        module_ids: List[str] = []
+        previous_type: List[str] = []
+        for index, stage in enumerate(STAGES):
+            output_type = (
+                "SYNTHETIC_S7_HANDOFF"
+                if stage == "S7"
+                else "SYNTHETIC_" + stage
+            )
+            module_id = write_module(
+                root,
+                stage,
+                list(previous_type),
+                output_type,
+            )
+            module_ids.append(module_id)
+            qualification = qualify(root, module_id)
+            check(
+                qualification.returncode == 0,
+                "QUALIFICATION_" + stage,
+                checks,
+            )
+            previous_type = [output_type]
+        check(len(module_ids) == 8, "MODULE_COUNT", checks)
+        prepared = prepare(root, run_configuration(module_ids))
+        check(prepared.returncode == 0, "PREFLIGHT", checks)
+        first_execution = execute(root)
+        check(
+            first_execution.returncode == 0
+            and "N-M8-A8-O0-R0-S1" in first_execution.stdout,
+            "EXECUTION_" + first_execution.stdout.strip(),
+            checks,
+        )
+        run_root = root / "07_OUTPUT/U22A7_VERTICAL"
+        status = json.loads(
+            (run_root / "run_status.json").read_text(encoding="utf-8")
+        )
+        check(status["Status"] == "SUCCEEDED", "RUN_STATUS", checks)
+        check(status["CompletedModuleCount"] == 8, "COMPLETED_COUNT", checks)
+        check(status["LastCompletedStage"] == "S7", "LAST_STAGE", checks)
+        index = json.loads(
+            (run_root / "run_artifact_index_v0_1.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        artifacts = index["Artifacts"]
+        check(len(artifacts) == 8, "ARTIFACT_COUNT", checks)
+        lineage_links = sum(
+            len(item["ParentArtifactIds"])
+            for item in artifacts
+        )
+        check(lineage_links == 7, "LINEAGE_COUNT", checks)
+        check(
+            sum(item["ArtifactType"] == "SYNTHETIC_S7_HANDOFF" for item in artifacts)
+            == 1,
+            "HANDOFF_COUNT",
+            checks,
+        )
+        check(
+            len(list((run_root / "01_LOGS").glob("*.json"))) == 8,
+            "EXECUTION_RECORD_COUNT",
+            checks,
+        )
+        diagnostics = run_root / "02_DIAGNOSTICS/modules"
+        check(
+            len([path for path in diagnostics.iterdir() if path.is_dir()]) == 8,
+            "DIAGNOSTIC_COUNT",
+            checks,
+        )
+        check(
+            not any((run_root / "00_STAGING").iterdir()),
+            "STAGING_NOT_EMPTY",
+            checks,
+        )
+        audit_result = audit(root)
+        check(audit_result.returncode == 0, "ARTIFACT_AUDIT", checks)
+        check(
+            sha256_tree(input_package) == input_hash_before,
+            "INPUT_MUTATED",
+            checks,
+        )
+        replay = execute(root)
+        check(
+            replay.returncode == 0
+            and "N-M8-A8-O0-R1-S1" in replay.stdout,
+            "CONTROLLED_REPLAY",
+            checks,
+        )
+        check(len(checks) == 23, "VERTICAL_CHECK_COUNT", checks)
+    return VERTICAL_CAPSULE
+
+
+def frozen_file_paths(workspace_root: Path) -> List[Path]:
+    """Return the complete Phase A file set protected by the receipt."""
+
+    paths = [
+        workspace_root / "00_CONTROL/contracts" / name
+        for name in CONTRACT_NAMES
+    ]
+    paths.extend(
+        workspace_root / "01_PROGRAMS/core" / name
+        for name in CORE_NAMES
+    )
+    paths.append(workspace_root / INSTALLED_RELATIVE)
+    return paths
+
+
+def build_freeze_receipt(
+    workspace_root: Path,
+    accepted_capsule: str,
+) -> Dict[str, object]:
+    """Build one deterministic Phase A freeze receipt."""
+
+    if accepted_capsule != VERTICAL_CAPSULE:
+        raise VerticalError("VERTICAL_CAPSULE")
+    frozen_files = []
+    for path in frozen_file_paths(workspace_root):
+        if not regular_file(path):
+            raise VerticalError("FROZEN_FILE_MISSING_" + path.name)
+        frozen_files.append(
+            {
+                "RelativePath": path.relative_to(workspace_root).as_posix(),
+                "Sha256": sha256_file(path),
+            }
+        )
+    receipt: Dict[str, object] = {
+        "ReceiptContract": "U002_U22_FOUNDATION_FREEZE",
+        "ReceiptVersion": "0.1",
+        "ContractVersion": CONTRACT_VERSION,
+        "Status": "FROZEN",
+        "AcceptedNodes": [
+            "U22A0",
+            "U22A1",
+            "U22A2",
+            "U22A3",
+            "U22A4",
+            "U22A5",
+            "U22A6",
+            "U22A7",
+        ],
+        "AcceptedVerticalCapsule": accepted_capsule,
+        "FrozenFiles": sorted(
+            frozen_files,
+            key=lambda item: str(item["RelativePath"]),
+        ),
+    }
+    receipt["ReceiptSha256"] = hashlib.sha256(canonical_bytes(receipt)).hexdigest()
+    return receipt
+
+
+def write_freeze_receipt(
+    workspace_root: Path,
+    accepted_capsule: str,
+) -> str:
+    """Atomically install the deterministic Phase A freeze receipt."""
+
+    receipt = build_freeze_receipt(workspace_root, accepted_capsule)
+    path = workspace_root / FREEZE_RECEIPT_RELATIVE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".writing")
+    if temporary.exists():
+        raise VerticalError("FREEZE_TEMP_EXISTS")
+    temporary.write_bytes(canonical_bytes(receipt))
+    os.replace(temporary, path)
+    return "U22A7F N-F11-N8-V1-X0 C-0"
+
+
+def audit_freeze(workspace_root: Path) -> str:
+    """Fail closed if any frozen Phase A file or receipt field changed."""
+
+    path = workspace_root / FREEZE_RECEIPT_RELATIVE
+    if not regular_file(path):
+        raise VerticalError("FREEZE_RECEIPT_MISSING")
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        raise VerticalError("FREEZE_RECEIPT_JSON") from exc
+    required = {
+        "ReceiptContract",
+        "ReceiptVersion",
+        "ContractVersion",
+        "Status",
+        "AcceptedNodes",
+        "AcceptedVerticalCapsule",
+        "FrozenFiles",
+        "ReceiptSha256",
+    }
+    if not isinstance(receipt, dict) or set(receipt) != required:
+        raise VerticalError("FREEZE_RECEIPT_SHAPE")
+    expected_hash = receipt.pop("ReceiptSha256")
+    observed_hash = hashlib.sha256(canonical_bytes(receipt)).hexdigest()
+    if expected_hash != observed_hash:
+        raise VerticalError("FREEZE_RECEIPT_HASH")
+    if receipt["Status"] != "FROZEN" or len(receipt["AcceptedNodes"]) != 8:
+        raise VerticalError("FREEZE_STATUS")
+    if receipt["AcceptedVerticalCapsule"] != VERTICAL_CAPSULE:
+        raise VerticalError("FREEZE_VERTICAL")
+    files = receipt["FrozenFiles"]
+    if not isinstance(files, list) or len(files) != 11:
+        raise VerticalError("FREEZE_FILE_COUNT")
+    for item in files:
+        if not isinstance(item, dict) or set(item) != {"RelativePath", "Sha256"}:
+            raise VerticalError("FREEZE_FILE_SHAPE")
+        candidate = workspace_root / str(item["RelativePath"])
+        if not regular_file(candidate):
+            raise VerticalError("FREEZE_FILE_MISSING")
+        if sha256_file(candidate) != item["Sha256"]:
+            raise VerticalError("FREEZE_FILE_CHANGED")
+    return "U22A7FA N-F11-N8-V1-X0 C-0"
+
+
+def self_test(workspace_root: Path) -> str:
+    """Exercise deterministic helpers without launching the vertical Run."""
+
+    checks: List[bool] = []
+    check(PROGRAM_ID.startswith("U002"), "PROGRAM_ID", checks)
+    check(VERSION == "0.1", "VERSION", checks)
+    check(CONTRACT_VERSION == "U22.0.1", "CONTRACT", checks)
+    check(PROTOCOL_VERSION == "0.1", "PROTOCOL_VERSION", checks)
+    check(len(STAGES) == 8, "STAGES", checks)
+    check(STAGES[0] == "S0", "FIRST_STAGE", checks)
+    check(STAGES[-1] == "S7", "LAST_STAGE", checks)
+    check(len(CONTRACT_NAMES) == 4, "CONTRACT_NAMES", checks)
+    check(len(CORE_NAMES) == 6, "CORE_NAMES", checks)
+    check(INSTALLED_RELATIVE.suffix == ".py", "INSTALL_SUFFIX", checks)
+    check(FREEZE_RECEIPT_RELATIVE.suffix == ".json", "RECEIPT_SUFFIX", checks)
+    check(len(sha256_tree(workspace_root / "00_CONTROL/contracts")) == 64, "TREE_HASH", checks)
+    check(module_manifest("A", "S0", [], "B")["Stage"] == "S0", "MANIFEST", checks)
+    check(algorithm_card("A", "S0")["Status"] == "PROVISIONAL", "CARD", checks)
+    check(configuration_schema()["additionalProperties"] is False, "CONFIG", checks)
+    check("--request-json" in implementation_source("S0"), "REQUEST_PROTOCOL", checks)
+    check("--result-json" in implementation_source("S0"), "RESULT_PROTOCOL", checks)
+    check(len(run_configuration(["M" + str(i) for i in range(8)])["ModulePlan"]) == 8, "RUN_PLAN", checks)
+    check(VERTICAL_CAPSULE.endswith("C-0"), "CAPSULE", checks)
+    check(len(frozen_file_paths(workspace_root)) == 11, "FROZEN_PATHS", checks)
+    check(canonical_bytes({"b": 1, "a": 2}).startswith(b"{"), "CANONICAL", checks)
+    check(len(sha256_file(workspace_root / "00_CONTROL/contracts" / CONTRACT_NAMES[0])) == 64, "FILE_HASH", checks)
+    check(sys.executable != "", "PYTHON", checks)
+    check(len(checks) == 23, "SELFTEST_COUNT", checks)
+    return "U22A7V-ST N-T24-X0 C-0"
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    """Create explicit vertical, freeze-write, and freeze-audit modes."""
+
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--run-vertical", action="store_true")
+    mode.add_argument("--write-freeze-receipt", action="store_true")
+    mode.add_argument("--audit-freeze", action="store_true")
+    parser.add_argument("--accepted-capsule")
+    parser.add_argument("--workspace-root", required=True)
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] = None) -> int:
+    """Run one explicit integration or freeze-control responsibility."""
+
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        workspace_root = require_workspace(Path(args.workspace_root))
+        if args.self_test:
+            print(self_test(workspace_root))
+            return 0
+        if args.run_vertical:
+            print(run_vertical(workspace_root))
+            return 0
+        if args.write_freeze_receipt:
+            if args.accepted_capsule is None:
+                raise VerticalError("ACCEPTED_CAPSULE_REQUIRED")
+            print(write_freeze_receipt(workspace_root, args.accepted_capsule))
+            return 0
+        print(audit_freeze(workspace_root))
+        return 0
+    except VerticalError as exc:
+        print("U22A7V N-M0-S0-A0-L0-R0-I0-X1 C-7 R-" + str(exc))
+        return 7
+    except Exception as exc:
+        print(
+            "U22A7V N-M0-S0-A0-L0-R0-I0-X1 C-7 R-"
+            + exc.__class__.__name__.upper()
+        )
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
