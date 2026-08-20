@@ -1,0 +1,126 @@
+UDP002 U22B1AR 真实 U001→U002 衔接验收
+版本：v0.1
+日期：2026-08-20
+
+一、为什么增加这一步
+
+U22B1A 的 C-0 已证明：
+
+1. S0 Intake Module 可以安装和 qualification；
+2. frozen A5/A6 runtime 可以调用该 Module；
+3. contract-shaped synthetic U001 六文件包可以成功进入 U002；
+4. 损坏包会 fail-close；
+5. replay、artifact audit、input immutability 和 foundation freeze 均有效。
+
+但是，它尚未证明公司电脑上真实 U001 输出的字段、文件组织和语义元数据与 U002 完全兼容。
+
+U22B1AR 专门关闭这个风险。它只读检查真实 U001 六文件包，并通过正式 A5/A6 链执行 S0，不修改 U001 数据。
+
+二、下载文件
+
+从 public GitHub 下载以下两个文件，直接放入：
+
+  .\U-UDP002\04_TEMP
+
+1. u002_u22b1ar_real_u001_handoff_acceptance_v0_1.py.txt
+2. UDP002_U22B1AR_START_HERE_v0_1_2026-08-20.txt
+
+不要改名，不要删除 .txt 尾缀，不要放入子文件夹。
+
+三、确认基础目录
+
+在 C-CODE 根目录的 CMD 中运行：
+
+dir .\U-UDP001
+dir .\U-UDP002\01_PROGRAMS\modules\S0\CameraRadar.S0.U001ControlledProfileIntake\0.1.0
+
+第一个目录应包含 U001 工作区及其实际输出；第二个目录应包含已安装的 B1A Module。
+
+四、程序自测
+
+python .\U-UDP002\04_TEMP\u002_u22b1ar_real_u001_handoff_acceptance_v0_1.py.txt --self-test
+
+预期：
+
+U22B1AR-ST N-T8-X0 C-0
+
+五、真实衔接验收
+
+运行：
+
+python .\U-UDP002\04_TEMP\u002_u22b1ar_real_u001_handoff_acceptance_v0_1.py.txt --u002-workspace-root .\U-UDP002 --u001-search-root .\U-UDP001
+
+程序会：
+
+1. 在 U-UDP001 中自动搜索完整六文件包；
+2. 忽略 A-Archive、04_TEMP、.git 和 __pycache__；
+3. 若存在多个完整包，选择 u001_frame_values.csv 最大的包；大小相同时选择最新包；
+4. 对六文件计算 size、mtime 和 SHA-256；
+5. 运行 foundation freeze audit；
+6. 通过正式 A5 Preflight 生成 EVALUATION Run；
+7. 通过正式 A6 Executor 调用已安装的 B1A S0 Module；
+8. 检查 D1-D6 结构、FrameCount、D2/D3 对应、quality、manifest portability、D6 row alignment；
+9. 审计 governed Artifact；
+10. 再次计算六文件身份，确认 U001 输入未被修改；
+11. 再次确认 frozen foundation 未被修改；
+12. 在对应 Run 目录生成 metadata-only acceptance receipt。
+
+注意：真实六文件可能较大。该步骤会流式读取并计算 SHA-256，运行数分钟属于正常现象；不要重复启动多个实例。
+
+六、成功标准
+
+成功时输出格式：
+
+U22B1AR N-C?-F?-K?-G?-Q1-R1-I1-H1-X0 C-0
+
+含义：
+
+C = 发现的完整 active U001 package 数量
+F = 真实 FrameCount 行数
+K = 真实 Signal 数量
+G = FrameCount gap 区间数量
+Q1 = U001 quality gate 通过
+R1 = 正式 U002 runtime 执行通过
+I1 = 六个 U001 输入文件运行前后完全一致
+H1 = package fingerprint 与 governed Artifact 一致
+
+七、输出位置
+
+Run 输出位于：
+
+  .\U-UDP002\07_OUTPUT\U22B1AR_<fingerprint>_<timestamp>
+
+查找 acceptance receipt：
+
+dir /s /b .\U-UDP002\07_OUTPUT\U22B1AR_*\u22b1ar_real_handoff_receipt.json
+
+receipt 只记录文件身份、Frame domain、Signal count、quality gate 和禁止性声明，不复制真实信号数值。
+
+八、失败规则
+
+若返回 C-7，不修改 U001 或 U002 程序，只回传该错误行。
+
+常见错误：
+
+NO_COMPLETE_U001_PACKAGE
+  U-UDP001 下未找到六个标准文件位于同一目录的实际输出。
+
+PACKAGE_INCOMPLETE
+  指定目录缺少六个标准文件之一。
+
+PREFLIGHT_...
+  真实 U001 package 与 frozen Run Contract 不兼容。
+
+EXECUTOR_...
+  B1A Module 拒绝真实 package；此时应按错误码定位 D1-D6 契约差异。
+
+U001_INPUT_CHANGED
+  执行期间输入文件发生变化，必须停止。
+
+九、回传
+
+只回传最终一行，不回传 self-test：
+
+U22B1AR N-C?-F?-K?-G?-Q?-R?-I?-H?-X? C-?
+
+U22B1AR C-0 后，才把“真实 U001→U002 S0 衔接”记为接受，并进入 B1B Camera Target reconstruction。
