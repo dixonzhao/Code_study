@@ -1,0 +1,75 @@
+UDP002 U22B1B6：Q6 多Episode与327.66污染诊断
+版本：v0.3
+日期：2026-08-20
+
+一、为什么升级
+
+v0.2正确运行，但选择了52647-52648的一帧短失效，而不是人工确认的
+52657-约52841长失效。它同时发现327.66被当成eligible。
+
+v0.3会：
+
+1. 枚举52640-52860内全部Canonical invalid episode；
+2. 自动选择持续时间最长、且随后恢复的episode；
+3. 检查H1 pending acquisition中断；
+4. 检查H2 eligible-but-implausible状态缺少超时reset；
+5. 单独统计Camera1/3中327.66出现次数及被标为eligible的次数。
+
+程序只读B1B4 Artifact，不修改算法或源数据。
+
+二、下载
+
+下载以下两个v0.3文件到：
+
+    C-CODE\U-UDP002\04_TEMP
+
+1. UDP002_U22B1B6_Q6_REACQUISITION_DIAGNOSTIC_START_HERE_v0_3_2026-08-20.txt
+2. u002_u22b1b6_q6_reacquisition_diagnostic_v0_3.py.txt
+
+三、执行（Windows CMD，当前目录为C-CODE）
+
+python .\U-UDP002\04_TEMP\u002_u22b1b6_q6_reacquisition_diagnostic_v0_3.py.txt --self-test
+
+python .\U-UDP002\04_TEMP\u002_u22b1b6_q6_reacquisition_diagnostic_v0_3.py.txt --run --workspace-root .\U-UDP002
+
+四、回传
+
+真实诊断输出三行，请三行全部回传：
+
+1. 主状态
+
+    U22B1B6 N-R...-J...-L...-U...-Z...-E...-C...-D...-H...-X0 C-0
+
+2. 最长episode细节
+
+    U22B1B6D1 N-NC...-LR...-EL...-A...-B...-PV...-FV...-G...-T...-X0 C-0
+
+3. 327.66污染统计
+
+    U22B1B6D2 N-S1...-E1...-S3...-E3...-X0 C-0
+
+字段：
+
+- J：检测到的invalid episode数量
+- L/U：所选最长episode的起止Frame
+- Z：reset Frame；0表示没有reset
+- E/C/D：首个eligible、Canonical恢复、延迟Frames
+- H1：pending被无更新Frame清空
+- H2：eligible-but-implausible状态缺少超时reset
+- NC/LR：NO_CONTINUITY_SUPPORTED_PATH数量/最长连续长度
+- PV/FV/G/T：前值、首个eligible值、差值、允许门限
+- S1/E1：Camera1的327.66总数/其中eligible数
+- S3/E3：Camera3的327.66总数/其中eligible数
+
+五、本地证据
+
+B1B4 Run的05_EXPORTS会新增：
+
+- u22b1b6_q6_reacquisition_trace_v0_3.csv
+- u22b1b6_q6_reacquisition_summary_v0_3.json
+
+错误时仍输出主C-7与独立D1 machine capsule；完整JSON位于：
+
+    U-UDP002\04_TEMP\u22b1b6_diagnostic_v0_3.json
+
+本节点完成前不修改U001 validity或S1状态机。

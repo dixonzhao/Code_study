@@ -15,15 +15,15 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 
 PROGRAM_ID = "U002-U22B1B6-Q6-REACQUISITION-DIAGNOSTIC"
-VERSION = "0.2"
+VERSION = "0.3"
 RUN_RECEIPT_NAME = "u22b1b4_normalized_retry_run_receipt_v0_1.json"
 ARTIFACT_INDEX_NAME = "run_artifact_index_v0_1.json"
 S1_ARTIFACT_TYPE = "CAMERA_TARGET_RECONSTRUCTION"
 WINDOW_START = 52640
 WINDOW_END = 52860
-TRACE_NAME = "u22b1b6_q6_reacquisition_trace_v0_2.csv"
-SUMMARY_NAME = "u22b1b6_q6_reacquisition_summary_v0_2.json"
-DIAGNOSTIC_RELATIVE = Path("04_TEMP/u22b1b6_diagnostic_v0_2.json")
+TRACE_NAME = "u22b1b6_q6_reacquisition_trace_v0_3.csv"
+SUMMARY_NAME = "u22b1b6_q6_reacquisition_summary_v0_3.json"
+DIAGNOSTIC_RELATIVE = Path("04_TEMP/u22b1b6_diagnostic_v0_3.json")
 
 REQUIRED_COLUMNS = (
     "FrameCount",
@@ -260,6 +260,49 @@ def longest_streak(rows: Sequence[Mapping[str, str]], key: str) -> int:
     return best
 
 
+def canonical_invalid_episodes(
+    rows: Sequence[Mapping[str, str]],
+) -> List[Dict[str, int]]:
+    """Enumerate every valid-to-invalid episode instead of choosing the first."""
+
+    episodes: List[Dict[str, int]] = []
+    start_index: Optional[int] = None
+    for index, row in enumerate(rows):
+        valid = row["CanonicalCameraValid"] == "1"
+        if not valid and start_index is None:
+            if index > 0 and rows[index - 1]["CanonicalCameraValid"] == "1":
+                start_index = index
+            continue
+        if valid and start_index is not None:
+            episodes.append({
+                "StartIndex": start_index,
+                "EndIndex": index - 1,
+                "RecoveryIndex": index,
+                "InvalidRowCount": index - start_index,
+            })
+            start_index = None
+    if start_index is not None:
+        episodes.append({
+            "StartIndex": start_index,
+            "EndIndex": len(rows) - 1,
+            "RecoveryIndex": -1,
+            "InvalidRowCount": len(rows) - start_index,
+        })
+    return episodes
+
+
+def optional_float(value: object) -> Optional[float]:
+    """Parse one optional numeric diagnostic field."""
+
+    text = str(value if value is not None else "").strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
 def analyze(
     rows: Sequence[Mapping[str, str]],
     acquire_frames: int,
@@ -269,21 +312,23 @@ def analyze(
 ) -> Dict[str, object]:
     """Distinguish interrupted acquisition from a stuck continuity state."""
 
-    previous_valid = False
-    loss_frame: Optional[int] = None
-    last_valid_row: Optional[Mapping[str, str]] = None
-    for row in rows:
-        valid = row["CanonicalCameraValid"] == "1"
-        if valid:
-            previous_valid = True
-            last_valid_row = row
-            continue
-        if previous_valid:
-            loss_frame = int(row["FrameCount"])
-            break
-    if loss_frame is None or last_valid_row is None:
-        raise DiagnosticError("CANONICAL_LOSS_NOT_FOUND")
-    after_loss = [row for row in rows if int(row["FrameCount"]) >= loss_frame]
+    episodes = canonical_invalid_episodes(rows)
+    completed = [item for item in episodes if item["RecoveryIndex"] >= 0]
+    if not completed:
+        raise DiagnosticError("COMPLETED_CANONICAL_LOSS_EPISODE_NOT_FOUND")
+    selected_episode = max(
+        completed,
+        key=lambda item: (
+            item["InvalidRowCount"],
+            int(rows[item["StartIndex"]]["FrameCount"]),
+        ),
+    )
+    start_index = selected_episode["StartIndex"]
+    recovery_index = selected_episode["RecoveryIndex"]
+    last_valid_row = rows[start_index - 1]
+    loss_frame = int(rows[start_index]["FrameCount"])
+    invalid_end_frame = int(rows[selected_episode["EndIndex"]]["FrameCount"])
+    after_loss = list(rows[start_index : recovery_index + 1])
     first_eligible = first_frame(
         after_loss,
         lambda row: row["Camera1Eligible"] == "1"
@@ -297,10 +342,7 @@ def analyze(
         raise DiagnosticError("ELIGIBLE_AFTER_LOSS_NOT_FOUND")
     if first_recovered is None:
         raise DiagnosticError("CANONICAL_RECOVERY_NOT_FOUND")
-    diagnostic_rows = [
-        row for row in after_loss
-        if int(row["FrameCount"]) <= first_recovered
-    ]
+    diagnostic_rows = after_loss
     reset_frame = first_frame(
         diagnostic_rows,
         lambda row: row["SelectionStatus"] == "SEGMENT_RESET",
@@ -327,6 +369,20 @@ def analyze(
         raise DiagnosticError("DIAGNOSTIC_VALUE_PARSE") from exc
     value_gap = abs(first_eligible_value - previous_value)
     continuity_limit = continuity_scale * maximum_cost
+    sentinel_counts = {
+        "Camera1Rows": 0,
+        "Camera1EligibleRows": 0,
+        "Camera3Rows": 0,
+        "Camera3EligibleRows": 0,
+    }
+    for row in rows:
+        for camera in ("Camera1", "Camera3"):
+            value = optional_float(row[camera + "Distance"])
+            if value is None or abs(value - 327.66) > 1e-6:
+                continue
+            sentinel_counts[camera + "Rows"] += 1
+            if row[camera + "Eligible"] == "1":
+                sentinel_counts[camera + "EligibleRows"] += 1
     status_counts: Dict[str, int] = {}
     reason_counts: Dict[str, int] = {}
     acquisition_attempts = 0
@@ -377,7 +433,7 @@ def analyze(
     )
     hypothesis_code = 2 if hypothesis_2 else (1 if hypothesis_1 else 0)
     return {
-        "Contract": "UDP002_U22B1B6_Q6_REACQUISITION_DIAGNOSTIC_V0_2",
+        "Contract": "UDP002_U22B1B6_Q6_REACQUISITION_DIAGNOSTIC_V0_3",
         "ProgramId": PROGRAM_ID,
         "ProgramVersion": VERSION,
         "WindowStart": int(rows[0]["FrameCount"]),
@@ -388,7 +444,11 @@ def analyze(
         "ContinuityScaleMeters": continuity_scale,
         "MaximumContinuityCost": maximum_cost,
         "ContinuityLimitMeters": continuity_limit,
+        "CanonicalInvalidEpisodeCount": len(episodes),
+        "CompletedCanonicalInvalidEpisodeCount": len(completed),
+        "SelectedInvalidEpisodeRows": selected_episode["InvalidRowCount"],
         "CanonicalLossFrame": loss_frame,
+        "CanonicalInvalidEndFrame": invalid_end_frame,
         "ResetFrame": reset_frame,
         "FirstEligibleFrameAfterLoss": first_eligible,
         "FirstCanonicalValidFrameAfterLoss": first_recovered,
@@ -405,6 +465,7 @@ def analyze(
         "InitialValueGapMeters": value_gap,
         "NoContinuitySupportedPathCount": no_continuity_count,
         "LongestNoContinuitySupportedPathRun": longest_no_continuity,
+        "Sentinel327_66": sentinel_counts,
         "LongestConsecutiveCamera1EligibleRows": longest_streak(
             diagnostic_rows, "Camera1Eligible"
         ),
@@ -437,15 +498,19 @@ def trace_bytes(rows: Sequence[Mapping[str, str]]) -> bytes:
     return buffer.getvalue().encode("utf-8")
 
 
-def compact(summary: Mapping[str, object]) -> Tuple[str, str]:
-    """Return separate outcome and detail machine capsules."""
+def compact(summary: Mapping[str, object]) -> Tuple[str, str, str]:
+    """Return outcome, episode detail and sentinel-contamination capsules."""
 
     reset = summary["ResetFrame"]
     main = (
         "U22B1B6 N-R"
         + str(summary["WindowRows"])
+        + "-J"
+        + str(summary["CanonicalInvalidEpisodeCount"])
         + "-L"
         + str(summary["CanonicalLossFrame"])
+        + "-U"
+        + str(summary["CanonicalInvalidEndFrame"])
         + "-Z"
         + (str(reset) if reset is not None else "0")
         + "-E"
@@ -479,10 +544,22 @@ def compact(summary: Mapping[str, object]) -> Tuple[str, str]:
         + format(float(summary["ContinuityLimitMeters"]), ".4g")
         + "-X0 C-0"
     )
-    return main, detail
+    sentinel = summary["Sentinel327_66"]
+    sentinel_detail = (
+        "U22B1B6D2 N-S1"
+        + str(sentinel["Camera1Rows"])
+        + "-E1"
+        + str(sentinel["Camera1EligibleRows"])
+        + "-S3"
+        + str(sentinel["Camera3Rows"])
+        + "-E3"
+        + str(sentinel["Camera3EligibleRows"])
+        + "-X0 C-0"
+    )
+    return main, detail, sentinel_detail
 
 
-def run(root: Path) -> Tuple[str, str]:
+def run(root: Path) -> Tuple[str, str, str]:
     """Execute the complete read-only Q6 diagnosis."""
 
     run_root, receipt = discover_b1b4(root)
@@ -560,9 +637,10 @@ def self_test() -> str:
     check(summary["Hypothesis1Supported"] is True)
     check(summary["HypothesisCode"] == 1)
     check(summary["LongestConsecutiveCamera1EligibleRows"] == 3)
-    main_capsule, detail_capsule = compact(summary)
+    main_capsule, detail_capsule, sentinel_capsule = compact(summary)
     check(main_capsule.endswith("H1-X0 C-0"))
     check(detail_capsule.startswith("U22B1B6D1"))
+    check(sentinel_capsule.startswith("U22B1B6D2"))
     stuck_rows = []
     for frame in range(52640, 52842):
         row = {name: "" for name in REQUIRED_COLUMNS}
@@ -598,7 +676,7 @@ def self_test() -> str:
         check(regular_file(path))
         check(len(sha256_file(path)) == 64)
     check(PROGRAM_ID.startswith("U002-U22B1B6"))
-    check(VERSION == "0.2")
+    check(VERSION == "0.3")
     return "U22B1B6-ST N-T" + str(len(checks)) + "-X0 C-0"
 
 
@@ -644,9 +722,10 @@ def main(argv: Sequence[str] = None) -> int:
         if not args.workspace_root:
             raise DiagnosticError("WORKSPACE_ROOT_REQUIRED")
         root = require_workspace(Path(args.workspace_root))
-        main_capsule, detail_capsule = run(root)
+        main_capsule, detail_capsule, sentinel_capsule = run(root)
         print(main_capsule)
         print(detail_capsule)
+        print(sentinel_capsule)
         return 0
     except Exception as exc:
         if isinstance(exc, DiagnosticError):
