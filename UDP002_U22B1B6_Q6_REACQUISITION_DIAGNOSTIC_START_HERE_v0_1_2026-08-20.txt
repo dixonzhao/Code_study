@@ -1,0 +1,64 @@
+UDP002 U22B1B6：Q6 重捕获延迟只读诊断
+版本：v0.1
+日期：2026-08-20
+
+一、目标
+
+Q6确认：Camera 1约在FrameCount 52662恢复，但Canonical直到约52841才恢复。
+本节点不修改算法，只读取B1B4已经生成的S1 Artifact，自动量化重捕获过程。
+
+重点验证假设：
+
+    AcquireConfirmFrames = 3
+    + HoldPolicy NONE / age = 0
+    + 无更新Frame清空pending acquisition
+    -> 异步Camera更新无法连续确认，造成长时间重捕获延迟
+
+二、下载
+
+从public中转仓库下载以下两个文件到：
+
+    C-CODE\U-UDP002\04_TEMP
+
+1. UDP002_U22B1B6_Q6_REACQUISITION_DIAGNOSTIC_START_HERE_v0_1_2026-08-20.txt
+2. u002_u22b1b6_q6_reacquisition_diagnostic_v0_1.py.txt
+
+三、执行（Windows CMD，当前目录为C-CODE）
+
+先执行自测：
+
+python .\U-UDP002\04_TEMP\u002_u22b1b6_q6_reacquisition_diagnostic_v0_1.py.txt --self-test
+
+再执行真实只读诊断：
+
+python .\U-UDP002\04_TEMP\u002_u22b1b6_q6_reacquisition_diagnostic_v0_1.py.txt --run --workspace-root .\U-UDP002
+
+四、回传
+
+只回传真实诊断最后一行，例如：
+
+    U22B1B6 N-R...-Z...-E...-C...-D...-A...-B...-H1-X0 C-0
+
+字段：
+
+- R：52640-52860窗口行数
+- Z：检测到的reset Frame
+- E：reset后首个Camera eligible Frame
+- C：Canonical重新有效的Frame
+- D：E到C的延迟Frame数
+- A：重复开始acquisition的次数
+- B：ACQUIRING被无eligible Frame打断的次数
+- H1：当前假设得到数据支持；H0：未得到支持
+
+五、自动输出
+
+程序会在对应B1B4 Run的05_EXPORTS下生成：
+
+- u22b1b6_q6_reacquisition_trace.csv
+- u22b1b6_q6_reacquisition_summary.json
+
+不要手敲这两个文件。失败时完整原因保存在：
+
+    U-UDP002\04_TEMP\u22b1b6_diagnostic_v0_1.json
+
+只有H1且C-0后，才进入Algorithm Card修订与S1 v0.2实验；本程序本身不改数据。

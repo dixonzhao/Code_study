@@ -1,0 +1,529 @@
+#!/usr/bin/env python3
+"""Diagnose the Q6 re-acquisition delay without modifying any U22 Run."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+from pathlib import Path
+import re
+import sys
+import tempfile
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+
+
+PROGRAM_ID = "U002-U22B1B6-Q6-REACQUISITION-DIAGNOSTIC"
+VERSION = "0.1"
+RUN_RECEIPT_NAME = "u22b1b4_normalized_retry_run_receipt_v0_1.json"
+ARTIFACT_INDEX_NAME = "run_artifact_index_v0_1.json"
+S1_ARTIFACT_TYPE = "CAMERA_TARGET_RECONSTRUCTION"
+WINDOW_START = 52640
+WINDOW_END = 52860
+TRACE_NAME = "u22b1b6_q6_reacquisition_trace.csv"
+SUMMARY_NAME = "u22b1b6_q6_reacquisition_summary.json"
+DIAGNOSTIC_RELATIVE = Path("04_TEMP/u22b1b6_diagnostic_v0_1.json")
+
+REQUIRED_COLUMNS = (
+    "FrameCount",
+    "Camera1Distance",
+    "Camera1Eligible",
+    "Camera1Age",
+    "Camera3Distance",
+    "Camera3Eligible",
+    "Camera3Age",
+    "CanonicalCameraDistance",
+    "CanonicalCameraValid",
+    "SelectedCameraRole",
+    "SelectionStatus",
+    "SelectionReason",
+    "SegmentId",
+)
+
+
+class DiagnosticError(RuntimeError):
+    """Represent one deterministic read-only diagnostic failure."""
+
+    def __init__(self, reason: str, detail: str = "NA"):
+        self.reason = stable(reason, 56)
+        self.detail = stable(detail, 80)
+        super().__init__(self.reason)
+
+
+def stable(value: object, limit: int = 80) -> str:
+    """Convert text into one compact manual-return token."""
+
+    normalized = re.sub(r"[^A-Z0-9_]+", "_", str(value).upper())
+    return normalized.strip("_")[:limit] or "NA"
+
+
+def regular_file(path: Path) -> bool:
+    """Accept ordinary files only."""
+
+    return path.is_file() and not path.is_symlink()
+
+
+def require_workspace(path: Path) -> Path:
+    """Require the fixed U002 workspace identity."""
+
+    root = path.resolve()
+    if not root.is_dir() or root.name != "U-UDP002":
+        raise DiagnosticError("WORKSPACE_ROOT")
+    return root
+
+
+def load_json(path: Path, reason: str) -> Dict[str, object]:
+    """Load one JSON object."""
+
+    if not regular_file(path):
+        raise DiagnosticError(reason + "_MISSING", path.name)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        raise DiagnosticError(reason + "_JSON", path.name) from exc
+    if not isinstance(value, dict):
+        raise DiagnosticError(reason + "_TYPE", path.name)
+    return value
+
+
+def canonical_bytes(value: object) -> bytes:
+    """Serialize deterministic JSON evidence."""
+
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def sha256_file(path: Path) -> str:
+    """Hash one file by bounded blocks."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def write_exact(path: Path, payload: bytes) -> None:
+    """Create evidence once or accept an identical replay."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if not regular_file(path) or path.read_bytes() != payload:
+            raise DiagnosticError("OUTPUT_CONFLICT", path.name)
+        return
+    path.write_bytes(payload)
+
+
+def discover_b1b4(root: Path) -> Tuple[Path, Dict[str, object]]:
+    """Select the largest completed B1B4 normalized Retry Run."""
+
+    candidates = []
+    for path in (root / "07_OUTPUT").glob("U22B1B4_*/" + RUN_RECEIPT_NAME):
+        try:
+            receipt = load_json(path, "RUN_RECEIPT")
+            if receipt.get("Status") != "NORMALIZED_RETRY_RUN_COMPLETED":
+                continue
+            start = int(receipt.get("FrameStart"))
+            end = int(receipt.get("FrameEnd"))
+            candidates.append((end - start, path.stat().st_mtime_ns, path, receipt))
+        except Exception:
+            continue
+    if not candidates:
+        raise DiagnosticError("B1B4_RUN_NOT_FOUND")
+    _, _, receipt_path, receipt = max(candidates)
+    return receipt_path.parent, receipt
+
+
+def locate_s1_table(run_root: Path) -> Path:
+    """Resolve and verify the unique S1 reconstruction table."""
+
+    index = load_json(run_root / ARTIFACT_INDEX_NAME, "ARTIFACT_INDEX")
+    artifacts = index.get("Artifacts")
+    if not isinstance(artifacts, list):
+        raise DiagnosticError("ARTIFACTS_TYPE")
+    matches = [
+        item
+        for item in artifacts
+        if isinstance(item, dict) and item.get("ArtifactType") == S1_ARTIFACT_TYPE
+    ]
+    if len(matches) != 1:
+        raise DiagnosticError("S1_ARTIFACT_COUNT", len(matches))
+    entry = matches[0]
+    manifest_path = run_root / str(entry.get("ManifestRelativePath", ""))
+    if not regular_file(manifest_path):
+        raise DiagnosticError("S1_MANIFEST_MISSING")
+    if sha256_file(manifest_path) != entry.get("ManifestSha256"):
+        raise DiagnosticError("S1_MANIFEST_HASH")
+    manifest = load_json(manifest_path, "S1_MANIFEST")
+    payloads = manifest.get("Payloads")
+    if not isinstance(payloads, list):
+        raise DiagnosticError("S1_PAYLOADS_TYPE")
+    table_records = [
+        item
+        for item in payloads
+        if isinstance(item, dict)
+        and Path(str(item.get("RelativePath", ""))).name
+        == "camera_target_reconstruction.csv"
+    ]
+    if len(table_records) != 1:
+        raise DiagnosticError("S1_TABLE_COUNT", len(table_records))
+    record = table_records[0]
+    table_path = manifest_path.parent / str(record.get("RelativePath", ""))
+    if not regular_file(table_path):
+        raise DiagnosticError("S1_TABLE_MISSING")
+    if sha256_file(table_path) != record.get("Sha256"):
+        raise DiagnosticError("S1_TABLE_HASH")
+    return table_path
+
+
+def acquisition_parameters(run_root: Path) -> Tuple[int, int]:
+    """Read the exact S1 acquisition and reset parameters from the resolved plan."""
+
+    plan = load_json(run_root / "00_CONFIG/resolved_run_plan.json", "RUN_PLAN")
+    modules = plan.get("ModulePlan")
+    if not isinstance(modules, list):
+        raise DiagnosticError("MODULE_PLAN_TYPE")
+    selected = [
+        item for item in modules
+        if isinstance(item, dict) and item.get("Stage") == "S1"
+    ]
+    if len(selected) != 1:
+        raise DiagnosticError("S1_PLAN_COUNT", len(selected))
+    configuration = selected[0].get("Configuration")
+    if not isinstance(configuration, dict):
+        raise DiagnosticError("S1_CONFIGURATION_TYPE")
+    return (
+        int(configuration.get("AcquireConfirmFrames")),
+        int(configuration.get("ResetAfterBothInvalidFrames")),
+    )
+
+
+def read_window(path: Path) -> List[Dict[str, str]]:
+    """Read only the bounded Q6 trace from the verified S1 table."""
+
+    rows: List[Dict[str, str]] = []
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        header = reader.fieldnames or []
+        missing = [name for name in REQUIRED_COLUMNS if name not in header]
+        if missing:
+            raise DiagnosticError("TRACE_COLUMN_MISSING", missing[0])
+        for row in reader:
+            frame = int(row["FrameCount"])
+            if frame < WINDOW_START:
+                continue
+            if frame > WINDOW_END:
+                break
+            rows.append({name: row.get(name, "") for name in REQUIRED_COLUMNS})
+    if not rows:
+        raise DiagnosticError("TRACE_WINDOW_EMPTY")
+    return rows
+
+
+def first_frame(rows: Sequence[Mapping[str, str]], predicate) -> Optional[int]:
+    """Return the first FrameCount satisfying one predicate."""
+
+    for row in rows:
+        if predicate(row):
+            return int(row["FrameCount"])
+    return None
+
+
+def longest_streak(rows: Sequence[Mapping[str, str]], key: str) -> int:
+    """Measure consecutive Frame rows with one eligibility flag set."""
+
+    best = 0
+    current = 0
+    previous: Optional[int] = None
+    for row in rows:
+        frame = int(row["FrameCount"])
+        active = row[key] == "1"
+        if active and (previous is None or frame == previous + 1):
+            current += 1
+        elif active:
+            current = 1
+        else:
+            current = 0
+        best = max(best, current)
+        previous = frame
+    return best
+
+
+def analyze(
+    rows: Sequence[Mapping[str, str]],
+    acquire_frames: int,
+    reset_frames: int,
+) -> Dict[str, object]:
+    """Quantify reset, acquisition attempts, interruptions and recovery delay."""
+
+    reset_frame = first_frame(
+        rows,
+        lambda row: row["SelectionStatus"] == "SEGMENT_RESET",
+    )
+    if reset_frame is None:
+        reset_frame = first_frame(
+            rows,
+            lambda row: row["Camera1Eligible"] == "0"
+            and row["Camera3Eligible"] == "0",
+        )
+    if reset_frame is None:
+        raise DiagnosticError("RESET_FRAME_NOT_FOUND")
+    after_reset = [row for row in rows if int(row["FrameCount"]) > reset_frame]
+    first_eligible = first_frame(
+        after_reset,
+        lambda row: row["Camera1Eligible"] == "1"
+        or row["Camera3Eligible"] == "1",
+    )
+    first_recovered = first_frame(
+        after_reset,
+        lambda row: row["CanonicalCameraValid"] == "1",
+    )
+    if first_eligible is None:
+        raise DiagnosticError("ELIGIBLE_AFTER_RESET_NOT_FOUND")
+    if first_recovered is None:
+        raise DiagnosticError("CANONICAL_RECOVERY_NOT_FOUND")
+    diagnostic_rows = [
+        row for row in after_reset
+        if int(row["FrameCount"]) <= first_recovered
+    ]
+    status_counts: Dict[str, int] = {}
+    reason_counts: Dict[str, int] = {}
+    acquisition_attempts = 0
+    pending_breaks = 0
+    previous_status = ""
+    for row in diagnostic_rows:
+        status = row["SelectionStatus"]
+        reason = row["SelectionReason"]
+        status_counts[status] = status_counts.get(status, 0) + 1
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        if status == "ACQUIRING" and previous_status != "ACQUIRING":
+            acquisition_attempts += 1
+        if (
+            previous_status == "ACQUIRING"
+            and row["Camera1Eligible"] == "0"
+            and row["Camera3Eligible"] == "0"
+        ):
+            pending_breaks += 1
+        previous_status = status
+    hypothesis_supported = bool(
+        acquire_frames > 1
+        and acquisition_attempts > 1
+        and pending_breaks > 0
+        and first_recovered - first_eligible > acquire_frames
+    )
+    return {
+        "Contract": "UDP002_U22B1B6_Q6_REACQUISITION_DIAGNOSTIC_V0_1",
+        "ProgramId": PROGRAM_ID,
+        "ProgramVersion": VERSION,
+        "WindowStart": int(rows[0]["FrameCount"]),
+        "WindowEnd": int(rows[-1]["FrameCount"]),
+        "WindowRows": len(rows),
+        "AcquireConfirmFrames": acquire_frames,
+        "ResetAfterBothInvalidFrames": reset_frames,
+        "ResetFrame": reset_frame,
+        "FirstEligibleFrameAfterReset": first_eligible,
+        "FirstCanonicalValidFrameAfterReset": first_recovered,
+        "ReacquisitionDelayFrames": first_recovered - first_eligible,
+        "ReacquisitionDelaySecondsAt20Hz": (
+            first_recovered - first_eligible
+        ) / 20.0,
+        "AcquisitionAttemptCount": acquisition_attempts,
+        "PendingBreakByNoEligibleFrameCount": pending_breaks,
+        "LongestConsecutiveCamera1EligibleRows": longest_streak(
+            diagnostic_rows, "Camera1Eligible"
+        ),
+        "LongestConsecutiveCamera3EligibleRows": longest_streak(
+            diagnostic_rows, "Camera3Eligible"
+        ),
+        "StatusCountsUntilRecovery": status_counts,
+        "ReasonCountsUntilRecovery": reason_counts,
+        "Hypothesis": (
+            "NO_UPDATE_ROWS_CLEAR_PENDING_ACQUISITION"
+            if hypothesis_supported
+            else "NOT_CONFIRMED"
+        ),
+        "HypothesisSupported": hypothesis_supported,
+        "ClaimLimit": "Read-only timing diagnosis; no algorithm change approved",
+    }
+
+
+def trace_bytes(rows: Sequence[Mapping[str, str]]) -> bytes:
+    """Serialize the bounded trace for optional local inspection."""
+
+    import io
+
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=REQUIRED_COLUMNS, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(rows)
+    return buffer.getvalue().encode("utf-8")
+
+
+def compact(summary: Mapping[str, object]) -> str:
+    """Return one manually transferable result line."""
+
+    h = 1 if summary["HypothesisSupported"] else 0
+    return (
+        "U22B1B6 N-R"
+        + str(summary["WindowRows"])
+        + "-Z"
+        + str(summary["ResetFrame"])
+        + "-E"
+        + str(summary["FirstEligibleFrameAfterReset"])
+        + "-C"
+        + str(summary["FirstCanonicalValidFrameAfterReset"])
+        + "-D"
+        + str(summary["ReacquisitionDelayFrames"])
+        + "-A"
+        + str(summary["AcquisitionAttemptCount"])
+        + "-B"
+        + str(summary["PendingBreakByNoEligibleFrameCount"])
+        + "-H"
+        + str(h)
+        + "-X0 C-0"
+    )
+
+
+def run(root: Path) -> str:
+    """Execute the complete read-only Q6 diagnosis."""
+
+    run_root, receipt = discover_b1b4(root)
+    table = locate_s1_table(run_root)
+    before = sha256_file(table)
+    acquire_frames, reset_frames = acquisition_parameters(run_root)
+    rows = read_window(table)
+    summary = analyze(rows, acquire_frames, reset_frames)
+    summary["RunId"] = receipt["RunId"]
+    summary["SourceTable"] = str(table.relative_to(run_root))
+    summary["SourceTableSha256"] = before
+    export_root = run_root / "05_EXPORTS"
+    write_exact(export_root / TRACE_NAME, trace_bytes(rows))
+    write_exact(export_root / SUMMARY_NAME, canonical_bytes(summary))
+    if sha256_file(table) != before:
+        raise DiagnosticError("SOURCE_TABLE_CHANGED")
+    return compact(summary)
+
+
+def self_test() -> str:
+    """Exercise the diagnostic decision using an interrupted acquisition trace."""
+
+    checks: List[bool] = []
+
+    def check(value: bool) -> None:
+        if not value:
+            raise DiagnosticError("SELFTEST")
+        checks.append(True)
+
+    statuses = (
+        (1, 0, 0, 0, "SEGMENT_RESET", "INVALID_RUN_RESET"),
+        (2, 1, 0, 0, "ACQUIRING", "SINGLE_SOURCE_CONFIRMATION_PENDING"),
+        (3, 0, 0, 0, "INVALID", "RESET_STATE_BOTH_SOURCES_INELIGIBLE"),
+        (4, 1, 0, 0, "ACQUIRING", "SINGLE_SOURCE_CONFIRMATION_PENDING"),
+        (5, 0, 0, 0, "INVALID", "RESET_STATE_BOTH_SOURCES_INELIGIBLE"),
+        (6, 1, 0, 0, "ACQUIRING", "SINGLE_SOURCE_CONFIRMATION_PENDING"),
+        (7, 1, 0, 0, "ACQUIRING", "SINGLE_SOURCE_CONFIRMATION_PENDING"),
+        (8, 1, 0, 1, "CONFIDENT", "SINGLE_SOURCE_ACQUIRED"),
+    )
+    rows = []
+    for frame, c1, c3, valid, status, reason in statuses:
+        row = {name: "" for name in REQUIRED_COLUMNS}
+        row.update({
+            "FrameCount": str(frame),
+            "Camera1Eligible": str(c1),
+            "Camera3Eligible": str(c3),
+            "CanonicalCameraValid": str(valid),
+            "SelectionStatus": status,
+            "SelectionReason": reason,
+        })
+        rows.append(row)
+    summary = analyze(rows, 3, 3)
+    check(summary["ResetFrame"] == 1)
+    check(summary["FirstEligibleFrameAfterReset"] == 2)
+    check(summary["FirstCanonicalValidFrameAfterReset"] == 8)
+    check(summary["ReacquisitionDelayFrames"] == 6)
+    check(summary["AcquisitionAttemptCount"] == 3)
+    check(summary["PendingBreakByNoEligibleFrameCount"] == 2)
+    check(summary["HypothesisSupported"] is True)
+    check(summary["LongestConsecutiveCamera1EligibleRows"] == 3)
+    check(compact(summary).endswith("H1-X0 C-0"))
+    with tempfile.TemporaryDirectory(prefix="u22b1b6_selftest_") as temporary:
+        path = Path(temporary) / "trace.csv"
+        write_exact(path, trace_bytes(rows))
+        check(regular_file(path))
+        check(len(sha256_file(path)) == 64)
+    check(PROGRAM_ID.startswith("U002-U22B1B6"))
+    check(VERSION == "0.1")
+    return "U22B1B6-ST N-T" + str(len(checks)) + "-X0 C-0"
+
+
+def write_failure(root: Optional[Path], reason: str, detail: str) -> None:
+    """Preserve full failure context while keeping the capsule short."""
+
+    if root is None:
+        return
+    payload = {
+        "Contract": "UDP002_U22B1B6_FAILURE_DIAGNOSTIC_V0_1",
+        "Status": "FAILED",
+        "Reason": reason,
+        "ObservedValueOrDetail": detail,
+        "Expected": "Completed B1B4 Run and verified S1 reconstruction table",
+        "Source": "U22B1B4 Run lineage",
+        "RecommendedAction": "Inspect this JSON before changing any algorithm",
+    }
+    path = root / DIAGNOSTIC_RELATIVE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(canonical_bytes(payload))
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    """Create explicit self-test and diagnostic modes."""
+
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--run", action="store_true")
+    parser.add_argument("--workspace-root")
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] = None) -> int:
+    """Program entry point."""
+
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    root: Optional[Path] = None
+    try:
+        if args.self_test:
+            print(self_test())
+            return 0
+        if not args.workspace_root:
+            raise DiagnosticError("WORKSPACE_ROOT_REQUIRED")
+        root = require_workspace(Path(args.workspace_root))
+        print(run(root))
+        return 0
+    except Exception as exc:
+        if isinstance(exc, DiagnosticError):
+            reason = exc.reason
+            detail = exc.detail
+        else:
+            reason = stable(exc.__class__.__name__)
+            detail = stable(exc)
+        try:
+            write_failure(root, reason, detail)
+        except Exception:
+            pass
+        print("U22B1B6 N-R0-Z0-E0-C0-D0-A0-B0-H0-X1 C-7"
+              f" R-{reason} K-{detail}")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
