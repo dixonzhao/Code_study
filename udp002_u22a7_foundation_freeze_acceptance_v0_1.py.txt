@@ -1,0 +1,299 @@
+#!/usr/bin/env python3
+"""Independently accept the U22A7 vertical test and Phase A freeze receipt."""
+
+from __future__ import annotations
+
+import argparse
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tokenize
+from typing import List, Sequence
+
+
+PROGRAM_ID = "UDP002-U22A7-FOUNDATION-FREEZE-ACCEPTANCE"
+VERSION = "0.1"
+CANDIDATE = "u002_u22_synthetic_vertical_acceptance_v0_1.py.txt"
+INSTALLED = "u002_u22_synthetic_vertical_acceptance_v0_1.py"
+EXECUTOR = "u002_u22_stage_executor_v0_1.py"
+FREEZE_RECEIPT = "u002_u22_foundation_freeze_receipt_v0_1.json"
+VERTICAL_CAPSULE = "U22A7V N-M8-S8-A8-L7-R1-I1-X0 C-0"
+CORE_NAMES = (
+    "u002_u22_contract_validator_v0_1.py",
+    "u002_u22_module_registry_v0_1.py",
+    "u002_u22_artifact_store_v0_1.py",
+    "u002_u22_module_qualification_v0_1.py",
+    "u002_u22_engine_preflight_v0_1.py",
+    "u002_u22_stage_executor_v0_1.py",
+)
+CONTRACT_NAMES = (
+    "u002_module_manifest_schema_v0_1.json",
+    "u002_artifact_manifest_schema_v0_1.json",
+    "u002_run_configuration_schema_v0_1.json",
+    "u002_algorithm_card_schema_v0_1.json",
+)
+
+
+class AcceptanceError(RuntimeError):
+    """Represent one deterministic independent acceptance failure."""
+
+
+def regular_file(path: Path) -> bool:
+    """Accept ordinary files only during installation and evidence checks."""
+
+    return path.is_file() and not path.is_symlink()
+
+
+def run(command: List[str], timeout: int = 240) -> subprocess.CompletedProcess:
+    """Run one bounded child process and preserve both evidence streams."""
+
+    return subprocess.run(
+        command,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def check(value: bool, reason: str, checks: List[bool]) -> None:
+    """Append one visible acceptance check or fail immediately."""
+
+    if not value:
+        raise AcceptanceError(reason)
+    checks.append(True)
+
+
+def contains_semicolon_operator(source: str) -> bool:
+    """Ignore prose punctuation and reject executable semicolon operators."""
+
+    tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+    return any(
+        token.type == tokenize.OP and token.string == ";"
+        for token in tokens
+    )
+
+
+def install_candidate(root: Path, candidate: Path, checks: List[bool]) -> Path:
+    """Install the byte-identical integration utility atomically."""
+
+    directory = root / "05_TESTS/integration"
+    directory.mkdir(parents=True, exist_ok=True)
+    installed = directory / INSTALLED
+    if installed.exists():
+        check(regular_file(installed), "INSTALL_NOT_REGULAR", checks)
+        check(installed.read_bytes() == candidate.read_bytes(), "INSTALL_CONFLICT", checks)
+        return installed
+    temporary = installed.with_name(installed.name + ".installing")
+    check(not temporary.exists(), "INSTALL_TEMP_EXISTS", checks)
+    temporary.write_bytes(candidate.read_bytes())
+    os.replace(temporary, installed)
+    check(installed.read_bytes() == candidate.read_bytes(), "INSTALL_IDENTITY", checks)
+    return installed
+
+
+def archive_previous(root: Path) -> int:
+    """Move completed U22A6 transfer programs out of active TEMP."""
+
+    archive = root / "A-Archive/U22_COMPLETED/U22A6/04_TEMP"
+    names = (
+        "u002_u22_stage_executor_v0_1.py.txt",
+        "udp002_u22a6_stage_executor_acceptance_v0_1.py.txt",
+    )
+    moved = 0
+    for name in names:
+        source = root / "04_TEMP" / name
+        if not regular_file(source):
+            continue
+        archive.mkdir(parents=True, exist_ok=True)
+        destination = archive / name
+        if destination.exists():
+            if destination.read_bytes() != source.read_bytes():
+                raise AcceptanceError("ARCHIVE_CONFLICT")
+            source.unlink()
+        else:
+            os.replace(source, destination)
+        moved += 1
+    return moved
+
+
+def load_receipt(path: Path, checks: List[bool]) -> dict:
+    """Load the freeze receipt and validate its independent outer shape."""
+
+    check(regular_file(path), "FREEZE_RECEIPT_MISSING", checks)
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        raise AcceptanceError("FREEZE_RECEIPT_JSON") from exc
+    check(isinstance(receipt, dict), "FREEZE_RECEIPT_TYPE", checks)
+    return receipt
+
+
+def main(argv: Sequence[str] = None) -> int:
+    """Run vertical acceptance, install the utility, and freeze Phase A."""
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--workspace-root", required=True)
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    checks: List[bool] = []
+    try:
+        root = Path(args.workspace_root).resolve()
+        check(root.is_dir() and root.name == "U-UDP002", "WORKSPACE_ROOT", checks)
+        candidate = root / "04_TEMP" / CANDIDATE
+        check(regular_file(candidate), "CANDIDATE_MISSING", checks)
+        for name in CONTRACT_NAMES:
+            check(
+                regular_file(root / "00_CONTROL/contracts" / name),
+                "CONTRACT_MISSING_" + name,
+                checks,
+            )
+        for name in CORE_NAMES:
+            check(
+                regular_file(root / "01_PROGRAMS/core" / name),
+                "CORE_MISSING_" + name,
+                checks,
+            )
+        executor = root / "01_PROGRAMS/core" / EXECUTOR
+        executor_selftest = run(
+            [
+                sys.executable,
+                str(executor),
+                "--self-test",
+                "--workspace-root",
+                str(root),
+            ],
+            timeout=60,
+        )
+        check(
+            executor_selftest.returncode == 0
+            and "N-T30-X0 C-0" in executor_selftest.stdout,
+            "EXECUTOR_SELFTEST",
+            checks,
+        )
+        source = candidate.read_text(encoding="utf-8")
+        check(not contains_semicolon_operator(source), "SEMICOLON_STYLE", checks)
+        check("def run_vertical(" in source, "VERTICAL_INTERFACE", checks)
+        check("def write_freeze_receipt(" in source, "FREEZE_WRITE_INTERFACE", checks)
+        check("def audit_freeze(" in source, "FREEZE_AUDIT_INTERFACE", checks)
+        check("SYNTHETIC_S7_HANDOFF" in source, "S7_HANDOFF", checks)
+        check("for index, stage in enumerate(STAGES)" in source, "EIGHT_STAGE_LOOP", checks)
+        candidate_selftest = run(
+            [
+                sys.executable,
+                str(candidate),
+                "--self-test",
+                "--workspace-root",
+                str(root),
+            ],
+            timeout=60,
+        )
+        check(
+            candidate_selftest.returncode == 0
+            and "N-T24-X0 C-0" in candidate_selftest.stdout,
+            "CANDIDATE_SELFTEST_" + candidate_selftest.stdout.strip(),
+            checks,
+        )
+        vertical = run(
+            [
+                sys.executable,
+                str(candidate),
+                "--run-vertical",
+                "--workspace-root",
+                str(root),
+            ]
+        )
+        check(
+            vertical.returncode == 0
+            and vertical.stdout.strip() == VERTICAL_CAPSULE,
+            "VERTICAL_" + vertical.stdout.strip(),
+            checks,
+        )
+        installed = install_candidate(root, candidate, checks)
+        installed_selftest = run(
+            [
+                sys.executable,
+                str(installed),
+                "--self-test",
+                "--workspace-root",
+                str(root),
+            ],
+            timeout=60,
+        )
+        check(
+            installed_selftest.returncode == 0
+            and "N-T24-X0 C-0" in installed_selftest.stdout,
+            "INSTALLED_SELFTEST",
+            checks,
+        )
+        freeze_write = run(
+            [
+                sys.executable,
+                str(installed),
+                "--write-freeze-receipt",
+                "--accepted-capsule",
+                VERTICAL_CAPSULE,
+                "--workspace-root",
+                str(root),
+            ],
+            timeout=60,
+        )
+        check(
+            freeze_write.returncode == 0
+            and "N-F11-N8-V1-X0 C-0" in freeze_write.stdout,
+            "FREEZE_WRITE_" + freeze_write.stdout.strip(),
+            checks,
+        )
+        freeze_audit = run(
+            [
+                sys.executable,
+                str(installed),
+                "--audit-freeze",
+                "--workspace-root",
+                str(root),
+            ],
+            timeout=60,
+        )
+        check(
+            freeze_audit.returncode == 0
+            and "N-F11-N8-V1-X0 C-0" in freeze_audit.stdout,
+            "FREEZE_AUDIT_" + freeze_audit.stdout.strip(),
+            checks,
+        )
+        receipt = load_receipt(
+            root / "00_CONTROL/foundation" / FREEZE_RECEIPT,
+            checks,
+        )
+        check(receipt.get("Status") == "FROZEN", "RECEIPT_STATUS", checks)
+        check(len(receipt.get("AcceptedNodes", [])) == 8, "RECEIPT_NODES", checks)
+        check(len(receipt.get("FrozenFiles", [])) == 11, "RECEIPT_FILES", checks)
+        check(
+            receipt.get("AcceptedVerticalCapsule") == VERTICAL_CAPSULE,
+            "RECEIPT_VERTICAL",
+            checks,
+        )
+        archived = archive_previous(root)
+        check(archived in (0, 1, 2), "ARCHIVE_COUNT", checks)
+        print(
+            f"U22A7 N-V1-M8-S8-A8-L7-F1-T{len(checks)}"
+            f"-P1-W{archived}-X0 C-0"
+        )
+        return 0
+    except AcceptanceError as exc:
+        print("U22A7 N-V0-M0-S0-A0-L0-F0-T0-P0-W0-X1 C-7 R-" + str(exc))
+        return 7
+    except subprocess.TimeoutExpired:
+        print("U22A7 N-V0-M0-S0-A0-L0-F0-T0-P0-W0-X1 C-7 R-TIMEOUT")
+        return 7
+    except Exception as exc:
+        print(
+            "U22A7 N-V0-M0-S0-A0-L0-F0-T0-P0-W0-X1 C-7 R-"
+            + exc.__class__.__name__.upper()
+        )
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
