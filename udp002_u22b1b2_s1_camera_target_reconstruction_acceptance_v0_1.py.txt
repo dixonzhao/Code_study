@@ -1,0 +1,467 @@
+#!/usr/bin/env python3
+"""Install and independently accept the U22B1B2 S1 reconstruction Module."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import shutil
+import subprocess
+import sys
+from typing import Dict, List, Mapping, Sequence, Tuple
+
+
+PROGRAM_ID = "UDP002-U22B1B2-S1-CAMERA-TARGET-RECONSTRUCTION-ACCEPTANCE"
+VERSION = "0.1"
+MODULE_ID = "CameraRadar.S1.CameraTargetContinuityArbitration"
+MODULE_VERSION = "0.1.0"
+INSTALLER_NAME = (
+    "u002_u22b1b2_s1_camera_target_reconstruction_installer_v0_1.py.txt"
+)
+QUALIFICATION_RELATIVE = Path(
+    "01_PROGRAMS/core/u002_u22_module_qualification_v0_1.py"
+)
+FREEZE_AUDITOR_RELATIVE = Path(
+    "05_TESTS/integration/u002_u22_synthetic_vertical_acceptance_v0_1.py"
+)
+MODULE_RELATIVE = (
+    Path("01_PROGRAMS/modules/S1") / MODULE_ID / MODULE_VERSION
+)
+PROFILE_GLOB = "u22b1b0_signal_binding_proposal_*.json"
+PROMOTED_PROFILE_RELATIVE = Path(
+    "02_CONFIG/binding_profiles/TC001_camera_radar_base_provisional_v0_1.json"
+)
+CONFIGURATION_RELATIVE = Path(
+    "02_CONFIG/module_configs/"
+    "u22b1b2_camera_target_reconstruction_tc001_v0_1.json"
+)
+RECEIPT_RELATIVE = Path(
+    "00_CONTROL/registry/"
+    "u22b1b2_camera_target_reconstruction_acceptance_receipt_v0_1.json"
+)
+REQUIRED_ROLES = ("CAMERA_1_DISTANCE", "CAMERA_3_DISTANCE")
+
+
+class AcceptanceError(RuntimeError):
+    """Represent one deterministic fail-closed B1B2 acceptance failure."""
+
+
+def stable(value: object) -> str:
+    """Convert one error value into a compact return token."""
+
+    normalized = re.sub(r"[^A-Z0-9_]+", "_", str(value).upper())
+    return normalized.strip("_")[:80] or "INTERNAL"
+
+
+def canonical_bytes(value: object) -> bytes:
+    """Serialize one control record deterministically."""
+
+    text = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+        allow_nan=False,
+    )
+    return (text + "\n").encode("utf-8")
+
+
+def sha256_file(path: Path) -> str:
+    """Hash one regular file with bounded memory."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def regular_file(path: Path) -> bool:
+    """Accept ordinary files only."""
+
+    return path.is_file() and not path.is_symlink()
+
+
+def require_workspace(path: Path) -> Path:
+    """Validate the fixed U002 workspace identity."""
+
+    root = path.resolve()
+    if not root.is_dir() or root.name != "U-UDP002":
+        raise AcceptanceError("WORKSPACE_ROOT")
+    return root
+
+
+def load_json(path: Path, reason: str) -> Dict[str, object]:
+    """Load one regular JSON object."""
+
+    if not regular_file(path):
+        raise AcceptanceError(reason + "_MISSING")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        raise AcceptanceError(reason + "_JSON") from exc
+    if not isinstance(value, dict):
+        raise AcceptanceError(reason + "_TYPE")
+    return value
+
+
+def run(command: List[str], timeout: int = 180) -> subprocess.CompletedProcess:
+    """Run one bounded dependency process and retain evidence streams."""
+
+    return subprocess.run(
+        command,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def require_pass(
+    completed: subprocess.CompletedProcess,
+    token: str,
+    reason: str,
+) -> None:
+    """Require successful exit and one exact evidence token."""
+
+    if completed.returncode != 0 or token not in completed.stdout:
+        detail = (completed.stdout + completed.stderr).strip()[-200:]
+        raise AcceptanceError(reason + "_" + stable(detail))
+
+
+def foundation_audit(root: Path) -> str:
+    """Audit frozen U22 Phase A before and after B1B2 installation."""
+
+    auditor = root / FREEZE_AUDITOR_RELATIVE
+    if not regular_file(auditor):
+        raise AcceptanceError("FREEZE_AUDITOR_MISSING")
+    completed = run(
+        [
+            sys.executable,
+            str(auditor),
+            "--audit-freeze",
+            "--workspace-root",
+            str(root),
+        ],
+        timeout=90,
+    )
+    require_pass(completed, "N-F11-N8-V1-X0 C-0", "FOUNDATION_AUDIT")
+    return completed.stdout.strip().splitlines()[-1]
+
+
+def installer_path(root: Path) -> Path:
+    """Resolve the exact transport file in active 04_TEMP."""
+
+    path = root / "04_TEMP" / INSTALLER_NAME
+    if not regular_file(path):
+        raise AcceptanceError("INSTALLER_MISSING")
+    return path
+
+
+def run_installer_selftest(installer: Path) -> None:
+    """Run the embedded high-code package and semantic fixtures."""
+
+    completed = run([sys.executable, str(installer), "--self-test"], timeout=90)
+    require_pass(completed, "U22B1B2I-ST N-T10-F5-X0 C-0", "INSTALLER_SELFTEST")
+
+
+def install_module(root: Path, installer: Path) -> None:
+    """Install the immutable five-file Module package."""
+
+    completed = run(
+        [
+            sys.executable,
+            str(installer),
+            "--install-module",
+            "--workspace-root",
+            str(root),
+        ],
+        timeout=120,
+    )
+    require_pass(completed, "U22B1B2I N-F5-H1-R", "MODULE_INSTALL")
+
+
+def qualify_module(root: Path) -> None:
+    """Qualify exact Module bytes through the frozen A4 responsibility."""
+
+    qualification = root / QUALIFICATION_RELATIVE
+    if not regular_file(qualification):
+        raise AcceptanceError("QUALIFICATION_MISSING")
+    completed = run(
+        [
+            sys.executable,
+            str(qualification),
+            "--qualify-module",
+            MODULE_ID + "@" + MODULE_VERSION,
+            "--workspace-root",
+            str(root),
+            "--timeout-seconds",
+            "120",
+        ],
+        timeout=180,
+    )
+    require_pass(completed, "U22A4Q N-Q1-A1-F0-X0 C-0", "MODULE_QUALIFICATION")
+    audit = run(
+        [
+            sys.executable,
+            str(qualification),
+            "--audit-module",
+            MODULE_ID + "@" + MODULE_VERSION,
+            "--workspace-root",
+            str(root),
+        ],
+        timeout=90,
+    )
+    require_pass(audit, "U22A4Q N-Q0-A1-F0-X0 C-0", "MODULE_AUDIT")
+
+
+def validate_module_package(root: Path) -> Tuple[Path, Dict[str, object]]:
+    """Verify installed package shape and forbidden comparison-target leakage."""
+
+    module_root = root / MODULE_RELATIVE
+    expected = {
+        "module_manifest.json",
+        "algorithm_card.json",
+        "configuration_schema.json",
+        "implementation.py",
+        "selftest.py",
+    }
+    if not module_root.is_dir() or module_root.is_symlink():
+        raise AcceptanceError("MODULE_ROOT_MISSING")
+    observed = {path.name for path in module_root.iterdir() if regular_file(path)}
+    if observed != expected:
+        raise AcceptanceError("MODULE_FILE_SET")
+    manifest = load_json(module_root / "module_manifest.json", "MODULE_MANIFEST")
+    if manifest.get("ModuleId") != MODULE_ID:
+        raise AcceptanceError("MODULE_IDENTITY")
+    if manifest.get("Stage") != "S1":
+        raise AcceptanceError("MODULE_STAGE")
+    if manifest.get("RequiresArtifacts") != ["U001_INTAKE_ACCEPTED"]:
+        raise AcceptanceError("MODULE_PARENT_CONTRACT")
+    implementation = (module_root / "implementation.py").read_text(encoding="utf-8")
+    upper = implementation.upper()
+    if "RADAR_DISTANCE" in upper or "RECOGNITION_ID" in upper:
+        raise AcceptanceError("COMPARISON_TARGET_LEAKAGE")
+    return module_root, manifest
+
+
+def find_binding_proposal(root: Path) -> Tuple[Path, Dict[str, object]]:
+    """Select the one accepted B1B0 metadata-only proposal in active TEMP."""
+
+    matches: List[Tuple[Path, Dict[str, object]]] = []
+    for path in sorted((root / "04_TEMP").glob(PROFILE_GLOB)):
+        try:
+            profile = load_json(path, "BINDING_PROPOSAL")
+        except AcceptanceError:
+            continue
+        if (
+            profile.get("ContractVersion") == "U002_SIGNAL_BINDING_PROFILE_V0_1"
+            and profile.get("BindingProfileId") == "TC001.CameraRadar.Base.PROVISIONAL"
+            and profile.get("DuplicateRoleCount") == 0
+            and profile.get("BlockingIssues") == []
+        ):
+            matches.append((path, profile))
+    if len(matches) != 1:
+        raise AcceptanceError("BINDING_PROPOSAL_COUNT_" + str(len(matches)))
+    path, profile = matches[0]
+    bindings = profile.get("Bindings")
+    if not isinstance(bindings, dict):
+        raise AcceptanceError("BINDING_PROPOSAL_BINDINGS")
+    for role in REQUIRED_ROLES:
+        selected = bindings.get(role)
+        if not isinstance(selected, list) or len(selected) != 1:
+            raise AcceptanceError("BINDING_ROLE_" + role)
+        if not selected[0].get("CanonicalName"):
+            raise AcceptanceError("BINDING_CANONICAL_" + role)
+    if re.fullmatch(r"[0-9a-f]{64}", str(profile.get("SourceInventorySha256"))) is None:
+        raise AcceptanceError("BINDING_INVENTORY_HASH")
+    return path, profile
+
+
+def write_immutable(path: Path, content: bytes, reason: str) -> None:
+    """Create one control file or require byte-identical replay."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if not regular_file(path) or path.read_bytes() != content:
+            raise AcceptanceError(reason + "_CONFLICT")
+        return
+    temporary = path.with_name(path.name + ".writing")
+    if temporary.exists():
+        raise AcceptanceError(reason + "_TEMP_EXISTS")
+    temporary.write_bytes(content)
+    os.replace(temporary, path)
+
+
+def promote_profile(root: Path, proposal: Path) -> Tuple[Path, str]:
+    """Promote the exact B1B0 proposal bytes into governed configuration."""
+
+    content = proposal.read_bytes()
+    destination = root / PROMOTED_PROFILE_RELATIVE
+    write_immutable(destination, content, "PROMOTED_PROFILE")
+    return destination, hashlib.sha256(content).hexdigest()
+
+
+def build_configuration(profile_hash: str) -> Dict[str, object]:
+    """Build the visible TC001 provisional configuration selected for B1B3."""
+
+    return {
+        "BindingProfilePath": PROMOTED_PROFILE_RELATIVE.as_posix(),
+        "BindingProfileSha256": profile_hash,
+        "ContinuityScaleMeters": 0.38,
+        "MaxContinuityCost": 3.0,
+        "AcquireConfirmFrames": 3,
+        "SwitchConfirmFrames": 3,
+        "SwitchMargin": 1.0,
+        "ResetAfterBothInvalidFrames": 3,
+        "SeedFrame": 7400,
+        "SeedRole": "CAMERA_1_DISTANCE",
+    }
+
+
+def write_receipt(
+    root: Path,
+    module_root: Path,
+    profile_path: Path,
+    configuration_path: Path,
+    foundation_line: str,
+) -> None:
+    """Write one local acceptance receipt without company signal values."""
+
+    receipt = {
+        "ReceiptContract": "UDP002_U22B1B2_ACCEPTANCE_V0_1",
+        "Status": "S1_MODULE_INSTALLED_AND_QUALIFIED",
+        "ModuleId": MODULE_ID,
+        "ModuleVersion": MODULE_VERSION,
+        "ModuleFiles": {
+            path.name: sha256_file(path)
+            for path in sorted(module_root.iterdir(), key=lambda item: item.name)
+            if regular_file(path)
+        },
+        "BindingProfileRelativePath": profile_path.relative_to(root).as_posix(),
+        "BindingProfileSha256": sha256_file(profile_path),
+        "ConfigurationRelativePath": configuration_path.relative_to(root).as_posix(),
+        "ConfigurationSha256": sha256_file(configuration_path),
+        "FoundationAudit": foundation_line,
+        "NextNode": "U22B1B3_SHORT_RANGE_REAL_RUN",
+        "Limit": "No real signal values were executed by this acceptance gate",
+    }
+    write_immutable(root / RECEIPT_RELATIVE, canonical_bytes(receipt), "RECEIPT")
+
+
+def self_test() -> str:
+    """Exercise local helpers without requiring a U002 workspace."""
+
+    checks = []
+    if PROGRAM_ID.startswith("UDP002"):
+        checks.append(True)
+    if VERSION == "0.1":
+        checks.append(True)
+    if MODULE_VERSION == "0.1.0":
+        checks.append(True)
+    if MODULE_RELATIVE.parts[2] == "S1":
+        checks.append(True)
+    if PROMOTED_PROFILE_RELATIVE.suffix == ".json":
+        checks.append(True)
+    if CONFIGURATION_RELATIVE.suffix == ".json":
+        checks.append(True)
+    if RECEIPT_RELATIVE.suffix == ".json":
+        checks.append(True)
+    if len(hashlib.sha256(b"x").hexdigest()) == 64:
+        checks.append(True)
+    if stable("a b/c") == "A_B_C":
+        checks.append(True)
+    if PurePosixPath(PROMOTED_PROFILE_RELATIVE.as_posix()).is_absolute() is False:
+        checks.append(True)
+    configuration = build_configuration("0" * 64)
+    if configuration["ContinuityScaleMeters"] == 0.38:
+        checks.append(True)
+    if abs(
+        configuration["MaxContinuityCost"]
+        * configuration["ContinuityScaleMeters"]
+        - 1.14
+    ) < 1e-12:
+        checks.append(True)
+    if configuration["SeedFrame"] == 7400:
+        checks.append(True)
+    if set(REQUIRED_ROLES) == {"CAMERA_1_DISTANCE", "CAMERA_3_DISTANCE"}:
+        checks.append(True)
+    if len(canonical_bytes(configuration)) > 0:
+        checks.append(True)
+    if len(checks) != 15:
+        raise AcceptanceError("SELFTEST_COUNT")
+    return "U22B1B2-ST N-T15-X0 C-0"
+
+
+def accept(root: Path) -> str:
+    """Execute the complete install, qualification and configuration acceptance."""
+
+    before_foundation = foundation_audit(root)
+    installer = installer_path(root)
+    run_installer_selftest(installer)
+    install_module(root, installer)
+    qualify_module(root)
+    module_root, _ = validate_module_package(root)
+    proposal, _ = find_binding_proposal(root)
+    profile_path, profile_hash = promote_profile(root, proposal)
+    configuration = build_configuration(profile_hash)
+    configuration_path = root / CONFIGURATION_RELATIVE
+    write_immutable(
+        configuration_path,
+        canonical_bytes(configuration),
+        "MODULE_CONFIGURATION",
+    )
+    after_foundation = foundation_audit(root)
+    if before_foundation != after_foundation:
+        raise AcceptanceError("FOUNDATION_AUDIT_CHANGED")
+    write_receipt(
+        root,
+        module_root,
+        profile_path,
+        configuration_path,
+        after_foundation,
+    )
+    return "U22B1B2 N-I1-Q1-P1-C1-F1-X0 C-0"
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    """Create explicit self-test and acceptance modes."""
+
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--accept", action="store_true")
+    parser.add_argument("--workspace-root")
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] = None) -> int:
+    """Run the independent B1B2 acceptance gate."""
+
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        if args.self_test:
+            print(self_test())
+            return 0
+        if args.workspace_root is None:
+            raise AcceptanceError("WORKSPACE_ROOT_REQUIRED")
+        root = require_workspace(Path(args.workspace_root))
+        print(accept(root))
+        return 0
+    except AcceptanceError as exc:
+        print("U22B1B2 N-I0-Q0-P0-C0-F0-X1 C-7 R-" + str(exc))
+        return 7
+    except Exception as exc:
+        print(
+            "U22B1B2 N-I0-Q0-P0-C0-F0-X1 C-7 R-"
+            + exc.__class__.__name__.upper()
+        )
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

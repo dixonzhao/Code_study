@@ -1,0 +1,1733 @@
+#!/usr/bin/env python3
+"""Install the governed U22B1B2 S1 Camera target reconstruction Module."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+from typing import Dict, Mapping, Sequence
+
+
+PROGRAM_ID = "U002-U22B1B2-S1-CAMERA-TARGET-RECONSTRUCTION-INSTALLER"
+VERSION = "0.1"
+CONTRACT_VERSION = "U22.0.1"
+MODULE_ID = "CameraRadar.S1.CameraTargetContinuityArbitration"
+MODULE_VERSION = "0.1.0"
+STAGE = "S1"
+MODULE_RELATIVE = (
+    Path("01_PROGRAMS/modules/S1") / MODULE_ID / MODULE_VERSION
+)
+FREEZE_AUDITOR_RELATIVE = Path(
+    "05_TESTS/integration/u002_u22_synthetic_vertical_acceptance_v0_1.py"
+)
+
+
+class InstallerError(RuntimeError):
+    """Represent one deterministic installation failure."""
+
+
+MODULE_MANIFEST: Dict[str, object] = {
+    "ContractVersion": CONTRACT_VERSION,
+    "ModuleId": MODULE_ID,
+    "ModuleVersion": MODULE_VERSION,
+    "Stage": STAGE,
+    "AlgorithmStatus": "PROVISIONAL",
+    "ScopeSelector": {
+        "InputPackageKind": "U001_CONTROLLED_PROFILE",
+        "BindingContract": "U002_SIGNAL_BINDING_PROFILE_V0_1",
+    },
+    "RequiredInputs": [
+        "CAMERA_1_DISTANCE",
+        "CAMERA_3_DISTANCE",
+    ],
+    "OptionalInputs": [],
+    "RequiresArtifacts": ["U001_INTAKE_ACCEPTED"],
+    "ProvidesArtifacts": ["CAMERA_TARGET_RECONSTRUCTION"],
+    "OutputNamespace": "camera_radar.s1.camera_target_reconstruction",
+    "ConfigurationSchema": "configuration_schema.json",
+    "FailurePolicy": "REQUIRED",
+    "ConflictPolicy": "EXCLUSIVE",
+    "EntryPoint": "implementation.py",
+    "SelfTestEntryPoint": "selftest.py",
+    "AlgorithmCard": "algorithm_card.json",
+}
+
+
+ALGORITHM_CARD: Dict[str, object] = {
+    "ContractVersion": CONTRACT_VERSION,
+    "AlgorithmId": MODULE_ID,
+    "AlgorithmVersion": MODULE_VERSION,
+    "Status": "PROVISIONAL",
+    "Purpose": (
+        "Construct one analysis-grade provisional Camera target distance from "
+        "two governed candidate streams"
+    ),
+    "ProblemSolved": (
+        "Prevent channel migration, invalid values and one-frame flapping from "
+        "creating false Camera-Radar discrepancy"
+    ),
+    "MathematicalDefinition": [
+        "eligible_j(k)=valid_j(k) AND finite(x_j(k)) AND age_j(k)<=MaxAgeFrames_j",
+        "cost_j(k)=abs(x_j(k)-y_conf(k-1))/ContinuityScaleMeters",
+        "plausible_j(k)=eligible_j(k) AND cost_j(k)<=MaxContinuityCost",
+        "switch only after SwitchConfirmFrames and alternative cost plus SwitchMargin is lower",
+        "ambiguous or invalid rows never emit an analysis-grade canonical value",
+    ],
+    "Inputs": [
+        "U001_INTAKE_ACCEPTED Artifact",
+        "U001 Frame View Camera 1 seven-column group",
+        "U001 Frame View Camera 3 seven-column group",
+        "accepted fingerprint-bound signal binding profile",
+        "explicit continuity, hysteresis, seed and reset configuration",
+    ],
+    "Outputs": [
+        "CAMERA_TARGET_RECONSTRUCTION Artifact",
+        "camera_target_reconstruction.csv",
+        "camera_target_reconstruction_quality.json",
+    ],
+    "Assumptions": [
+        "U001 validity and signal-age semantics are authoritative",
+        "the same physical target is locally continuous in distance",
+        "three 20-Hz Frames are provisionally sufficient for acquisition and switching",
+        "the TC001 seed at Frame 7400 has been manually reviewed",
+    ],
+    "FailureConditions": [
+        "binding identity or source inventory hash mismatch",
+        "required U001 Frame View group is missing or incomplete",
+        "FrameCount is duplicated or decreasing",
+        "Radar or Recognition_ID is requested as an arbitration input",
+        "input package changes during execution",
+        "output lineage, row count or deterministic hash check fails",
+    ],
+    "Limitations": [
+        "similar-distance physical targets can remain ambiguous",
+        "distance continuity alone cannot prove displayed or control target identity",
+        "TC001 thresholds are not automatically transferable",
+        "video review remains mandatory for engineering conclusions",
+    ],
+    "Alternatives": [
+        "Recognition_ID-only selection rejected after video mismatch observations",
+        "Radar-nearest selection rejected because it leaks the later comparison target",
+        "always choose minimum distance rejected because nearest is not target identity",
+        "unlimited forward fill rejected because it creates false continuity",
+        "black-box classification deferred until sufficient labels exist",
+    ],
+    "EvaluationPlan": [
+        "thirteen controlled semantic fixtures",
+        "deterministic replay and input immutability",
+        "short TC001 range beginning at Frame 7400",
+        "full 56596-row accepted range",
+        "U003 video and CAN review of switch, ambiguous and invalid windows",
+    ],
+    "DecisionReference": "D-U22B1B2-S1-CAMERA-TARGET-RECONSTRUCTION",
+}
+
+
+CONFIGURATION_SCHEMA: Dict[str, object] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "BindingProfilePath",
+        "BindingProfileSha256",
+        "ContinuityScaleMeters",
+        "MaxContinuityCost",
+        "AcquireConfirmFrames",
+        "SwitchConfirmFrames",
+        "SwitchMargin",
+        "ResetAfterBothInvalidFrames",
+        "SeedFrame",
+        "SeedRole",
+    ],
+    "properties": {
+        "BindingProfilePath": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\\\]+$",
+        },
+        "BindingProfileSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+        },
+        "ContinuityScaleMeters": {
+            "type": "number",
+            "minimum": 0.000001,
+        },
+        "MaxContinuityCost": {
+            "type": "number",
+            "minimum": 0,
+        },
+        "AcquireConfirmFrames": {
+            "type": "integer",
+            "minimum": 1,
+        },
+        "SwitchConfirmFrames": {
+            "type": "integer",
+            "minimum": 1,
+        },
+        "SwitchMargin": {
+            "type": "number",
+            "minimum": 0,
+        },
+        "ResetAfterBothInvalidFrames": {
+            "type": "integer",
+            "minimum": 1,
+        },
+        "SeedFrame": {
+            "type": ["integer", "null"],
+            "minimum": 0,
+        },
+        "SeedRole": {
+            "type": ["string", "null"],
+            "enum": ["CAMERA_1_DISTANCE", "CAMERA_3_DISTANCE", None],
+        },
+    },
+}
+
+
+IMPLEMENTATION_SOURCE = r'''#!/usr/bin/env python3
+"""Reconstruct one provisional Camera target with continuity and hysteresis."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+import math
+from pathlib import Path, PurePosixPath
+import re
+import sys
+from typing import Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+
+
+MODULE_ID = "CameraRadar.S1.CameraTargetContinuityArbitration"
+MODULE_VERSION = "0.1.0"
+CONTRACT_VERSION = "U22.0.1"
+PROTOCOL = "U002_U22_MODULE_RUNTIME"
+PROTOCOL_VERSION = "0.1"
+ARTIFACT_TYPE = "CAMERA_TARGET_RECONSTRUCTION"
+ROLE_1 = "CAMERA_1_DISTANCE"
+ROLE_3 = "CAMERA_3_DISTANCE"
+ALLOWED_ROLES = (ROLE_1, ROLE_3)
+OUTPUT_COLUMNS = (
+    "FrameCount",
+    "Camera1Distance",
+    "Camera1Eligible",
+    "Camera1Age",
+    "Camera3Distance",
+    "Camera3Eligible",
+    "Camera3Age",
+    "ProvisionalCameraDistance",
+    "CanonicalCameraDistance",
+    "CanonicalCameraValid",
+    "SelectedCameraRole",
+    "SelectionStatus",
+    "SelectionReason",
+    "SelectionChanged",
+    "ContinuityCostCamera1",
+    "ContinuityCostCamera3",
+    "CostMargin",
+    "SegmentId",
+)
+
+
+class ModuleError(RuntimeError):
+    """Represent one deterministic S1 Module failure."""
+
+
+def stable(value: object) -> str:
+    """Convert one diagnostic value into a compact capsule token."""
+
+    normalized = re.sub(r"[^A-Z0-9_]+", "_", str(value).upper())
+    return normalized.strip("_")[:80] or "INTERNAL"
+
+
+def canonical_bytes(value: object) -> bytes:
+    """Serialize one JSON document deterministically."""
+
+    text = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+        allow_nan=False,
+    )
+    return (text + "\n").encode("utf-8")
+
+
+def sha256_file(path: Path) -> str:
+    """Hash one file with bounded memory."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def regular_file(path: Path) -> bool:
+    """Accept ordinary files only."""
+
+    return path.is_file() and not path.is_symlink()
+
+
+def inside(child: Path, parent: Path) -> bool:
+    """Return True only when one resolved child remains inside its parent."""
+
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def parse_boolean(value: object, field: str) -> bool:
+    """Parse the controlled U001 boolean representation."""
+
+    text = str(value if value is not None else "").strip().lower()
+    if text in {"1", "true"}:
+        return True
+    if text in {"0", "false"}:
+        return False
+    raise ModuleError("BOOLEAN_" + field)
+
+
+def parse_integer(value: object, field: str) -> int:
+    """Parse a finite integer represented as integer or decimal text."""
+
+    text = str(value if value is not None else "").strip()
+    try:
+        number = float(text)
+    except ValueError as exc:
+        raise ModuleError("INTEGER_" + field) from exc
+    if not math.isfinite(number) or not number.is_integer():
+        raise ModuleError("INTEGER_" + field)
+    return int(number)
+
+
+def parse_optional_float(value: object) -> Optional[float]:
+    """Return one finite float or None for a blank/nonfinite field."""
+
+    text = str(value if value is not None else "").strip()
+    if text == "":
+        return None
+    try:
+        number = float(text)
+    except ValueError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def safe_relative(value: object, field: str) -> PurePosixPath:
+    """Require a portable relative path without parent traversal."""
+
+    text = str(value)
+    if "\\" in text:
+        raise ModuleError(field + "_SEPARATOR")
+    path = PurePosixPath(text)
+    if path.is_absolute() or not path.parts or any(
+        part in {"", ".", ".."} for part in path.parts
+    ):
+        raise ModuleError(field + "_PATH")
+    return path
+
+
+def workspace_root_from_module(module_root: Path) -> Path:
+    """Derive the U-UDP002 root from the fixed Module package depth."""
+
+    try:
+        root = module_root.resolve().parents[4]
+    except IndexError as exc:
+        raise ModuleError("MODULE_ROOT_DEPTH") from exc
+    if root.name != "U-UDP002":
+        raise ModuleError("WORKSPACE_IDENTITY")
+    return root
+
+
+def load_json(path: Path, reason: str) -> Dict[str, object]:
+    """Load one regular JSON object."""
+
+    if not regular_file(path):
+        raise ModuleError(reason + "_MISSING")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        raise ModuleError(reason + "_JSON") from exc
+    if not isinstance(value, dict):
+        raise ModuleError(reason + "_TYPE")
+    return value
+
+
+def validate_request(request: Mapping[str, object]) -> None:
+    """Require the exact runtime identity selected by the frozen Run Plan."""
+
+    expected = {
+        "Protocol": PROTOCOL,
+        "ProtocolVersion": PROTOCOL_VERSION,
+        "ContractVersion": CONTRACT_VERSION,
+        "ModuleId": MODULE_ID,
+        "ModuleVersion": MODULE_VERSION,
+        "Stage": "S1",
+    }
+    for field, value in expected.items():
+        if request.get(field) != value:
+            raise ModuleError("REQUEST_" + field.upper())
+    if request.get("ExpectedOutputTypes") != [ARTIFACT_TYPE]:
+        raise ModuleError("REQUEST_OUTPUT_TYPE")
+    artifacts = request.get("InputArtifacts")
+    if not isinstance(artifacts, list) or len(artifacts) != 1:
+        raise ModuleError("REQUEST_INPUT_ARTIFACT_COUNT")
+    if artifacts[0].get("ArtifactType") != "U001_INTAKE_ACCEPTED":
+        raise ModuleError("REQUEST_INPUT_ARTIFACT_TYPE")
+
+
+def validate_configuration(configuration: Mapping[str, object]) -> Dict[str, object]:
+    """Validate semantic constraints not expressible in the small JSON Schema."""
+
+    required = {
+        "BindingProfilePath",
+        "BindingProfileSha256",
+        "ContinuityScaleMeters",
+        "MaxContinuityCost",
+        "AcquireConfirmFrames",
+        "SwitchConfirmFrames",
+        "SwitchMargin",
+        "ResetAfterBothInvalidFrames",
+        "SeedFrame",
+        "SeedRole",
+    }
+    if set(configuration) != required:
+        raise ModuleError("CONFIGURATION_SHAPE")
+    result = dict(configuration)
+    if float(result["ContinuityScaleMeters"]) <= 0:
+        raise ModuleError("CONFIGURATION_SCALE")
+    if float(result["MaxContinuityCost"]) < 0:
+        raise ModuleError("CONFIGURATION_COST")
+    for field in (
+        "AcquireConfirmFrames",
+        "SwitchConfirmFrames",
+        "ResetAfterBothInvalidFrames",
+    ):
+        if int(result[field]) < 1:
+            raise ModuleError("CONFIGURATION_" + field.upper())
+    if float(result["SwitchMargin"]) < 0:
+        raise ModuleError("CONFIGURATION_MARGIN")
+    if result["SeedRole"] not in (*ALLOWED_ROLES, None):
+        raise ModuleError("CONFIGURATION_SEED_ROLE")
+    if (result["SeedFrame"] is None) != (result["SeedRole"] is None):
+        raise ModuleError("CONFIGURATION_SEED_PAIR")
+    safe_relative(result["BindingProfilePath"], "BINDING_PROFILE")
+    if re.fullmatch(r"[0-9a-f]{64}", str(result["BindingProfileSha256"])) is None:
+        raise ModuleError("CONFIGURATION_BINDING_HASH")
+    return result
+
+
+def resolve_binding_profile(
+    workspace_root: Path,
+    configuration: Mapping[str, object],
+) -> Tuple[Path, Dict[str, object]]:
+    """Load the exact fingerprint-bound binding profile selected by the Run."""
+
+    relative = safe_relative(configuration["BindingProfilePath"], "BINDING_PROFILE")
+    path = workspace_root.joinpath(*relative.parts).resolve()
+    if not regular_file(path) or not inside(path, workspace_root):
+        raise ModuleError("BINDING_PROFILE_MISSING")
+    if sha256_file(path) != configuration["BindingProfileSha256"]:
+        raise ModuleError("BINDING_PROFILE_HASH")
+    profile = load_json(path, "BINDING_PROFILE")
+    if profile.get("ContractVersion") != "U002_SIGNAL_BINDING_PROFILE_V0_1":
+        raise ModuleError("BINDING_PROFILE_CONTRACT")
+    if profile.get("DuplicateRoleCount") != 0 or profile.get("BlockingIssues") != []:
+        raise ModuleError("BINDING_PROFILE_BLOCKING")
+    prohibitions = profile.get("Prohibitions")
+    if not isinstance(prohibitions, list):
+        raise ModuleError("BINDING_PROFILE_PROHIBITIONS")
+    return path, profile
+
+
+def role_binding(profile: Mapping[str, object], role: str) -> Dict[str, object]:
+    """Resolve exactly one required candidate role without guessing."""
+
+    bindings = profile.get("Bindings")
+    if not isinstance(bindings, dict):
+        raise ModuleError("BINDING_PROFILE_BINDINGS")
+    selected = bindings.get(role)
+    if not isinstance(selected, list) or len(selected) != 1:
+        raise ModuleError("BINDING_COUNT_" + role)
+    binding = selected[0]
+    if not isinstance(binding, dict):
+        raise ModuleError("BINDING_TYPE_" + role)
+    if not binding.get("CanonicalName"):
+        raise ModuleError("BINDING_CANONICAL_" + role)
+    if not parse_boolean(binding.get("IncludeInFrameView"), role + "_FRAME"):
+        raise ModuleError("BINDING_NOT_IN_FRAME_VIEW_" + role)
+    max_age = parse_integer(binding.get("MaxAgeFrames"), role + "_MAX_AGE")
+    if max_age < 0:
+        raise ModuleError("BINDING_MAX_AGE_" + role)
+    result = dict(binding)
+    result["MaxAgeFramesParsed"] = max_age
+    return result
+
+
+def input_artifact_package(
+    request: Mapping[str, object],
+) -> Tuple[Path, Dict[str, object], Mapping[str, object]]:
+    """Resolve and verify the governed S0 parent Artifact package."""
+
+    record = request["InputArtifacts"][0]
+    run_root = Path(str(request["RunRoot"])).resolve()
+    relative = safe_relative(record.get("ManifestRelativePath"), "PARENT_MANIFEST")
+    manifest_path = run_root.joinpath(*relative.parts).resolve()
+    if not regular_file(manifest_path) or not inside(manifest_path, run_root):
+        raise ModuleError("PARENT_MANIFEST_MISSING")
+    if sha256_file(manifest_path) != record.get("ManifestSha256"):
+        raise ModuleError("PARENT_MANIFEST_HASH")
+    manifest = load_json(manifest_path, "PARENT_MANIFEST")
+    if manifest.get("ArtifactId") != record.get("ArtifactId"):
+        raise ModuleError("PARENT_ARTIFACT_ID")
+    if manifest.get("ArtifactType") != "U001_INTAKE_ACCEPTED":
+        raise ModuleError("PARENT_ARTIFACT_TYPE")
+    return manifest_path.parent, manifest, record
+
+
+def inventory_payload(
+    package_root: Path,
+    manifest: Mapping[str, object],
+) -> Tuple[Path, Mapping[str, object]]:
+    """Resolve the S0 inventory payload and verify its declared identity."""
+
+    payloads = manifest.get("Payloads")
+    if not isinstance(payloads, list):
+        raise ModuleError("PARENT_PAYLOADS")
+    matches = [
+        payload
+        for payload in payloads
+        if str(payload.get("RelativePath")) == "u001_signal_inventory.csv"
+    ]
+    if len(matches) != 1:
+        raise ModuleError("PARENT_INVENTORY_COUNT")
+    payload = matches[0]
+    relative = safe_relative(payload.get("RelativePath"), "INVENTORY")
+    path = package_root.joinpath(*relative.parts).resolve()
+    if not regular_file(path) or not inside(path, package_root):
+        raise ModuleError("PARENT_INVENTORY_MISSING")
+    if sha256_file(path) != payload.get("Sha256"):
+        raise ModuleError("PARENT_INVENTORY_HASH")
+    return path, payload
+
+
+def verify_profile_inventory(
+    profile: Mapping[str, object],
+    inventory_path: Path,
+) -> None:
+    """Bind B1B0 semantic roles to the exact accepted S0 inventory."""
+
+    observed_hash = sha256_file(inventory_path)
+    if profile.get("SourceInventorySha256") != observed_hash:
+        raise ModuleError("PROFILE_INVENTORY_HASH")
+
+
+def find_frame_view(input_root: Path) -> Path:
+    """Resolve exactly one U001 D2 Frame View in the immutable package."""
+
+    if not input_root.is_dir() or input_root.is_symlink():
+        raise ModuleError("INPUT_PACKAGE_DIRECTORY")
+    matches = sorted(
+        path
+        for path in input_root.rglob("u001_frame_values.csv")
+        if regular_file(path)
+    )
+    if len(matches) != 1:
+        raise ModuleError("FRAME_VIEW_COUNT")
+    return matches[0]
+
+
+def required_group_columns(canonical_name: str) -> List[str]:
+    """Return the U001 seven-column frame group required by S1."""
+
+    return [
+        canonical_name + suffix
+        for suffix in (
+            "__value",
+            "__label",
+            "__updated",
+            "__update_count",
+            "__age",
+            "__valid",
+            "__missing_reason",
+        )
+    ]
+
+
+def read_scope(run_root: Path, run_id: object) -> Tuple[Optional[int], Optional[int]]:
+    """Read Frame bounds from the frozen resolved Run Plan."""
+
+    plan = load_json(run_root / "00_CONFIG/resolved_run_plan.json", "RESOLVED_PLAN")
+    if plan.get("RunId") != run_id:
+        raise ModuleError("RESOLVED_PLAN_RUN_ID")
+    scope = plan.get("RunScope")
+    start = plan.get("FrameStart")
+    end = plan.get("FrameEnd")
+    if scope == "FULL_CASE":
+        if start is not None or end is not None:
+            raise ModuleError("RESOLVED_PLAN_FULL_SCOPE")
+        return None, None
+    if scope != "FRAME_RANGE":
+        raise ModuleError("RESOLVED_PLAN_SCOPE")
+    if not isinstance(start, int) or not isinstance(end, int) or start > end:
+        raise ModuleError("RESOLVED_PLAN_BOUNDS")
+    return start, end
+
+
+def source_snapshot(path: Path) -> Tuple[int, int, str]:
+    """Capture source state used for immutability verification."""
+
+    stat = path.stat()
+    return stat.st_size, stat.st_mtime_ns, sha256_file(path)
+
+
+def normalized_record(
+    frame: int,
+    row: Mapping[str, str],
+    bindings: Mapping[str, Mapping[str, object]],
+) -> Dict[str, object]:
+    """Convert two governed U001 groups into one selector input record."""
+
+    result: Dict[str, object] = {"FrameCount": frame}
+    for role in ALLOWED_ROLES:
+        binding = bindings[role]
+        name = str(binding["CanonicalName"])
+        value = parse_optional_float(row[name + "__value"])
+        age = parse_integer(row[name + "__age"], name + "_AGE")
+        valid = parse_boolean(row[name + "__valid"], name + "_VALID")
+        result[role] = {
+            "Value": value,
+            "Age": age,
+            "Valid": valid,
+            "Eligible": (
+                valid
+                and value is not None
+                and age <= int(binding["MaxAgeFramesParsed"])
+            ),
+        }
+    return result
+
+
+def read_records(
+    frame_view: Path,
+    bindings: Mapping[str, Mapping[str, object]],
+    frame_start: Optional[int],
+    frame_end: Optional[int],
+) -> List[Dict[str, object]]:
+    """Stream the bounded U001 Frame View into normalized selector records."""
+
+    records: List[Dict[str, object]] = []
+    with frame_view.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        header = reader.fieldnames or []
+        if not header or header[0] != "FrameCount":
+            raise ModuleError("FRAME_VIEW_LEADING_COLUMN")
+        required = ["FrameCount"]
+        for role in ALLOWED_ROLES:
+            required.extend(required_group_columns(str(bindings[role]["CanonicalName"])))
+        missing = [name for name in required if name not in header]
+        if missing:
+            raise ModuleError("FRAME_VIEW_MISSING_" + missing[0])
+        previous = None
+        for row in reader:
+            frame = parse_integer(row["FrameCount"], "FRAMECOUNT")
+            if previous is not None and frame <= previous:
+                raise ModuleError("FRAMECOUNT_NOT_STRICT")
+            previous = frame
+            if frame_start is not None and frame < frame_start:
+                continue
+            if frame_end is not None and frame > frame_end:
+                continue
+            records.append(normalized_record(frame, row, bindings))
+    if not records:
+        raise ModuleError("FRAME_RANGE_EMPTY")
+    return records
+
+
+def cost(value: Optional[float], reference: Optional[float], scale: float) -> Optional[float]:
+    """Calculate one normalized continuity cost when both values exist."""
+
+    if value is None or reference is None:
+        return None
+    return abs(value - reference) / scale
+
+
+def blank_number(value: Optional[float]) -> object:
+    """Preserve blank output instead of manufacturing numeric zero."""
+
+    return "" if value is None else format(value, ".12g")
+
+
+def output_row(
+    record: Mapping[str, object],
+    provisional: Optional[float],
+    canonical: Optional[float],
+    canonical_valid: bool,
+    selected_role: Optional[str],
+    status: str,
+    reason: str,
+    changed: bool,
+    cost_1: Optional[float],
+    cost_3: Optional[float],
+    segment_id: int,
+) -> Dict[str, object]:
+    """Build one stable public reconstruction row."""
+
+    camera_1 = record[ROLE_1]
+    camera_3 = record[ROLE_3]
+    margin = None
+    if cost_1 is not None and cost_3 is not None:
+        margin = abs(cost_1 - cost_3)
+    return {
+        "FrameCount": record["FrameCount"],
+        "Camera1Distance": blank_number(camera_1["Value"]),
+        "Camera1Eligible": int(bool(camera_1["Eligible"])),
+        "Camera1Age": camera_1["Age"],
+        "Camera3Distance": blank_number(camera_3["Value"]),
+        "Camera3Eligible": int(bool(camera_3["Eligible"])),
+        "Camera3Age": camera_3["Age"],
+        "ProvisionalCameraDistance": blank_number(provisional),
+        "CanonicalCameraDistance": blank_number(canonical),
+        "CanonicalCameraValid": int(canonical_valid),
+        "SelectedCameraRole": selected_role or "NONE",
+        "SelectionStatus": status,
+        "SelectionReason": reason,
+        "SelectionChanged": int(changed),
+        "ContinuityCostCamera1": blank_number(cost_1),
+        "ContinuityCostCamera3": blank_number(cost_3),
+        "CostMargin": blank_number(margin),
+        "SegmentId": segment_id,
+    }
+
+
+def reconstruct(
+    records: Sequence[Mapping[str, object]],
+    configuration: Mapping[str, object],
+) -> List[Dict[str, object]]:
+    """Apply the explainable continuity-hysteresis selector to normalized records."""
+
+    scale = float(configuration["ContinuityScaleMeters"])
+    max_cost = float(configuration["MaxContinuityCost"])
+    acquire_frames = int(configuration["AcquireConfirmFrames"])
+    switch_frames = int(configuration["SwitchConfirmFrames"])
+    switch_margin = float(configuration["SwitchMargin"])
+    reset_frames = int(configuration["ResetAfterBothInvalidFrames"])
+    seed_frame = configuration["SeedFrame"]
+    seed_role = configuration["SeedRole"]
+
+    selected_role: Optional[str] = None
+    last_confident_value: Optional[float] = None
+    pending_role: Optional[str] = None
+    pending_count = 0
+    pending_last_value: Optional[float] = None
+    reacquire_hint_role: Optional[str] = None
+    invalid_count = 0
+    segment_id = 0
+    previous_frame: Optional[int] = None
+    outputs: List[Dict[str, object]] = []
+
+    def clear_pending() -> None:
+        nonlocal pending_role, pending_count, pending_last_value
+        pending_role = None
+        pending_count = 0
+        pending_last_value = None
+
+    for record in records:
+        frame = int(record["FrameCount"])
+        gap = previous_frame is not None and frame != previous_frame + 1
+        if previous_frame is None or gap:
+            reacquire_hint_role = selected_role
+            segment_id += 1
+            selected_role = None
+            last_confident_value = None
+            invalid_count = 0
+            clear_pending()
+        previous_frame = frame
+
+        camera_1 = record[ROLE_1]
+        camera_3 = record[ROLE_3]
+        source = {ROLE_1: camera_1, ROLE_3: camera_3}
+        c1 = cost(camera_1["Value"], last_confident_value, scale)
+        c3 = cost(camera_3["Value"], last_confident_value, scale)
+        costs = {ROLE_1: c1, ROLE_3: c3}
+
+        if seed_frame == frame and seed_role in ALLOWED_ROLES:
+            candidate = source[str(seed_role)]
+            if not candidate["Eligible"]:
+                outputs.append(output_row(
+                    record, candidate["Value"], None, False, None,
+                    "AMBIGUOUS", "CONFIGURED_SEED_INELIGIBLE", False,
+                    c1, c3, segment_id,
+                ))
+                continue
+            selected_role = str(seed_role)
+            last_confident_value = float(candidate["Value"])
+            clear_pending()
+            outputs.append(output_row(
+                record, candidate["Value"], candidate["Value"], True,
+                selected_role, "SEEDED", "CONFIGURED_CASE_SEED", False,
+                c1, c3, segment_id,
+            ))
+            continue
+
+        eligible_roles = [role for role in ALLOWED_ROLES if source[role]["Eligible"]]
+        if not eligible_roles:
+            invalid_count += 1
+            clear_pending()
+            status = "INVALID"
+            reason = "BOTH_SOURCES_INELIGIBLE"
+            if invalid_count >= reset_frames:
+                if invalid_count == reset_frames:
+                    reacquire_hint_role = selected_role
+                    segment_id += 1
+                selected_role = None
+                last_confident_value = None
+                if invalid_count == reset_frames:
+                    status = "SEGMENT_RESET"
+                    reason = "INVALID_RUN_RESET"
+                else:
+                    status = "INVALID"
+                    reason = "RESET_STATE_BOTH_SOURCES_INELIGIBLE"
+            outputs.append(output_row(
+                record, None, None, False, selected_role, status, reason,
+                False, c1, c3, segment_id,
+            ))
+            continue
+        invalid_count = 0
+
+        if selected_role is None:
+            candidate_role: Optional[str] = None
+            if len(eligible_roles) == 1:
+                candidate_role = eligible_roles[0]
+            elif reacquire_hint_role in eligible_roles:
+                candidate_role = reacquire_hint_role
+            elif pending_role in eligible_roles:
+                candidate_role = pending_role
+            if candidate_role is None:
+                clear_pending()
+                outputs.append(output_row(
+                    record, None, None, False, None, "AMBIGUOUS",
+                    "MULTIPLE_UNSEEDED_CANDIDATES", False,
+                    c1, c3, segment_id,
+                ))
+                continue
+            candidate = source[candidate_role]
+            internal_cost = cost(candidate["Value"], pending_last_value, scale)
+            if pending_role != candidate_role:
+                pending_role = candidate_role
+                pending_count = 1
+            elif internal_cost is None or internal_cost <= max_cost:
+                pending_count += 1
+            else:
+                pending_count = 1
+            pending_last_value = float(candidate["Value"])
+            if pending_count < acquire_frames:
+                outputs.append(output_row(
+                    record, candidate["Value"], None, False, None,
+                    "ACQUIRING", "SINGLE_SOURCE_CONFIRMATION_PENDING",
+                    False, c1, c3, segment_id,
+                ))
+                continue
+            selected_role = candidate_role
+            last_confident_value = float(candidate["Value"])
+            reacquire_hint_role = None
+            clear_pending()
+            outputs.append(output_row(
+                record, candidate["Value"], candidate["Value"], True,
+                selected_role, "CONFIDENT", "SINGLE_SOURCE_ACQUIRED",
+                False, c1, c3, segment_id,
+            ))
+            continue
+
+        current_role = selected_role
+        alternative_role = ROLE_3 if current_role == ROLE_1 else ROLE_1
+        current = source[current_role]
+        alternative = source[alternative_role]
+        current_cost = costs[current_role]
+        alternative_cost = costs[alternative_role]
+        current_plausible = bool(
+            current["Eligible"]
+            and current_cost is not None
+            and current_cost <= max_cost
+        )
+        alternative_plausible = bool(
+            alternative["Eligible"]
+            and alternative_cost is not None
+            and alternative_cost <= max_cost
+        )
+        strong_alternative = bool(
+            alternative_plausible
+            and (
+                not current_plausible
+                or float(alternative_cost) + switch_margin < float(current_cost)
+            )
+        )
+
+        if strong_alternative:
+            if pending_role == alternative_role:
+                pending_count += 1
+            else:
+                pending_role = alternative_role
+                pending_count = 1
+            pending_last_value = float(alternative["Value"])
+            if pending_count < switch_frames:
+                outputs.append(output_row(
+                    record, alternative["Value"], None, False,
+                    current_role, "SWITCH_PENDING",
+                    "ALTERNATIVE_CONFIRMATION_PENDING", False,
+                    c1, c3, segment_id,
+                ))
+                continue
+            selected_role = alternative_role
+            last_confident_value = float(alternative["Value"])
+            clear_pending()
+            outputs.append(output_row(
+                record, alternative["Value"], alternative["Value"], True,
+                selected_role, "CONFIDENT", "SWITCH_CONFIRMED", True,
+                c1, c3, segment_id,
+            ))
+            continue
+
+        clear_pending()
+        if current_plausible:
+            last_confident_value = float(current["Value"])
+            outputs.append(output_row(
+                record, current["Value"], current["Value"], True,
+                current_role, "CONFIDENT", "CURRENT_SOURCE_PLAUSIBLE",
+                False, c1, c3, segment_id,
+            ))
+            continue
+        outputs.append(output_row(
+            record, None, None, False, current_role, "AMBIGUOUS",
+            "NO_CONTINUITY_SUPPORTED_PATH", False,
+            c1, c3, segment_id,
+        ))
+    return outputs
+
+
+def write_output_csv(path: Path, rows: Iterable[Mapping[str, object]]) -> int:
+    """Write the complete reconstruction table with a fixed column order."""
+
+    count = 0
+    with path.open("x", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=OUTPUT_COLUMNS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({name: row.get(name, "") for name in OUTPUT_COLUMNS})
+            count += 1
+    return count
+
+
+def build_quality(
+    rows: Sequence[Mapping[str, object]],
+    configuration: Mapping[str, object],
+    profile: Mapping[str, object],
+    frame_view: Path,
+) -> Dict[str, object]:
+    """Summarize selection outcomes without claiming target truth."""
+
+    status_counts: Dict[str, int] = {}
+    role_counts = {ROLE_1: 0, ROLE_3: 0, "NONE": 0}
+    switches = 0
+    for row in rows:
+        status = str(row["SelectionStatus"])
+        status_counts[status] = status_counts.get(status, 0) + 1
+        role = str(row["SelectedCameraRole"])
+        role_counts[role] = role_counts.get(role, 0) + 1
+        switches += int(row["SelectionChanged"])
+    valid_rows = sum(int(row["CanonicalCameraValid"]) for row in rows)
+    return {
+        "Contract": "U002_CAMERA_TARGET_RECONSTRUCTION_QUALITY_V0_1",
+        "Status": "PROVISIONAL_RECONSTRUCTION",
+        "FrameRows": len(rows),
+        "FrameStart": int(rows[0]["FrameCount"]),
+        "FrameEnd": int(rows[-1]["FrameCount"]),
+        "CanonicalValidRows": valid_rows,
+        "CanonicalInvalidRows": len(rows) - valid_rows,
+        "SelectionStatusCounts": status_counts,
+        "SelectedRoleCounts": role_counts,
+        "ConfirmedSwitchCount": switches,
+        "SegmentCount": len({int(row["SegmentId"]) for row in rows}),
+        "Configuration": dict(configuration),
+        "BindingProfileId": profile.get("BindingProfileId"),
+        "BindingProfileVersion": profile.get("BindingProfileVersion"),
+        "SourceInventorySha256": profile.get("SourceInventorySha256"),
+        "InputFrameViewSha256": sha256_file(frame_view),
+        "EngineeringClaim": "CONTINUITY_BASED_PROVISIONAL_CAMERA_TARGET_ONLY",
+        "Prohibitions": [
+            "Output is not ground truth",
+            "Output is not proof of the displayed or control target",
+            "Invalid and ambiguous rows must not enter discrepancy analysis",
+            "Video review is required before engineering conclusions",
+        ],
+    }
+
+
+def write_artifact_package(
+    request: Mapping[str, object],
+    rows: Sequence[Mapping[str, object]],
+    quality: Mapping[str, object],
+    parent_id: str,
+) -> str:
+    """Write one governed candidate Artifact package under assigned staging."""
+
+    output_root = Path(str(request["OutputRoot"]))
+    package_root = output_root / "artifact_01"
+    package_root.mkdir(parents=True)
+    table_path = package_root / "camera_target_reconstruction.csv"
+    row_count = write_output_csv(table_path, rows)
+    quality_path = package_root / "camera_target_reconstruction_quality.json"
+    quality_path.write_bytes(canonical_bytes(quality))
+    artifact_id = (
+        str(request["RunId"])
+        + "."
+        + MODULE_ID
+        + "."
+        + str(request["Sequence"])
+    )
+    payloads = [
+        {
+            "RelativePath": table_path.name,
+            "MediaType": "text/csv",
+            "RowCount": row_count,
+            "Sha256": sha256_file(table_path),
+            "ByteSize": table_path.stat().st_size,
+            "PayloadKind": "PRIMARY",
+        },
+        {
+            "RelativePath": quality_path.name,
+            "MediaType": "application/json",
+            "RowCount": None,
+            "Sha256": sha256_file(quality_path),
+            "ByteSize": quality_path.stat().st_size,
+            "PayloadKind": "AUXILIARY",
+        },
+    ]
+    manifest = {
+        "ContractVersion": CONTRACT_VERSION,
+        "ArtifactId": artifact_id,
+        "ArtifactType": ARTIFACT_TYPE,
+        "SchemaId": "U002_CAMERA_TARGET_RECONSTRUCTION",
+        "SchemaVersion": "0.1",
+        "RunId": request["RunId"],
+        "Stage": request["Stage"],
+        "ProducerModuleId": MODULE_ID,
+        "ProducerModuleVersion": MODULE_VERSION,
+        "ParentArtifactIds": [parent_id],
+        "Payloads": payloads,
+        "Metadata": {
+            "FrameRows": row_count,
+            "CanonicalValidRows": quality["CanonicalValidRows"],
+            "ConfirmedSwitchCount": quality["ConfirmedSwitchCount"],
+            "EngineeringClaim": quality["EngineeringClaim"],
+        },
+    }
+    (package_root / "artifact_manifest.json").write_bytes(canonical_bytes(manifest))
+    return package_root.name
+
+
+def runtime_result(
+    request: Mapping[str, object],
+    package_name: str,
+    quality: Mapping[str, object],
+) -> Dict[str, object]:
+    """Build the exact result envelope expected by the frozen Executor."""
+
+    return {
+        "Protocol": PROTOCOL,
+        "ProtocolVersion": PROTOCOL_VERSION,
+        "ContractVersion": CONTRACT_VERSION,
+        "RunId": request["RunId"],
+        "Sequence": request["Sequence"],
+        "Stage": request["Stage"],
+        "ModuleId": MODULE_ID,
+        "ModuleVersion": MODULE_VERSION,
+        "Status": "SUCCEEDED",
+        "ProducedPackages": [package_name],
+        "Capsule": (
+            "U22B1B2M N-R"
+            + str(quality["FrameRows"])
+            + "-V"
+            + str(quality["CanonicalValidRows"])
+            + "-S"
+            + str(quality["ConfirmedSwitchCount"])
+            + "-X0 C-0"
+        ),
+        "Diagnostics": [],
+    }
+
+
+def main(argv: Sequence[str] = None) -> int:
+    """Execute the governed S1 reconstruction against one frozen request."""
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--request-json", required=True)
+    parser.add_argument("--result-json", required=True)
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        request = load_json(Path(args.request_json), "REQUEST")
+        validate_request(request)
+        configuration = validate_configuration(request["Configuration"])
+        module_root = Path(str(request["ModuleRoot"])).resolve()
+        workspace_root = workspace_root_from_module(module_root)
+        _, profile = resolve_binding_profile(workspace_root, configuration)
+        bindings = {
+            role: role_binding(profile, role)
+            for role in ALLOWED_ROLES
+        }
+        parent_root, parent_manifest, parent_record = input_artifact_package(request)
+        inventory_path, _ = inventory_payload(parent_root, parent_manifest)
+        verify_profile_inventory(profile, inventory_path)
+        run_root = Path(str(request["RunRoot"])).resolve()
+        frame_start, frame_end = read_scope(run_root, request["RunId"])
+        frame_view = find_frame_view(Path(str(request["InputPackage"])).resolve())
+        before = source_snapshot(frame_view)
+        records = read_records(frame_view, bindings, frame_start, frame_end)
+        rows = reconstruct(records, configuration)
+        if len(rows) != len(records):
+            raise ModuleError("OUTPUT_ROW_COUNT")
+        quality = build_quality(rows, configuration, profile, frame_view)
+        if source_snapshot(frame_view) != before:
+            raise ModuleError("INPUT_FRAME_VIEW_CHANGED")
+        package_name = write_artifact_package(
+            request,
+            rows,
+            quality,
+            str(parent_record["ArtifactId"]),
+        )
+        result = runtime_result(request, package_name, quality)
+        Path(args.result_json).write_bytes(canonical_bytes(result))
+        print(result["Capsule"])
+        return 0
+    except ModuleError as exc:
+        print("U22B1B2M N-R0-V0-S0-X1 C-7 R-" + stable(exc))
+        return 7
+    except Exception as exc:
+        print(
+            "U22B1B2M N-R0-V0-S0-X1 C-7 R-"
+            + stable(exc.__class__.__name__)
+        )
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+SELFTEST_SOURCE = r'''#!/usr/bin/env python3
+"""Controlled semantic fixtures for the B1B2 S1 reconstruction Module."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+
+
+ROLE_1 = "CAMERA_1_DISTANCE"
+ROLE_3 = "CAMERA_3_DISTANCE"
+
+
+def load_implementation(module_root):
+    """Load only the implementation inside the selected Module root."""
+
+    path = module_root / "implementation.py"
+    spec = importlib.util.spec_from_file_location("u22b1b2_impl", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def source(value, eligible=True, age=0):
+    """Create one normalized candidate source fixture."""
+
+    return {
+        "Value": value,
+        "Age": age,
+        "Valid": bool(eligible),
+        "Eligible": bool(eligible),
+    }
+
+
+def record(frame, camera_1, camera_3, e1=True, e3=True, a1=0, a3=0):
+    """Create one normalized Frame fixture."""
+
+    return {
+        "FrameCount": frame,
+        ROLE_1: source(camera_1, e1, a1),
+        ROLE_3: source(camera_3, e3, a3),
+    }
+
+
+def base_configuration():
+    """Return the approved TC001 provisional selector parameters."""
+
+    return {
+        "BindingProfilePath": "02_CONFIG/binding_profiles/test.json",
+        "BindingProfileSha256": "0" * 64,
+        "ContinuityScaleMeters": 0.38,
+        "MaxContinuityCost": 3.0,
+        "AcquireConfirmFrames": 3,
+        "SwitchConfirmFrames": 3,
+        "SwitchMargin": 1.0,
+        "ResetAfterBothInvalidFrames": 3,
+        "SeedFrame": 100,
+        "SeedRole": ROLE_1,
+    }
+
+
+def write_json(path, value):
+    """Write one deterministic JSON fixture."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def sha256(path):
+    """Hash one small self-test file."""
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def runtime_smoke(source_module_root):
+    """Exercise request, binding, U001 Frame View and Artifact I/O end to end."""
+
+    checks = []
+    with tempfile.TemporaryDirectory(prefix="u22b1b2_runtime_smoke_") as temporary:
+        root = Path(temporary) / "U-UDP002"
+        module_root = (
+            root
+            / "01_PROGRAMS/modules/S1"
+            / "CameraRadar.S1.CameraTargetContinuityArbitration"
+            / "0.1.0"
+        )
+        module_root.mkdir(parents=True)
+        shutil.copy2(source_module_root / "implementation.py", module_root / "implementation.py")
+
+        input_root = root / "03_CASES/TC_SELFTEST/U001_OUTPUT"
+        input_root.mkdir(parents=True)
+        suffixes = (
+            "__value", "__label", "__updated", "__update_count",
+            "__age", "__valid", "__missing_reason",
+        )
+        header = ["FrameCount", "SourceRowFirst", "SourceRowLast", "SourceUpdateCount"]
+        for name in (ROLE_1, ROLE_3):
+            header.extend(name + suffix for suffix in suffixes)
+        frame_path = input_root / "u001_frame_values.csv"
+        with frame_path.open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(header)
+            for index, frame in enumerate(range(100, 105), start=1):
+                row = [frame, index, index, 2]
+                row.extend([10.0 + index / 10, "", 1, 1, 0, 1, "VALID_UPDATE"])
+                row.extend([40.0 + index, "", 1, 1, 0, 1, "VALID_UPDATE"])
+                writer.writerow(row)
+        input_hash = sha256(frame_path)
+
+        run_id = "RUN_B1B2_SELFTEST"
+        run_root = root / "07_OUTPUT" / run_id
+        write_json(
+            run_root / "00_CONFIG/resolved_run_plan.json",
+            {
+                "RunId": run_id,
+                "RunScope": "FRAME_RANGE",
+                "FrameStart": 100,
+                "FrameEnd": 104,
+            },
+        )
+        parent_root = run_root / "03_ARTIFACTS/S0/ART_S0_SELFTEST"
+        parent_root.mkdir(parents=True)
+        inventory_path = parent_root / "u001_signal_inventory.csv"
+        inventory_path.write_text(
+            "CanonicalName,CAN_ID,Channel,SignalName,Unit\n"
+            + ROLE_1 + ",0x221,2,Distance,m\n"
+            + ROLE_3 + ",0x251,2,Distance,m\n",
+            encoding="utf-8",
+        )
+        summary_path = parent_root / "u001_intake_summary.json"
+        write_json(summary_path, {"Status": "INTAKE_ACCEPTED"})
+        parent_manifest = {
+            "ContractVersion": "U22.0.1",
+            "ArtifactId": "ART_S0_SELFTEST",
+            "ArtifactType": "U001_INTAKE_ACCEPTED",
+            "SchemaId": "U002_U001_INTAKE_SUMMARY",
+            "SchemaVersion": "0.1",
+            "RunId": run_id,
+            "Stage": "S0",
+            "ProducerModuleId": "CameraRadar.S0.U001ControlledProfileIntake",
+            "ProducerModuleVersion": "0.1.1",
+            "ParentArtifactIds": [],
+            "Payloads": [
+                {
+                    "RelativePath": summary_path.name,
+                    "MediaType": "application/json",
+                    "RowCount": None,
+                    "Sha256": sha256(summary_path),
+                    "ByteSize": summary_path.stat().st_size,
+                    "PayloadKind": "PRIMARY",
+                },
+                {
+                    "RelativePath": inventory_path.name,
+                    "MediaType": "text/csv",
+                    "RowCount": 2,
+                    "Sha256": sha256(inventory_path),
+                    "ByteSize": inventory_path.stat().st_size,
+                    "PayloadKind": "AUXILIARY",
+                },
+            ],
+            "Metadata": {},
+        }
+        parent_manifest_path = parent_root / "artifact_manifest.json"
+        write_json(parent_manifest_path, parent_manifest)
+
+        profile = {
+            "ContractVersion": "U002_SIGNAL_BINDING_PROFILE_V0_1",
+            "BindingProfileId": "TC001.CameraRadar.Base.PROVISIONAL",
+            "BindingProfileVersion": "0.1",
+            "DuplicateRoleCount": 0,
+            "BlockingIssues": [],
+            "SourceInventorySha256": sha256(inventory_path),
+            "Prohibitions": ["comparison target is excluded from arbitration"],
+            "Bindings": {},
+        }
+        for role, can_id in ((ROLE_1, "0x221"), (ROLE_3, "0x251")):
+            profile["Bindings"][role] = [
+                {
+                    "CanonicalName": role,
+                    "CAN_ID": can_id,
+                    "Channel": "2",
+                    "SignalName": "Distance",
+                    "IncludeInFrameView": True,
+                    "MaxAgeFrames": "1",
+                }
+            ]
+        profile_path = root / "02_CONFIG/binding_profiles/test.json"
+        write_json(profile_path, profile)
+        configuration = base_configuration()
+        configuration["BindingProfileSha256"] = sha256(profile_path)
+
+        staging = run_root / "00_STAGING/0002_S1/packages"
+        staging.mkdir(parents=True)
+        request = {
+            "Protocol": "U002_U22_MODULE_RUNTIME",
+            "ProtocolVersion": "0.1",
+            "ContractVersion": "U22.0.1",
+            "RunId": run_id,
+            "Sequence": 2,
+            "Stage": "S1",
+            "ModuleId": "CameraRadar.S1.CameraTargetContinuityArbitration",
+            "ModuleVersion": "0.1.0",
+            "ModuleRoot": str(module_root),
+            "RunRoot": str(run_root),
+            "InputPackage": str(input_root),
+            "RequiredInputs": [ROLE_1, ROLE_3],
+            "OptionalInputs": [],
+            "InputArtifacts": [
+                {
+                    "ArtifactId": "ART_S0_SELFTEST",
+                    "ArtifactType": "U001_INTAKE_ACCEPTED",
+                    "ManifestRelativePath": parent_manifest_path.relative_to(run_root).as_posix(),
+                    "ManifestSha256": sha256(parent_manifest_path),
+                }
+            ],
+            "Configuration": configuration,
+            "ExpectedOutputTypes": ["CAMERA_TARGET_RECONSTRUCTION"],
+            "OutputRoot": str(staging),
+        }
+        request_path = run_root / "00_STAGING/0002_S1/module_request.json"
+        result_path = run_root / "00_STAGING/0002_S1/module_result.json"
+        write_json(request_path, request)
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(module_root / "implementation.py"),
+                "--request-json",
+                str(request_path),
+                "--result-json",
+                str(result_path),
+            ],
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        assert completed.returncode == 0 and "C-0" in completed.stdout
+        checks.append(True)
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        assert result["Status"] == "SUCCEEDED"
+        checks.append(True)
+        package_root = staging / "artifact_01"
+        manifest = json.loads((package_root / "artifact_manifest.json").read_text(encoding="utf-8"))
+        assert manifest["ParentArtifactIds"] == ["ART_S0_SELFTEST"]
+        checks.append(True)
+        with (package_root / "camera_target_reconstruction.csv").open(
+            "r", encoding="utf-8", newline=""
+        ) as stream:
+            rows = list(csv.DictReader(stream))
+        assert len(rows) == 5 and rows[0]["SelectionStatus"] == "SEEDED"
+        checks.append(True)
+        assert all(row["CanonicalCameraValid"] == "1" for row in rows)
+        checks.append(True)
+        assert sha256(frame_path) == input_hash
+        checks.append(True)
+    return checks
+
+
+def main():
+    """Exercise the thirteen approved fixture classes."""
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--module-root", required=True)
+    parser.add_argument("--workspace-root", required=True)
+    args = parser.parse_args()
+    implementation = load_implementation(Path(args.module_root).resolve())
+    cfg = base_configuration()
+    checks = []
+
+    # F01: stable Camera 1 after the configured seed.
+    rows = implementation.reconstruct(
+        [record(100 + i, 10.0 + 0.1 * i, 40.0 + i) for i in range(5)],
+        cfg,
+    )
+    assert rows[0]["SelectionStatus"] == "SEEDED"
+    assert all(row["SelectedCameraRole"] == ROLE_1 for row in rows)
+    checks.extend([True, True])
+
+    # F02: Camera 3 can be the documented seed.
+    cfg3 = dict(cfg)
+    cfg3["SeedRole"] = ROLE_3
+    rows = implementation.reconstruct(
+        [record(100 + i, 50.0 + i, 12.0 + 0.1 * i) for i in range(4)],
+        cfg3,
+    )
+    assert rows[0]["SelectedCameraRole"] == ROLE_3
+    checks.append(True)
+
+    # F03/F04: Camera 1 invalid/default, Camera 3 continuity confirms a switch.
+    fixture = [
+        record(100, 10.0, 50.0),
+        record(101, 10.1, 50.0),
+        record(102, None, 10.2, False, True),
+        record(103, None, 10.3, False, True),
+        record(104, None, 10.4, False, True),
+    ]
+    rows = implementation.reconstruct(fixture, cfg)
+    assert rows[2]["SelectionStatus"] == "SWITCH_PENDING"
+    assert rows[4]["SelectionReason"] == "SWITCH_CONFIRMED"
+    assert rows[4]["SelectionChanged"] == 1
+    checks.extend([True, True, True])
+
+    # F05: a distant alternative does not cause a switch.
+    rows = implementation.reconstruct(
+        [record(100 + i, 10.0 + 0.1 * i, 50.0 + i) for i in range(6)],
+        cfg,
+    )
+    assert sum(row["SelectionChanged"] for row in rows) == 0
+    checks.append(True)
+
+    # F06: both invalid never emit a canonical value.
+    rows = implementation.reconstruct(
+        [
+            record(100, 10.0, 20.0),
+            record(101, None, None, False, False),
+            record(102, None, None, False, False),
+            record(103, None, None, False, False),
+        ],
+        cfg,
+    )
+    assert all(row["CanonicalCameraValid"] == 0 for row in rows[1:])
+    assert rows[-1]["SelectionStatus"] == "SEGMENT_RESET"
+    checks.extend([True, True])
+
+    # F07: two unseeded plausible candidates preserve ambiguity.
+    no_seed = dict(cfg)
+    no_seed["SeedFrame"] = None
+    no_seed["SeedRole"] = None
+    rows = implementation.reconstruct(
+        [record(200 + i, 10.0 + 0.1 * i, 11.0 + 0.1 * i) for i in range(4)],
+        no_seed,
+    )
+    assert all(row["SelectionStatus"] == "AMBIGUOUS" for row in rows)
+    checks.append(True)
+
+    # F08: a FrameCount gap creates a new segment and requires reacquisition.
+    rows = implementation.reconstruct(
+        [
+            record(100, 10.0, 50.0),
+            record(101, 10.1, 50.0),
+            record(105, 10.2, None, True, False),
+        ],
+        cfg,
+    )
+    assert rows[-1]["SegmentId"] == 2
+    assert rows[-1]["SelectionStatus"] == "ACQUIRING"
+    checks.extend([True, True])
+
+    # F09: stale age is represented by ineligible normalized input.
+    rows = implementation.reconstruct(
+        [
+            record(100, 10.0, 50.0),
+            record(101, 10.1, 10.2),
+            record(102, 10.2, 10.3, False, True, 5, 0),
+            record(103, 10.3, 10.4, False, True, 5, 0),
+            record(104, 10.4, 10.5, False, True, 5, 0),
+        ],
+        cfg,
+    )
+    assert rows[-1]["SelectedCameraRole"] == ROLE_3
+    checks.append(True)
+
+    # F10: pending switch rows are never analysis-grade canonical values.
+    assert rows[2]["SelectionStatus"] == "SWITCH_PENDING"
+    assert rows[2]["CanonicalCameraValid"] == 0
+    checks.extend([True, True])
+
+    # F11: deterministic replay produces identical row dictionaries.
+    fixture = [record(100 + i, 10.0 + 0.1 * i, 40.0) for i in range(8)]
+    assert implementation.reconstruct(fixture, cfg) == implementation.reconstruct(fixture, cfg)
+    checks.append(True)
+
+    # F12: selector does not mutate normalized input records.
+    before = repr(fixture)
+    implementation.reconstruct(fixture, cfg)
+    assert repr(fixture) == before
+    checks.append(True)
+
+    # F13: public selector signature has no comparison-target argument.
+    assert implementation.reconstruct.__code__.co_argcount == 2
+    checks.append(True)
+
+    checks.extend(runtime_smoke(Path(args.module_root).resolve()))
+
+    assert len(checks) == 24
+    print("U22B1B2M-ST N-T24-F13-IO6-X0 C-0")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+def canonical_bytes(value: object) -> bytes:
+    """Serialize one installed JSON document deterministically."""
+
+    text = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+        allow_nan=False,
+    )
+    return (text + "\n").encode("utf-8")
+
+
+def sha256_bytes(value: bytes) -> str:
+    """Hash one installed file payload."""
+
+    return hashlib.sha256(value).hexdigest()
+
+
+def regular_file(path: Path) -> bool:
+    """Accept ordinary installer and foundation files only."""
+
+    return path.is_file() and not path.is_symlink()
+
+
+def require_workspace(path: Path) -> Path:
+    """Validate the fixed U002 workspace identity."""
+
+    root = path.resolve()
+    if not root.is_dir() or root.name != "U-UDP002":
+        raise InstallerError("WORKSPACE_ROOT")
+    return root
+
+
+def module_files() -> Dict[str, bytes]:
+    """Return the complete deterministic five-file Module package."""
+
+    return {
+        "module_manifest.json": canonical_bytes(MODULE_MANIFEST),
+        "algorithm_card.json": canonical_bytes(ALGORITHM_CARD),
+        "configuration_schema.json": canonical_bytes(CONFIGURATION_SCHEMA),
+        "implementation.py": IMPLEMENTATION_SOURCE.encode("utf-8"),
+        "selftest.py": SELFTEST_SOURCE.encode("utf-8"),
+    }
+
+
+def audit_foundation(workspace_root: Path) -> None:
+    """Require the accepted A7 Foundation before installing a real Module."""
+
+    auditor = workspace_root / FREEZE_AUDITOR_RELATIVE
+    if not regular_file(auditor):
+        raise InstallerError("FREEZE_AUDITOR_MISSING")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(auditor),
+            "--audit-freeze",
+            "--workspace-root",
+            str(workspace_root),
+        ],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    if result.returncode != 0 or "N-F11-N8-V1-X0 C-0" not in result.stdout:
+        raise InstallerError("FOUNDATION_AUDIT")
+
+
+def install_module(workspace_root: Path) -> str:
+    """Install the deterministic Module package without touching frozen Core."""
+
+    audit_foundation(workspace_root)
+    destination = workspace_root / MODULE_RELATIVE
+    files = module_files()
+    if destination.exists():
+        if not destination.is_dir() or destination.is_symlink():
+            raise InstallerError("MODULE_DESTINATION_TYPE")
+        for name, content in files.items():
+            path = destination / name
+            if not regular_file(path) or path.read_bytes() != content:
+                raise InstallerError("MODULE_INSTALL_CONFLICT_" + name)
+        if {path.name for path in destination.iterdir()} != set(files):
+            raise InstallerError("MODULE_INSTALL_EXTRA_FILE")
+        return "U22B1B2I N-F5-H1-R1-X0 C-0"
+    temporary = destination.with_name(destination.name + ".installing")
+    if temporary.exists():
+        raise InstallerError("MODULE_INSTALL_TEMP_EXISTS")
+    temporary.mkdir(parents=True)
+    try:
+        for name, content in files.items():
+            (temporary / name).write_bytes(content)
+        os.replace(temporary, destination)
+    except Exception:
+        if temporary.exists():
+            shutil.rmtree(temporary, ignore_errors=True)
+        raise
+    for name, content in files.items():
+        if (destination / name).read_bytes() != content:
+            raise InstallerError("MODULE_INSTALL_IDENTITY_" + name)
+    return "U22B1B2I N-F5-H1-R0-X0 C-0"
+
+
+def self_test() -> str:
+    """Compile the embedded code and execute all thirteen semantic fixtures."""
+
+    checks = []
+    files = module_files()
+    if len(files) != 5:
+        raise InstallerError("SELFTEST_FILE_COUNT")
+    checks.append(True)
+    if MODULE_MANIFEST["Stage"] != "S1":
+        raise InstallerError("SELFTEST_STAGE")
+    checks.append(True)
+    if MODULE_MANIFEST["RequiresArtifacts"] != ["U001_INTAKE_ACCEPTED"]:
+        raise InstallerError("SELFTEST_REQUIRES_ARTIFACT")
+    checks.append(True)
+    if MODULE_MANIFEST["ProvidesArtifacts"] != ["CAMERA_TARGET_RECONSTRUCTION"]:
+        raise InstallerError("SELFTEST_PROVIDES_ARTIFACT")
+    checks.append(True)
+    if "RADAR_DISTANCE" in IMPLEMENTATION_SOURCE.upper():
+        raise InstallerError("SELFTEST_COMPARISON_TARGET_LEAKAGE")
+    checks.append(True)
+    if "RECOGNITION_ID" in IMPLEMENTATION_SOURCE.upper():
+        raise InstallerError("SELFTEST_RECOGNITION_ID_LEAKAGE")
+    checks.append(True)
+    if any(len(sha256_bytes(content)) != 64 for content in files.values()):
+        raise InstallerError("SELFTEST_HASH")
+    checks.append(True)
+    compile(IMPLEMENTATION_SOURCE, "implementation.py", "exec")
+    compile(SELFTEST_SOURCE, "selftest.py", "exec")
+    checks.extend([True, True])
+    with tempfile.TemporaryDirectory(prefix="u22b1b2_installer_selftest_") as temporary:
+        root = Path(temporary) / "U-UDP002"
+        module_root = root / MODULE_RELATIVE
+        module_root.mkdir(parents=True)
+        for name, content in files.items():
+            (module_root / name).write_bytes(content)
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(module_root / "selftest.py"),
+                "--module-root",
+                str(module_root),
+                "--workspace-root",
+                str(root),
+            ],
+            text=True,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+        if completed.returncode != 0 or "N-T24-F13-IO6-X0 C-0" not in completed.stdout:
+            detail = (completed.stdout + completed.stderr).strip()[-240:]
+            raise InstallerError("SELFTEST_MODULE_" + detail)
+        checks.append(True)
+    if len(checks) != 10:
+        raise InstallerError("SELFTEST_COUNT")
+    return "U22B1B2I-ST N-T10-F5-X0 C-0"
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    """Create explicit installer and self-test modes."""
+
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--install-module", action="store_true")
+    parser.add_argument("--workspace-root")
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] = None) -> int:
+    """Install only the deterministic U22B1B2 Module package."""
+
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        if args.self_test:
+            print(self_test())
+            return 0
+        if args.workspace_root is None:
+            raise InstallerError("WORKSPACE_ROOT_REQUIRED")
+        root = require_workspace(Path(args.workspace_root))
+        print(install_module(root))
+        return 0
+    except InstallerError as exc:
+        print("U22B1B2I N-F0-H0-R0-X1 C-7 R-" + str(exc))
+        return 7
+    except Exception as exc:
+        print(
+            "U22B1B2I N-F0-H0-R0-X1 C-7 R-"
+            + exc.__class__.__name__.upper()
+        )
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
