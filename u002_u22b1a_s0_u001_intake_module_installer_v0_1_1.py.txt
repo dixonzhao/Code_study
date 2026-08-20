@@ -1,0 +1,1250 @@
+#!/usr/bin/env python3
+"""Install the real U22B1A S0 U001 Controlled Profile Intake Module."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+from typing import Dict, Mapping, Sequence
+
+
+PROGRAM_ID = "U002-U22B1A-S0-U001-INTAKE-INSTALLER"
+VERSION = "0.1"
+CONTRACT_VERSION = "U22.0.1"
+MODULE_ID = "CameraRadar.S0.U001ControlledProfileIntake"
+MODULE_VERSION = "0.1.1"
+STAGE = "S0"
+MODULE_RELATIVE = Path(
+    "01_PROGRAMS/modules/S0"
+) / MODULE_ID / MODULE_VERSION
+FREEZE_AUDITOR_RELATIVE = Path(
+    "05_TESTS/integration/u002_u22_synthetic_vertical_acceptance_v0_1.py"
+)
+
+
+class InstallerError(RuntimeError):
+    """Represent one deterministic installer failure."""
+
+
+MODULE_MANIFEST: Dict[str, object] = {
+    "ContractVersion": CONTRACT_VERSION,
+    "ModuleId": MODULE_ID,
+    "ModuleVersion": MODULE_VERSION,
+    "Stage": STAGE,
+    "AlgorithmStatus": "PROVISIONAL",
+    "ScopeSelector": {
+        "InputPackageKind": "U001_CONTROLLED_PROFILE",
+        "RequiredInterface": "U001_UNIFIED_DATA_CONTRACT_V0_1",
+    },
+    "RequiredInputs": ["U001.CONTROLLED_PROFILE.SIX_FILE_PACKAGE"],
+    "OptionalInputs": [],
+    "RequiresArtifacts": [],
+    "ProvidesArtifacts": ["U001_INTAKE_ACCEPTED"],
+    "OutputNamespace": "camera_radar.s0.u001_intake",
+    "ConfigurationSchema": None,
+    "FailurePolicy": "REQUIRED",
+    "ConflictPolicy": "EXCLUSIVE",
+    "EntryPoint": "implementation.py",
+    "SelfTestEntryPoint": "selftest.py",
+    "AlgorithmCard": "algorithm_card.json",
+}
+
+
+ALGORITHM_CARD: Dict[str, object] = {
+    "ContractVersion": CONTRACT_VERSION,
+    "AlgorithmId": MODULE_ID,
+    "AlgorithmVersion": MODULE_VERSION,
+    "Status": "PROVISIONAL",
+    "Purpose": "Accept one immutable U001 Controlled Profile package into a governed U002 Run",
+    "ProblemSolved": "Prevent analysis Modules from consuming incomplete, misaligned, or semantically ambiguous U001 files",
+    "MathematicalDefinition": [
+        "FrameCount_i is integer and FrameCount_i > FrameCount_(i-1)",
+        "D2 signal groups equal D3 signals marked IncludeInFrameView",
+        "D4 frame_view_signal_count equals count(D3 IncludeInFrameView = true)",
+        "package_error_count = 0",
+        "PackageFingerprint = SHA256(sorted basename and file SHA256 records)",
+    ],
+    "Inputs": [
+        "U001 D1 decoded updates",
+        "U001 D2 frame values",
+        "U001 D3 signal catalog",
+        "U001 D4 quality report",
+        "U001 D5 run manifest",
+        "U001 D6 review view",
+    ],
+    "Outputs": [
+        "U001_INTAKE_ACCEPTED Artifact",
+        "u001_intake_summary.json",
+        "u001_signal_inventory.csv",
+    ],
+    "Assumptions": [
+        "FrameCount is the authoritative current video-domain synchronization key",
+        "U001 files follow U001 Unified Data Contract v0.1",
+        "The six-file package is immutable while this Module reads it",
+    ],
+    "FailureConditions": [
+        "missing or duplicate package file",
+        "missing required column",
+        "non-integer, duplicate, or decreasing FrameCount",
+        "D2 and D3 signal-group mismatch",
+        "blocking U001 package quality error",
+        "D6 not an exact row-aligned subset of D2",
+        "input file size or modified-time change during inspection",
+    ],
+    "Limitations": [
+        "Does not decide which Camera target is physically correct",
+        "Does not decide whether Radar is ground truth",
+        "Does not calculate discrepancy, baseline, evidence, or candidates",
+        "AUTO_DISCOVERY response intake is outside this first MVP Module",
+    ],
+    "Alternatives": [
+        "manual six-file inspection, rejected because it is not reproducible",
+        "direct D2 reading, rejected because it loses D3-D5 semantics and quality evidence",
+    ],
+    "EvaluationPlan": [
+        "positive six-file fixture through frozen A4-A6 runtime",
+        "D3 catalog may include signals excluded from D2 Frame View",
+        "blocking quality fixture must fail closed",
+        "strict FrameCount and D2-D3 consistency checks",
+        "Artifact audit and input immutability evidence",
+        "later real U001 short-range Golden Run before FORMAL promotion",
+    ],
+    "DecisionReference": "D-U22B1A-S0-U001-INTAKE",
+}
+
+
+IMPLEMENTATION_SOURCE = r'''#!/usr/bin/env python3
+"""Validate a U001 Controlled Profile package and emit governed S0 evidence."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+import math
+from pathlib import Path
+import re
+import sys
+from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
+
+
+MODULE_ID = "CameraRadar.S0.U001ControlledProfileIntake"
+MODULE_VERSION = "0.1.1"
+CONTRACT_VERSION = "U22.0.1"
+PROTOCOL = "U002_U22_MODULE_RUNTIME"
+PROTOCOL_VERSION = "0.1"
+ARTIFACT_TYPE = "U001_INTAKE_ACCEPTED"
+PACKAGE_NAMES = (
+    "u001_decoded_updates.csv",
+    "u001_frame_values.csv",
+    "u001_signal_catalog.csv",
+    "u001_quality_report.csv",
+    "u001_run_manifest.json",
+    "u001_review_view.csv",
+)
+D1_REQUIRED = (
+    "SourceRowIndex",
+    "SourceId",
+    "SourceType",
+    "ClockDomain",
+    "NativeTimestamp",
+    "NativeSequence",
+    "FrameCount",
+    "SyncKey",
+    "SyncQuality",
+    "FrameAssignmentStatus",
+    "FrameAssignmentAgeRows",
+    "CAN_ID",
+    "Channel",
+    "MessageName",
+    "CanonicalName",
+    "RawCode",
+    "PhysicalValue",
+    "ValueLabel",
+    "ValueKind",
+    "SignalRole",
+    "Valid",
+    "MissingReason",
+    "MessageCounter",
+    "SourceDateTime",
+    "SourceTimeUs",
+)
+D2_LEADING = (
+    "FrameCount",
+    "SourceRowFirst",
+    "SourceRowLast",
+    "SourceUpdateCount",
+)
+D2_SUFFIXES = (
+    "__value",
+    "__label",
+    "__updated",
+    "__update_count",
+    "__age",
+    "__valid",
+    "__missing_reason",
+)
+D3_REQUIRED = (
+    "CanonicalName",
+    "CAN_ID",
+    "Channel",
+    "MessageName",
+    "SignalName",
+    "Unit",
+    "ValueKind",
+    "SignalRole",
+    "UpdateMode",
+    "StorageDtype",
+    "StartBit",
+    "BitLength",
+    "ByteOrder",
+    "Signed",
+    "Scale",
+    "Offset",
+    "DBCMinimum",
+    "DBCMaximum",
+    "EnumerationMap",
+    "ValidityRule",
+    "ValiditySourceSignal",
+    "ValidityExpression",
+    "WithinFramePolicy",
+    "HoldPolicy",
+    "MaxAgeFrames",
+    "NominalRateHz",
+    "RequiredForAnalysis",
+    "IncludeInFrameView",
+    "IncludeInReviewView",
+    "Notes",
+)
+D4_REQUIRED = (
+    "Scope",
+    "CanonicalName",
+    "Metric",
+    "Value",
+    "Unit",
+    "SourceGate",
+    "Status",
+    "Notes",
+)
+INVENTORY_COLUMNS = (
+    "CanonicalName",
+    "CAN_ID",
+    "Channel",
+    "MessageName",
+    "SignalName",
+    "Unit",
+    "ValueKind",
+    "SignalRole",
+    "UpdateMode",
+    "StorageDtype",
+    "WithinFramePolicy",
+    "HoldPolicy",
+    "MaxAgeFrames",
+    "RequiredForAnalysis",
+    "IncludeInFrameView",
+    "IncludeInReviewView",
+)
+
+
+class ModuleError(RuntimeError):
+    """Represent one deterministic U001 intake failure."""
+
+
+def stable(value: object) -> str:
+    """Convert one diagnostic value into a compact capsule token."""
+
+    normalized = re.sub(r"[^A-Z0-9_]+", "_", str(value).upper())
+    return normalized.strip("_")[:80] or "INTERNAL"
+
+
+def regular_file(path: Path) -> bool:
+    """Accept ordinary package files only."""
+
+    return path.is_file() and not path.is_symlink()
+
+
+def canonical_bytes(value: object) -> bytes:
+    """Serialize one JSON document deterministically."""
+
+    text = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+        allow_nan=False,
+    )
+    return (text + "\n").encode("utf-8")
+
+
+def sha256_file(path: Path) -> str:
+    """Hash one file with bounded memory."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def file_state(path: Path) -> Tuple[int, int]:
+    """Capture the size and modified time used for concurrent-mutation checks."""
+
+    stat = path.stat()
+    return stat.st_size, stat.st_mtime_ns
+
+
+def read_header(path: Path) -> List[str]:
+    """Read one CSV header and reject empty or duplicated names."""
+
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        header = next(csv.reader(stream), None)
+    if not header:
+        raise ModuleError("EMPTY_CSV_" + path.name)
+    if len(header) != len(set(header)):
+        raise ModuleError("DUPLICATE_HEADER_" + path.name)
+    return header
+
+
+def require_columns(
+    header: Sequence[str],
+    required: Sequence[str],
+    label: str,
+) -> None:
+    """Require all logical columns while permitting documented extensions."""
+
+    missing = [name for name in required if name not in header]
+    if missing:
+        raise ModuleError(label + "_MISSING_" + missing[0])
+
+
+def find_package_files(input_root: Path) -> Dict[str, Path]:
+    """Resolve exactly one occurrence of each U001 public package file."""
+
+    if not input_root.is_dir() or input_root.is_symlink():
+        raise ModuleError("INPUT_PACKAGE_DIRECTORY")
+    files: Dict[str, Path] = {}
+    for name in PACKAGE_NAMES:
+        matches = sorted(
+            path
+            for path in input_root.rglob(name)
+            if regular_file(path)
+        )
+        if len(matches) != 1:
+            raise ModuleError("PACKAGE_FILE_COUNT_" + name)
+        files[name] = matches[0]
+    return files
+
+
+def parse_integer(value: str, field: str) -> int:
+    """Parse a finite integer represented as integer or decimal text."""
+
+    text = (value or "").strip()
+    try:
+        number = float(text)
+    except ValueError as exc:
+        raise ModuleError("NON_NUMERIC_" + field) from exc
+    if not math.isfinite(number) or not number.is_integer():
+        raise ModuleError("NON_INTEGER_" + field)
+    return int(number)
+
+
+def parse_boolean(value: str, field: str) -> bool:
+    """Parse the controlled U001 CSV boolean representation."""
+
+    text = (value or "").strip().lower()
+    if text in {"1", "true"}:
+        return True
+    if text in {"0", "false"}:
+        return False
+    raise ModuleError("INVALID_BOOLEAN_" + field)
+
+
+def frame_groups(header: Sequence[str]) -> List[str]:
+    """Resolve and validate complete seven-column D2 signal groups."""
+
+    if tuple(header[:4]) != D2_LEADING:
+        raise ModuleError("D2_LEADING_COLUMNS")
+    groups = [name[:-7] for name in header if name.endswith("__value")]
+    if not groups or len(groups) != len(set(groups)):
+        raise ModuleError("D2_SIGNAL_GROUPS")
+    expected = list(D2_LEADING)
+    for group in groups:
+        expected.extend(group + suffix for suffix in D2_SUFFIXES)
+    if list(header) != expected:
+        raise ModuleError("D2_GROUP_ORDER")
+    return groups
+
+
+def inspect_frame_values(path: Path) -> Dict[str, object]:
+    """Stream D2 and verify the canonical FrameCount domain."""
+
+    groups = frame_groups(read_header(path))
+    rows = 0
+    frame_min = None
+    frame_max = None
+    previous = None
+    gap_count = 0
+    largest_gap = 0
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        for row in csv.DictReader(stream):
+            frame = parse_integer(row["FrameCount"], "FRAMECOUNT")
+            if previous is not None:
+                if frame <= previous:
+                    raise ModuleError("D2_FRAME_NOT_STRICT")
+                step = frame - previous
+                if step > 1:
+                    gap_count += 1
+                    largest_gap = max(largest_gap, step - 1)
+            if frame_min is None:
+                frame_min = frame
+            frame_max = frame
+            previous = frame
+            rows += 1
+            for group in groups:
+                parse_boolean(row[group + "__valid"], group + "__valid")
+                parse_boolean(row[group + "__updated"], group + "__updated")
+    if rows == 0:
+        raise ModuleError("D2_NO_ROWS")
+    return {
+        "FrameRows": rows,
+        "FrameMin": frame_min,
+        "FrameMax": frame_max,
+        "MissingFrameGapCount": gap_count,
+        "LargestMissingFrameGap": largest_gap,
+        "SignalGroups": groups,
+    }
+
+
+def inspect_catalog(path: Path) -> Tuple[List[Dict[str, str]], List[str]]:
+    """Validate D3 identity and build the compact downstream inventory."""
+
+    header = read_header(path)
+    require_columns(header, D3_REQUIRED, "D3")
+    inventory: List[Dict[str, str]] = []
+    included: List[str] = []
+    identities = set()
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        for row in csv.DictReader(stream):
+            name = (row.get("CanonicalName") or "").strip()
+            if not name or name in identities:
+                raise ModuleError("D3_CANONICAL_IDENTITY")
+            identities.add(name)
+            if parse_boolean(
+                row.get("IncludeInFrameView", ""),
+                name + "_IncludeInFrameView",
+            ):
+                included.append(name)
+            inventory.append(
+                {column: row.get(column, "") for column in INVENTORY_COLUMNS}
+            )
+    if not inventory:
+        raise ModuleError("D3_NO_SIGNALS")
+    return inventory, included
+
+
+def inspect_quality(path: Path, signal_count: int) -> Dict[str, int]:
+    """Require the minimum global U001 package quality gates."""
+
+    header = read_header(path)
+    require_columns(header, D4_REQUIRED, "D4")
+    required = {
+        "package_file_count",
+        "package_error_count",
+        "frame_view_signal_count",
+    }
+    found: Dict[str, int] = {}
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        for row in csv.DictReader(stream):
+            if (row.get("Scope") or "").strip() != "GLOBAL":
+                continue
+            metric = (row.get("Metric") or "").strip()
+            if metric in required:
+                found[metric] = parse_integer(row.get("Value", ""), metric)
+    if set(found) != required:
+        raise ModuleError("D4_REQUIRED_GLOBAL_METRICS")
+    if found["package_file_count"] != 6:
+        raise ModuleError("D4_PACKAGE_FILE_COUNT")
+    if found["package_error_count"] != 0:
+        raise ModuleError("D4_PACKAGE_ERROR_COUNT")
+    if found["frame_view_signal_count"] != signal_count:
+        raise ModuleError("D4_SIGNAL_COUNT")
+    return found
+
+
+def inspect_manifest(path: Path) -> Dict[str, object]:
+    """Validate D5 as a portable object and retain only safe identity fields."""
+
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        raise ModuleError("D5_JSON") from exc
+    if not isinstance(manifest, dict):
+        raise ModuleError("D5_TYPE")
+    serialized = json.dumps(manifest, ensure_ascii=False)
+    forbidden = ("C:\\\\", "/Users/", "\\\\Users\\\\", "/home/")
+    if any(marker in serialized for marker in forbidden):
+        raise ModuleError("D5_ABSOLUTE_PATH")
+    identity_fields = (
+        "ContractVersion",
+        "DatasetId",
+        "RunId",
+        "SegmentId",
+        "SourceId",
+        "ProcessingMode",
+        "Status",
+    )
+    return {
+        field: manifest[field]
+        for field in identity_fields
+        if field in manifest
+    }
+
+
+def inspect_review_view(frame_path: Path, review_path: Path) -> int:
+    """Require D6 to remain a row-aligned, FrameCount-led subset of D2."""
+
+    frame_header = read_header(frame_path)
+    review_header = read_header(review_path)
+    if not review_header or review_header[0] != "FrameCount":
+        raise ModuleError("D6_FIRST_COLUMN")
+    if any(column not in frame_header for column in review_header):
+        raise ModuleError("D6_NOT_D2_SUBSET")
+    rows = 0
+    with frame_path.open(
+        "r",
+        encoding="utf-8-sig",
+        newline="",
+    ) as frame_stream, review_path.open(
+        "r",
+        encoding="utf-8-sig",
+        newline="",
+    ) as review_stream:
+        frame_reader = csv.DictReader(frame_stream)
+        review_reader = csv.DictReader(review_stream)
+        while True:
+            frame_row = next(frame_reader, None)
+            review_row = next(review_reader, None)
+            if frame_row is None or review_row is None:
+                if frame_row is not None or review_row is not None:
+                    raise ModuleError("D6_ROW_COUNT")
+                break
+            for column in review_header:
+                if (frame_row.get(column) or "") != (review_row.get(column) or ""):
+                    raise ModuleError("D6_VALUE_MISMATCH")
+            rows += 1
+    return rows
+
+
+def package_file_records(files: Mapping[str, Path]) -> Tuple[List[Dict[str, object]], Dict[str, Tuple[int, int]]]:
+    """Hash every public package file and capture concurrent-mutation state."""
+
+    records: List[Dict[str, object]] = []
+    states: Dict[str, Tuple[int, int]] = {}
+    for name in PACKAGE_NAMES:
+        path = files[name]
+        states[name] = file_state(path)
+        records.append(
+            {
+                "Basename": name,
+                "Bytes": path.stat().st_size,
+                "Sha256": sha256_file(path),
+            }
+        )
+    return records, states
+
+
+def package_fingerprint(records: Sequence[Mapping[str, object]]) -> str:
+    """Bind the exact six-file identities into one compact fingerprint."""
+
+    digest = hashlib.sha256()
+    for record in sorted(records, key=lambda item: str(item["Basename"])):
+        digest.update(str(record["Basename"]).encode("utf-8"))
+        digest.update(str(record["Sha256"]).encode("ascii"))
+        digest.update(str(record["Bytes"]).encode("ascii"))
+    return digest.hexdigest()
+
+
+def ensure_states_unchanged(
+    files: Mapping[str, Path],
+    states: Mapping[str, Tuple[int, int]],
+) -> None:
+    """Reject a package changed concurrently during the inspection."""
+
+    for name, expected in states.items():
+        if file_state(files[name]) != expected:
+            raise ModuleError("INPUT_CHANGED_" + name)
+
+
+def inspect_package(input_root: Path) -> Tuple[Dict[str, object], List[Dict[str, str]]]:
+    """Validate all six public U001 files and return governed intake evidence."""
+
+    files = find_package_files(input_root)
+    records, states = package_file_records(files)
+    require_columns(read_header(files[PACKAGE_NAMES[0]]), D1_REQUIRED, "D1")
+    frame = inspect_frame_values(files[PACKAGE_NAMES[1]])
+    inventory, included = inspect_catalog(files[PACKAGE_NAMES[2]])
+    if included != frame["SignalGroups"]:
+        raise ModuleError("D2_D3_SIGNAL_ORDER")
+    quality = inspect_quality(files[PACKAGE_NAMES[3]], len(included))
+    identity = inspect_manifest(files[PACKAGE_NAMES[4]])
+    review_rows = inspect_review_view(
+        files[PACKAGE_NAMES[1]],
+        files[PACKAGE_NAMES[5]],
+    )
+    if review_rows != frame["FrameRows"]:
+        raise ModuleError("D6_FRAME_ROWS")
+    ensure_states_unchanged(files, states)
+    summary: Dict[str, object] = {
+        "Interface": "U001_CONTROLLED_PROFILE_SIX_FILE_PACKAGE",
+        "InterfaceVersion": "0.1",
+        "U001Contract": "U001_UNIFIED_DATA_CONTRACT_V0_1",
+        "InputPackageBasename": input_root.name,
+        "PackageFingerprintSha256": package_fingerprint(records),
+        "Files": records,
+        "FrameDomain": frame,
+        "SignalCount": len(inventory),
+        "QualityGate": quality,
+        "U001ManifestIdentity": identity,
+        "Status": "INTAKE_ACCEPTED",
+        "Warnings": [],
+        "Prohibitions": [
+            "Radar is not asserted as ground truth",
+            "No target selection was performed",
+            "No missing value was converted to zero",
+            "No discrepancy, baseline, evidence, or candidate was calculated",
+        ],
+    }
+    return summary, inventory
+
+
+def write_inventory(path: Path, rows: Iterable[Mapping[str, str]]) -> int:
+    """Write the compact D3-derived inventory used by downstream Modules."""
+
+    count = 0
+    with path.open("x", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=INVENTORY_COLUMNS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({column: row.get(column, "") for column in INVENTORY_COLUMNS})
+            count += 1
+    return count
+
+
+def write_artifact_package(
+    request: Mapping[str, object],
+    summary: Mapping[str, object],
+    inventory: Sequence[Mapping[str, str]],
+) -> str:
+    """Write one candidate Artifact package under the assigned staging root."""
+
+    output_root = Path(str(request["OutputRoot"]))
+    package_root = output_root / "artifact_01"
+    package_root.mkdir(parents=True)
+    summary_path = package_root / "u001_intake_summary.json"
+    summary_path.write_bytes(canonical_bytes(summary))
+    inventory_path = package_root / "u001_signal_inventory.csv"
+    inventory_rows = write_inventory(inventory_path, inventory)
+    artifact_id = (
+        str(request["RunId"])
+        + "."
+        + MODULE_ID
+        + "."
+        + str(request["Sequence"])
+    )
+    payloads = [
+        {
+            "RelativePath": summary_path.name,
+            "MediaType": "application/json",
+            "RowCount": None,
+            "Sha256": sha256_file(summary_path),
+            "ByteSize": summary_path.stat().st_size,
+            "PayloadKind": "PRIMARY",
+        },
+        {
+            "RelativePath": inventory_path.name,
+            "MediaType": "text/csv",
+            "RowCount": inventory_rows,
+            "Sha256": sha256_file(inventory_path),
+            "ByteSize": inventory_path.stat().st_size,
+            "PayloadKind": "AUXILIARY",
+        },
+    ]
+    manifest = {
+        "ContractVersion": CONTRACT_VERSION,
+        "ArtifactId": artifact_id,
+        "ArtifactType": ARTIFACT_TYPE,
+        "SchemaId": "U002_U001_INTAKE_SUMMARY",
+        "SchemaVersion": "0.1",
+        "RunId": request["RunId"],
+        "Stage": request["Stage"],
+        "ProducerModuleId": MODULE_ID,
+        "ProducerModuleVersion": MODULE_VERSION,
+        "ParentArtifactIds": [],
+        "Payloads": payloads,
+        "Metadata": {
+            "PackageFingerprintSha256": summary["PackageFingerprintSha256"],
+            "FrameRows": summary["FrameDomain"]["FrameRows"],
+            "SignalCount": summary["SignalCount"],
+            "EngineeringClaim": "STRUCTURAL_AND_SEMANTIC_INTAKE_ONLY",
+        },
+    }
+    (package_root / "artifact_manifest.json").write_bytes(
+        canonical_bytes(manifest)
+    )
+    return package_root.name
+
+
+def validate_request(request: Mapping[str, object]) -> None:
+    """Require the exact runtime identity selected by the frozen Run Plan."""
+
+    if request.get("Protocol") != PROTOCOL:
+        raise ModuleError("REQUEST_PROTOCOL")
+    if request.get("ProtocolVersion") != PROTOCOL_VERSION:
+        raise ModuleError("REQUEST_PROTOCOL_VERSION")
+    if request.get("ContractVersion") != CONTRACT_VERSION:
+        raise ModuleError("REQUEST_CONTRACT")
+    if request.get("ModuleId") != MODULE_ID:
+        raise ModuleError("REQUEST_MODULE_ID")
+    if request.get("ModuleVersion") != MODULE_VERSION:
+        raise ModuleError("REQUEST_MODULE_VERSION")
+    if request.get("Stage") != "S0":
+        raise ModuleError("REQUEST_STAGE")
+    if request.get("ExpectedOutputTypes") != [ARTIFACT_TYPE]:
+        raise ModuleError("REQUEST_OUTPUT_TYPE")
+    if request.get("InputArtifacts") != []:
+        raise ModuleError("REQUEST_INPUT_ARTIFACTS")
+
+
+def runtime_result(
+    request: Mapping[str, object],
+    package_name: str,
+    summary: Mapping[str, object],
+) -> Dict[str, object]:
+    """Build the exact result envelope expected by the frozen Executor."""
+
+    return {
+        "Protocol": PROTOCOL,
+        "ProtocolVersion": PROTOCOL_VERSION,
+        "ContractVersion": CONTRACT_VERSION,
+        "RunId": request["RunId"],
+        "Sequence": request["Sequence"],
+        "Stage": request["Stage"],
+        "ModuleId": MODULE_ID,
+        "ModuleVersion": MODULE_VERSION,
+        "Status": "SUCCEEDED",
+        "ProducedPackages": [package_name],
+        "Capsule": (
+            "U22B1AM N-F6-R"
+            + str(summary["FrameDomain"]["FrameRows"])
+            + "-K"
+            + str(summary["SignalCount"])
+            + "-Q1-X0 C-0"
+        ),
+        "Diagnostics": [],
+    }
+
+
+def main(argv: Sequence[str] = None) -> int:
+    """Inspect one U001 package and return one governed candidate Artifact."""
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--request-json", required=True)
+    parser.add_argument("--result-json", required=True)
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        request = json.loads(
+            Path(args.request_json).read_text(encoding="utf-8-sig")
+        )
+        if not isinstance(request, dict):
+            raise ModuleError("REQUEST_TYPE")
+        validate_request(request)
+        input_root = Path(str(request["InputPackage"]))
+        summary, inventory = inspect_package(input_root)
+        package_name = write_artifact_package(request, summary, inventory)
+        result = runtime_result(request, package_name, summary)
+        Path(args.result_json).write_bytes(canonical_bytes(result))
+        print(result["Capsule"])
+        return 0
+    except ModuleError as exc:
+        print("U22B1AM N-F0-R0-K0-Q0-X1 C-7 R-" + stable(exc))
+        return 7
+    except Exception as exc:
+        print(
+            "U22B1AM N-F0-R0-K0-Q0-X1 C-7 R-"
+            + stable(exc.__class__.__name__)
+        )
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+SELFTEST_SOURCE = r'''#!/usr/bin/env python3
+"""Self-test the S0 U001 Controlled Profile Intake Module."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import importlib.util
+import json
+from pathlib import Path
+import tempfile
+
+
+D1_REQUIRED = (
+    "SourceRowIndex",
+    "SourceId",
+    "SourceType",
+    "ClockDomain",
+    "NativeTimestamp",
+    "NativeSequence",
+    "FrameCount",
+    "SyncKey",
+    "SyncQuality",
+    "FrameAssignmentStatus",
+    "FrameAssignmentAgeRows",
+    "CAN_ID",
+    "Channel",
+    "MessageName",
+    "CanonicalName",
+    "RawCode",
+    "PhysicalValue",
+    "ValueLabel",
+    "ValueKind",
+    "SignalRole",
+    "Valid",
+    "MissingReason",
+    "MessageCounter",
+    "SourceDateTime",
+    "SourceTimeUs",
+)
+D3_REQUIRED = (
+    "CanonicalName",
+    "CAN_ID",
+    "Channel",
+    "MessageName",
+    "SignalName",
+    "Unit",
+    "ValueKind",
+    "SignalRole",
+    "UpdateMode",
+    "StorageDtype",
+    "StartBit",
+    "BitLength",
+    "ByteOrder",
+    "Signed",
+    "Scale",
+    "Offset",
+    "DBCMinimum",
+    "DBCMaximum",
+    "EnumerationMap",
+    "ValidityRule",
+    "ValiditySourceSignal",
+    "ValidityExpression",
+    "WithinFramePolicy",
+    "HoldPolicy",
+    "MaxAgeFrames",
+    "NominalRateHz",
+    "RequiredForAnalysis",
+    "IncludeInFrameView",
+    "IncludeInReviewView",
+    "Notes",
+)
+D4_REQUIRED = (
+    "Scope",
+    "CanonicalName",
+    "Metric",
+    "Value",
+    "Unit",
+    "SourceGate",
+    "Status",
+    "Notes",
+)
+
+
+def write_csv(path, header, rows):
+    """Write one deterministic fixture CSV."""
+
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(header)
+        writer.writerows(rows)
+
+
+def create_package(root):
+    """Create one small but contract-shaped U001 six-file package."""
+
+    root.mkdir()
+    d1 = {name: "" for name in D1_REQUIRED}
+    d1.update(
+        {
+            "SourceRowIndex": "1",
+            "SourceId": "SYNTHETIC_SOURCE",
+            "SourceType": "CAN",
+            "ClockDomain": "FRAMECOUNT_VIDEO",
+            "NativeSequence": "1",
+            "FrameCount": "10",
+            "SyncKey": "10",
+            "SyncQuality": "EXACT",
+            "FrameAssignmentStatus": "ASSIGNED",
+            "FrameAssignmentAgeRows": "0",
+            "CAN_ID": "0x380",
+            "Channel": "1",
+            "MessageName": "Radar",
+            "CanonicalName": "RADAR_DISTANCE",
+            "PhysicalValue": "12.0",
+            "ValueKind": "FLOAT",
+            "SignalRole": "MEASUREMENT",
+            "Valid": "1",
+            "MissingReason": "VALID_UPDATE",
+        }
+    )
+    write_csv(
+        root / "u001_decoded_updates.csv",
+        D1_REQUIRED,
+        [[d1[name] for name in D1_REQUIRED]],
+    )
+    groups = ("RADAR_DISTANCE", "CAMERA_DISTANCE")
+    leading = ("FrameCount", "SourceRowFirst", "SourceRowLast", "SourceUpdateCount")
+    suffixes = (
+        "__value",
+        "__label",
+        "__updated",
+        "__update_count",
+        "__age",
+        "__valid",
+        "__missing_reason",
+    )
+    header = list(leading)
+    for group in groups:
+        header.extend(group + suffix for suffix in suffixes)
+    rows = []
+    for frame, radar, camera in ((10, "12", "10"), (11, "13", "11"), (12, "14", "12")):
+        row = [frame, frame, frame, 2]
+        for value in (radar, camera):
+            row.extend([value, "", 1, 1, 0, 1, "VALID_UPDATE"])
+        rows.append(row)
+    write_csv(root / "u001_frame_values.csv", header, rows)
+    catalog_rows = []
+    for name, can_id, channel, included in (
+        (groups[0], "0x380", "1", "1"),
+        (groups[1], "0x221", "2", "1"),
+        ("IMU_YAW_RATE", "0x100", "1", "0"),
+    ):
+        record = {column: "" for column in D3_REQUIRED}
+        record.update(
+            {
+                "CanonicalName": name,
+                "CAN_ID": can_id,
+                "Channel": channel,
+                "MessageName": name,
+                "SignalName": "Distance",
+                "Unit": "m",
+                "ValueKind": "FLOAT",
+                "SignalRole": "MEASUREMENT",
+                "UpdateMode": "PERIODIC",
+                "StorageDtype": "float64",
+                "WithinFramePolicy": "LAST_UPDATE",
+                "HoldPolicy": "NONE",
+                "RequiredForAnalysis": included,
+                "IncludeInFrameView": included,
+                "IncludeInReviewView": included,
+            }
+        )
+        catalog_rows.append([record[column] for column in D3_REQUIRED])
+    write_csv(root / "u001_signal_catalog.csv", D3_REQUIRED, catalog_rows)
+    write_csv(
+        root / "u001_quality_report.csv",
+        D4_REQUIRED,
+        [
+            ["GLOBAL", "", "package_file_count", "6", "files", "G7", "PASS", ""],
+            ["GLOBAL", "", "package_error_count", "0", "errors", "G7", "PASS", ""],
+            ["GLOBAL", "", "frame_view_signal_count", "2", "signals", "G7", "PASS", ""],
+        ],
+    )
+    (root / "u001_run_manifest.json").write_text(
+        json.dumps(
+            {
+                "ContractVersion": "U001_UNIFIED_DATA_CONTRACT_V0_1",
+                "DatasetId": "SYNTHETIC",
+                "RunId": "SYNTHETIC_U001",
+                "SourceId": "SYNTHETIC_SOURCE",
+                "Status": "SUCCESS",
+            }
+        ),
+        encoding="utf-8",
+    )
+    review_header = ["FrameCount", "RADAR_DISTANCE__value", "CAMERA_DISTANCE__value"]
+    review_rows = [[row[0], row[4], row[11]] for row in rows]
+    write_csv(root / "u001_review_view.csv", review_header, review_rows)
+
+
+def load_implementation(module_root):
+    """Load only the implementation belonging to this qualified Module root."""
+
+    path = module_root / "implementation.py"
+    spec = importlib.util.spec_from_file_location("u22b1a_impl", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def main():
+    """Exercise positive and fail-closed U001 intake semantics."""
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--module-root", required=True)
+    parser.add_argument("--workspace-root", required=True)
+    args = parser.parse_args()
+    module_root = Path(args.module_root).resolve()
+    implementation = load_implementation(module_root)
+    checks = []
+    with tempfile.TemporaryDirectory(prefix="u22b1a_module_selftest_") as temporary:
+        package = Path(temporary) / "U001_PACKAGE"
+        create_package(package)
+        summary, inventory = implementation.inspect_package(package)
+        assert summary["Status"] == "INTAKE_ACCEPTED"
+        checks.append(True)
+        assert summary["FrameDomain"]["FrameRows"] == 3
+        checks.append(True)
+        assert summary["FrameDomain"]["FrameMin"] == 10
+        checks.append(True)
+        assert summary["FrameDomain"]["FrameMax"] == 12
+        checks.append(True)
+        assert summary["SignalCount"] == 3
+        checks.append(True)
+        assert len(inventory) == 3
+        checks.append(True)
+        assert summary["QualityGate"]["package_error_count"] == 0
+        checks.append(True)
+        assert len(summary["Files"]) == 6
+        checks.append(True)
+        assert len(summary["PackageFingerprintSha256"]) == 64
+        checks.append(True)
+        bad_quality = package / "u001_quality_report.csv"
+        text = bad_quality.read_text(encoding="utf-8")
+        bad_quality.write_text(
+            text.replace("package_error_count,0", "package_error_count,1"),
+            encoding="utf-8",
+        )
+        rejected = False
+        try:
+            implementation.inspect_package(package)
+        except implementation.ModuleError as exc:
+            rejected = str(exc) == "D4_PACKAGE_ERROR_COUNT"
+        assert rejected
+        checks.append(True)
+    assert len(checks) == 10
+    print("U22B1AM-ST N-T10-F6-K3-R3-X0 C-0")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+def canonical_bytes(value: object) -> bytes:
+    """Serialize one installed JSON document deterministically."""
+
+    text = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+        allow_nan=False,
+    )
+    return (text + "\n").encode("utf-8")
+
+
+def sha256_bytes(value: bytes) -> str:
+    """Hash one installed file payload."""
+
+    return hashlib.sha256(value).hexdigest()
+
+
+def regular_file(path: Path) -> bool:
+    """Accept ordinary installer and foundation files only."""
+
+    return path.is_file() and not path.is_symlink()
+
+
+def require_workspace(path: Path) -> Path:
+    """Validate the fixed U002 workspace identity."""
+
+    root = path.resolve()
+    if not root.is_dir() or root.name != "U-UDP002":
+        raise InstallerError("WORKSPACE_ROOT")
+    return root
+
+
+def module_files() -> Dict[str, bytes]:
+    """Return the complete deterministic four-file Module package."""
+
+    return {
+        "module_manifest.json": canonical_bytes(MODULE_MANIFEST),
+        "algorithm_card.json": canonical_bytes(ALGORITHM_CARD),
+        "implementation.py": IMPLEMENTATION_SOURCE.encode("utf-8"),
+        "selftest.py": SELFTEST_SOURCE.encode("utf-8"),
+    }
+
+
+def audit_foundation(workspace_root: Path) -> None:
+    """Require the accepted A7 Foundation before installing a real Module."""
+
+    auditor = workspace_root / FREEZE_AUDITOR_RELATIVE
+    if not regular_file(auditor):
+        raise InstallerError("FREEZE_AUDITOR_MISSING")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(auditor),
+            "--audit-freeze",
+            "--workspace-root",
+            str(workspace_root),
+        ],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    if result.returncode != 0 or "N-F11-N8-V1-X0 C-0" not in result.stdout:
+        raise InstallerError("FOUNDATION_AUDIT")
+
+
+def install_module(workspace_root: Path) -> str:
+    """Install the deterministic Module package without touching frozen Core."""
+
+    audit_foundation(workspace_root)
+    destination = workspace_root / MODULE_RELATIVE
+    files = module_files()
+    if destination.exists():
+        if not destination.is_dir() or destination.is_symlink():
+            raise InstallerError("MODULE_DESTINATION_TYPE")
+        for name, content in files.items():
+            path = destination / name
+            if not regular_file(path) or path.read_bytes() != content:
+                raise InstallerError("MODULE_INSTALL_CONFLICT_" + name)
+        if set(path.name for path in destination.iterdir()) != set(files):
+            raise InstallerError("MODULE_INSTALL_EXTRA_FILE")
+        return "U22B1AI N-F4-H1-R1-X0 C-0"
+    temporary = destination.with_name(destination.name + ".installing")
+    if temporary.exists():
+        raise InstallerError("MODULE_INSTALL_TEMP_EXISTS")
+    temporary.mkdir(parents=True)
+    try:
+        for name, content in files.items():
+            (temporary / name).write_bytes(content)
+        os.replace(temporary, destination)
+    except Exception:
+        if temporary.exists():
+            shutil.rmtree(temporary, ignore_errors=True)
+        raise
+    for name, content in files.items():
+        if (destination / name).read_bytes() != content:
+            raise InstallerError("MODULE_INSTALL_IDENTITY_" + name)
+    return "U22B1AI N-F4-H1-R0-X0 C-0"
+
+
+def self_test() -> str:
+    """Build the Module twice and execute its installed self-test."""
+
+    checks = []
+    files = module_files()
+    if len(files) != 4:
+        raise InstallerError("SELFTEST_FILE_COUNT")
+    checks.append(True)
+    if MODULE_MANIFEST["Stage"] != "S0":
+        raise InstallerError("SELFTEST_STAGE")
+    checks.append(True)
+    if MODULE_MANIFEST["ProvidesArtifacts"] != ["U001_INTAKE_ACCEPTED"]:
+        raise InstallerError("SELFTEST_ARTIFACT")
+    checks.append(True)
+    if MODULE_MANIFEST["ConfigurationSchema"] is not None:
+        raise InstallerError("SELFTEST_CONFIGURATION")
+    checks.append(True)
+    if "def inspect_package(" not in IMPLEMENTATION_SOURCE:
+        raise InstallerError("SELFTEST_INTERFACE")
+    checks.append(True)
+    if "Radar is not asserted as ground truth" not in IMPLEMENTATION_SOURCE:
+        raise InstallerError("SELFTEST_CLAIM_BOUNDARY")
+    checks.append(True)
+    if any(len(sha256_bytes(content)) != 64 for content in files.values()):
+        raise InstallerError("SELFTEST_HASH")
+    checks.append(True)
+    with tempfile.TemporaryDirectory(prefix="u22b1a_installer_selftest_") as temporary:
+        root = Path(temporary) / "U-UDP002"
+        module_root = root / MODULE_RELATIVE
+        module_root.mkdir(parents=True)
+        for name, content in files.items():
+            (module_root / name).write_bytes(content)
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(module_root / "selftest.py"),
+                "--module-root",
+                str(module_root),
+                "--workspace-root",
+                str(root),
+            ],
+            text=True,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+        if completed.returncode != 0 or "N-T10-F6-K3-R3-X0 C-0" not in completed.stdout:
+            raise InstallerError("SELFTEST_MODULE_" + completed.stdout.strip())
+        checks.append(True)
+    if len(checks) != 8:
+        raise InstallerError("SELFTEST_COUNT")
+    return "U22B1AI-ST N-T8-F4-X0 C-0"
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    """Create explicit installer and self-test modes."""
+
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--install-module", action="store_true")
+    parser.add_argument("--workspace-root")
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] = None) -> int:
+    """Install only the deterministic U22B1A Module package."""
+
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        if args.self_test:
+            print(self_test())
+            return 0
+        if args.workspace_root is None:
+            raise InstallerError("WORKSPACE_ROOT_REQUIRED")
+        root = require_workspace(Path(args.workspace_root))
+        print(install_module(root))
+        return 0
+    except InstallerError as exc:
+        print("U22B1AI N-F0-H0-R0-X1 C-7 R-" + str(exc))
+        return 7
+    except Exception as exc:
+        print(
+            "U22B1AI N-F0-H0-R0-X1 C-7 R-"
+            + exc.__class__.__name__.upper()
+        )
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
