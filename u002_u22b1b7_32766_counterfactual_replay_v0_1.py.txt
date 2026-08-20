@@ -1,0 +1,930 @@
+#!/usr/bin/env python3
+"""Replay the accepted S1 implementation after masking only 327.66 sentinels."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+import re
+import sys
+import tempfile
+from types import ModuleType
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+
+PROGRAM_ID = "U002-U22B1B7-32766-COUNTERFACTUAL-REPLAY"
+VERSION = "0.1"
+MODULE_ID = "CameraRadar.S1.CameraTargetContinuityArbitration"
+MODULE_VERSION = "0.1.0"
+RUN_RECEIPT_NAME = "u22b1b4_normalized_retry_run_receipt_v0_1.json"
+ARTIFACT_INDEX_NAME = "run_artifact_index_v0_1.json"
+S1_ARTIFACT_TYPE = "CAMERA_TARGET_RECONSTRUCTION"
+MODULE_RECEIPT_NAME = "u22b1b2_camera_target_reconstruction_acceptance_receipt_v0_1.json"
+WINDOW_START = 52640
+WINDOW_END = 52860
+SENTINEL_VALUE = 327.66
+SENTINEL_TOLERANCE = 1e-6
+TRACE_NAME = "u22b1b7_32766_counterfactual_trace_v0_1.csv"
+SUMMARY_NAME = "u22b1b7_32766_counterfactual_summary_v0_1.json"
+DIAGNOSTIC_RELATIVE = Path("04_TEMP/u22b1b7_counterfactual_diagnostic_v0_1.json")
+
+ROLE_1 = "CAMERA_1_DISTANCE"
+ROLE_3 = "CAMERA_3_DISTANCE"
+SOURCE_COLUMNS = (
+    "FrameCount",
+    "Camera1Distance",
+    "Camera1Eligible",
+    "Camera1Age",
+    "Camera3Distance",
+    "Camera3Eligible",
+    "Camera3Age",
+    "ProvisionalCameraDistance",
+    "CanonicalCameraDistance",
+    "CanonicalCameraValid",
+    "SelectedCameraRole",
+    "SelectionStatus",
+    "SelectionReason",
+    "SelectionChanged",
+    "ContinuityCostCamera1",
+    "ContinuityCostCamera3",
+    "CostMargin",
+    "SegmentId",
+)
+SEMANTIC_REPLAY_COLUMNS = SOURCE_COLUMNS[7:]
+TRACE_COLUMNS = (
+    "FrameCount",
+    "Camera1Distance",
+    "OriginalCamera1Eligible",
+    "ReplayCamera1Eligible",
+    "Camera3Distance",
+    "OriginalCamera3Eligible",
+    "ReplayCamera3Eligible",
+    "OriginalCanonicalCameraDistance",
+    "OriginalCanonicalCameraValid",
+    "OriginalSelectionStatus",
+    "OriginalSelectionReason",
+    "ReplayCanonicalCameraDistance",
+    "ReplayCanonicalCameraValid",
+    "ReplaySelectionStatus",
+    "ReplaySelectionReason",
+    "ReplaySelectedCameraRole",
+    "ReplaySegmentId",
+)
+
+
+class ReplayError(RuntimeError):
+    """Represent one deterministic fail-closed replay error."""
+
+    def __init__(self, reason: str, detail: object = "NA"):
+        self.reason = stable(reason, 56)
+        self.detail = stable(detail, 96)
+        super().__init__(self.reason)
+
+
+def stable(value: object, limit: int = 80) -> str:
+    """Convert arbitrary diagnostic text into one compact capsule token."""
+
+    normalized = re.sub(r"[^A-Z0-9_]+", "_", str(value).upper())
+    return normalized.strip("_")[:limit] or "NA"
+
+
+def regular_file(path: Path) -> bool:
+    """Accept ordinary files only."""
+
+    return path.is_file() and not path.is_symlink()
+
+
+def require_workspace(path: Path) -> Path:
+    """Require the fixed U002 workspace identity."""
+
+    root = path.resolve()
+    if not root.is_dir() or root.name != "U-UDP002":
+        raise ReplayError("WORKSPACE_ROOT")
+    return root
+
+
+def load_json(path: Path, reason: str) -> Dict[str, object]:
+    """Load one JSON object."""
+
+    if not regular_file(path):
+        raise ReplayError(reason + "_MISSING", path.name)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        raise ReplayError(reason + "_JSON", path.name) from exc
+    if not isinstance(value, dict):
+        raise ReplayError(reason + "_TYPE", path.name)
+    return value
+
+
+def canonical_bytes(value: object) -> bytes:
+    """Serialize deterministic JSON evidence."""
+
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def sha256_file(path: Path) -> str:
+    """Hash one file with bounded memory."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def write_exact(path: Path, payload: bytes) -> None:
+    """Create evidence once or accept an identical replay."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if not regular_file(path) or path.read_bytes() != payload:
+            raise ReplayError("OUTPUT_CONFLICT", path.name)
+        return
+    path.write_bytes(payload)
+
+
+def discover_b1b4(root: Path) -> Tuple[Path, Dict[str, object]]:
+    """Select the largest completed B1B4 normalized Retry Run."""
+
+    candidates = []
+    for path in (root / "07_OUTPUT").glob("U22B1B4_*/" + RUN_RECEIPT_NAME):
+        try:
+            receipt = load_json(path, "RUN_RECEIPT")
+            if receipt.get("Status") != "NORMALIZED_RETRY_RUN_COMPLETED":
+                continue
+            start = int(receipt.get("FrameStart"))
+            end = int(receipt.get("FrameEnd"))
+            candidates.append((end - start, path.stat().st_mtime_ns, path, receipt))
+        except Exception:
+            continue
+    if not candidates:
+        raise ReplayError("B1B4_RUN_NOT_FOUND")
+    _, _, receipt_path, receipt = max(candidates)
+    return receipt_path.parent, receipt
+
+
+def locate_s1_table(run_root: Path) -> Path:
+    """Resolve and verify the unique governed S1 reconstruction table."""
+
+    index = load_json(run_root / ARTIFACT_INDEX_NAME, "ARTIFACT_INDEX")
+    artifacts = index.get("Artifacts")
+    if not isinstance(artifacts, list):
+        raise ReplayError("ARTIFACTS_TYPE")
+    matches = [
+        item
+        for item in artifacts
+        if isinstance(item, dict) and item.get("ArtifactType") == S1_ARTIFACT_TYPE
+    ]
+    if len(matches) != 1:
+        raise ReplayError("S1_ARTIFACT_COUNT", len(matches))
+    entry = matches[0]
+    manifest_path = run_root / str(entry.get("ManifestRelativePath", ""))
+    if not regular_file(manifest_path):
+        raise ReplayError("S1_MANIFEST_MISSING")
+    if sha256_file(manifest_path) != entry.get("ManifestSha256"):
+        raise ReplayError("S1_MANIFEST_HASH")
+    manifest = load_json(manifest_path, "S1_MANIFEST")
+    payloads = manifest.get("Payloads")
+    if not isinstance(payloads, list):
+        raise ReplayError("S1_PAYLOADS_TYPE")
+    records = [
+        item
+        for item in payloads
+        if isinstance(item, dict)
+        and Path(str(item.get("RelativePath", ""))).name
+        == "camera_target_reconstruction.csv"
+    ]
+    if len(records) != 1:
+        raise ReplayError("S1_TABLE_COUNT", len(records))
+    record = records[0]
+    table_path = manifest_path.parent / str(record.get("RelativePath", ""))
+    if not regular_file(table_path):
+        raise ReplayError("S1_TABLE_MISSING")
+    if sha256_file(table_path) != record.get("Sha256"):
+        raise ReplayError("S1_TABLE_HASH")
+    return table_path
+
+
+def load_s1_configuration(run_root: Path) -> Dict[str, object]:
+    """Read the exact S1 configuration frozen in the selected B1B4 Run."""
+
+    plan = load_json(run_root / "00_CONFIG/resolved_run_plan.json", "RUN_PLAN")
+    modules = plan.get("ModulePlan")
+    if not isinstance(modules, list):
+        raise ReplayError("MODULE_PLAN_TYPE")
+    selected = [
+        item
+        for item in modules
+        if isinstance(item, dict)
+        and item.get("Stage") == "S1"
+        and item.get("ModuleId") == MODULE_ID
+    ]
+    if len(selected) != 1:
+        raise ReplayError("S1_PLAN_COUNT", len(selected))
+    configuration = selected[0].get("Configuration")
+    if not isinstance(configuration, dict):
+        raise ReplayError("S1_CONFIGURATION_TYPE")
+    return dict(configuration)
+
+
+def load_accepted_s1(root: Path) -> Tuple[ModuleType, Path, str]:
+    """Load the accepted S1 implementation only after receipt-hash verification."""
+
+    receipt_path = root / "00_CONTROL/registry" / MODULE_RECEIPT_NAME
+    receipt = load_json(receipt_path, "MODULE_RECEIPT")
+    if receipt.get("Status") != "S1_MODULE_INSTALLED_AND_QUALIFIED":
+        raise ReplayError("MODULE_RECEIPT_STATUS")
+    if receipt.get("ModuleId") != MODULE_ID:
+        raise ReplayError("MODULE_RECEIPT_ID")
+    if receipt.get("ModuleVersion") != MODULE_VERSION:
+        raise ReplayError("MODULE_RECEIPT_VERSION")
+    hashes = receipt.get("ModuleFiles")
+    if not isinstance(hashes, dict):
+        raise ReplayError("MODULE_RECEIPT_HASHES")
+    expected_hash = hashes.get("implementation.py")
+    implementation = (
+        root
+        / "01_PROGRAMS/modules/S1"
+        / MODULE_ID
+        / MODULE_VERSION
+        / "implementation.py"
+    )
+    if not regular_file(implementation):
+        raise ReplayError("MODULE_IMPLEMENTATION_MISSING")
+    observed_hash = sha256_file(implementation)
+    if observed_hash != expected_hash:
+        raise ReplayError("MODULE_IMPLEMENTATION_HASH")
+    spec = importlib.util.spec_from_file_location(
+        "u22b1b7_accepted_s1_implementation",
+        implementation,
+    )
+    if spec is None or spec.loader is None:
+        raise ReplayError("MODULE_IMPORT_SPEC")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        raise ReplayError("MODULE_IMPORT", type(exc).__name__) from exc
+    if not callable(getattr(module, "reconstruct", None)):
+        raise ReplayError("MODULE_RECONSTRUCT_MISSING")
+    return module, implementation, observed_hash
+
+
+def optional_float(value: object) -> Optional[float]:
+    """Parse one optional finite numeric field."""
+
+    text = str(value if value is not None else "").strip()
+    if not text:
+        return None
+    try:
+        result = float(text)
+    except ValueError as exc:
+        raise ReplayError("FLOAT_PARSE", text) from exc
+    if result != result or result in (float("inf"), float("-inf")):
+        return None
+    return result
+
+
+def parse_flag(value: object, field: str) -> bool:
+    """Parse one controlled zero-or-one flag."""
+
+    text = str(value if value is not None else "").strip()
+    if text == "1":
+        return True
+    if text == "0":
+        return False
+    raise ReplayError("FLAG_PARSE", field)
+
+
+def is_sentinel(value: Optional[float]) -> bool:
+    """Identify only the approved Camera no-target sentinel for this experiment."""
+
+    return value is not None and abs(value - SENTINEL_VALUE) <= SENTINEL_TOLERANCE
+
+
+def read_source_rows(path: Path) -> List[Dict[str, str]]:
+    """Read the governed S1 table and enforce strict FrameCount order."""
+
+    rows: List[Dict[str, str]] = []
+    previous: Optional[int] = None
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        header = reader.fieldnames or []
+        missing = [name for name in SOURCE_COLUMNS if name not in header]
+        if missing:
+            raise ReplayError("SOURCE_COLUMN_MISSING", missing[0])
+        for row in reader:
+            try:
+                frame = int(row["FrameCount"])
+            except Exception as exc:
+                raise ReplayError("FRAMECOUNT_PARSE") from exc
+            if previous is not None and frame <= previous:
+                raise ReplayError("FRAMECOUNT_NOT_STRICT", frame)
+            previous = frame
+            rows.append({name: row.get(name, "") for name in SOURCE_COLUMNS})
+    if not rows:
+        raise ReplayError("SOURCE_TABLE_EMPTY")
+    return rows
+
+
+def normalized_records(
+    rows: Sequence[Mapping[str, str]],
+    mask_sentinel: bool,
+) -> Tuple[List[Dict[str, object]], Dict[str, int]]:
+    """Recover selector records and optionally mask only eligible 327.66 values."""
+
+    records: List[Dict[str, object]] = []
+    counts = {
+        "Camera1MaskedRows": 0,
+        "Camera3MaskedRows": 0,
+        "Camera1WindowMaskedRows": 0,
+        "Camera3WindowMaskedRows": 0,
+    }
+    for row in rows:
+        frame = int(row["FrameCount"])
+        record: Dict[str, object] = {"FrameCount": frame}
+        for role, prefix in ((ROLE_1, "Camera1"), (ROLE_3, "Camera3")):
+            value = optional_float(row[prefix + "Distance"])
+            original_eligible = parse_flag(row[prefix + "Eligible"], prefix)
+            masked = bool(mask_sentinel and original_eligible and is_sentinel(value))
+            eligible = original_eligible and not masked
+            if masked:
+                counts[prefix + "MaskedRows"] += 1
+                if WINDOW_START <= frame <= WINDOW_END:
+                    counts[prefix + "WindowMaskedRows"] += 1
+            try:
+                age = int(row[prefix + "Age"])
+            except Exception as exc:
+                raise ReplayError("AGE_PARSE", prefix) from exc
+            record[role] = {
+                "Value": value,
+                "Age": age,
+                "Valid": eligible,
+                "Eligible": eligible,
+            }
+        records.append(record)
+    return records, counts
+
+
+def normalized_text(value: object) -> str:
+    """Normalize runtime scalars for deterministic semantic comparison."""
+
+    if value is None:
+        return ""
+    return str(value)
+
+
+def verify_original_replay(
+    source_rows: Sequence[Mapping[str, str]],
+    replay_rows: Sequence[Mapping[str, object]],
+) -> None:
+    """Require an exact semantic replay before accepting the counterfactual."""
+
+    if len(source_rows) != len(replay_rows):
+        raise ReplayError("ORIGINAL_REPLAY_ROW_COUNT")
+    for index, (source, replay) in enumerate(zip(source_rows, replay_rows)):
+        for column in SEMANTIC_REPLAY_COLUMNS:
+            observed = normalized_text(replay.get(column, ""))
+            expected = normalized_text(source.get(column, ""))
+            if observed != expected:
+                raise ReplayError(
+                    "ORIGINAL_REPLAY_MISMATCH",
+                    f"{index}_{column}_{expected}_{observed}",
+                )
+
+
+def window_rows(
+    rows: Sequence[Mapping[str, object]],
+) -> List[Mapping[str, object]]:
+    """Return the fixed Q6 investigation window."""
+
+    selected = [
+        row
+        for row in rows
+        if WINDOW_START <= int(row["FrameCount"]) <= WINDOW_END
+    ]
+    if not selected:
+        raise ReplayError("WINDOW_EMPTY")
+    return selected
+
+
+def invalid_episodes(
+    rows: Sequence[Mapping[str, object]],
+) -> List[Dict[str, Optional[int]]]:
+    """Enumerate every canonical-invalid episode in one bounded window."""
+
+    episodes: List[Dict[str, Optional[int]]] = []
+    start: Optional[int] = None
+    end: Optional[int] = None
+    for row in rows:
+        frame = int(row["FrameCount"])
+        valid = str(row["CanonicalCameraValid"]) == "1"
+        if not valid:
+            if start is None:
+                start = frame
+            end = frame
+            continue
+        if start is not None:
+            episodes.append({
+                "StartFrame": start,
+                "EndFrame": end,
+                "RecoveryFrame": frame,
+                "InvalidRows": int(end) - start + 1,
+            })
+            start = None
+            end = None
+    if start is not None:
+        episodes.append({
+            "StartFrame": start,
+            "EndFrame": end,
+            "RecoveryFrame": None,
+            "InvalidRows": int(end) - start + 1,
+        })
+    return episodes
+
+
+def longest_completed_episode(
+    rows: Sequence[Mapping[str, object]],
+) -> Dict[str, Optional[int]]:
+    """Select the longest completed canonical-invalid episode."""
+
+    completed = [
+        item for item in invalid_episodes(rows)
+        if item["RecoveryFrame"] is not None
+    ]
+    if not completed:
+        raise ReplayError("OLD_COMPLETED_EPISODE_NOT_FOUND")
+    return max(
+        completed,
+        key=lambda item: (int(item["InvalidRows"]), int(item["StartFrame"])),
+    )
+
+
+def counterfactual_episode_at(
+    rows: Sequence[Mapping[str, object]],
+    original_loss_frame: int,
+) -> Dict[str, Optional[int]]:
+    """Measure counterfactual validity starting at the original loss Frame."""
+
+    indexed = {int(row["FrameCount"]): row for row in rows}
+    if original_loss_frame not in indexed:
+        raise ReplayError("ORIGINAL_LOSS_NOT_IN_REPLAY")
+    if str(indexed[original_loss_frame]["CanonicalCameraValid"]) == "1":
+        return {
+            "StartFrame": None,
+            "EndFrame": None,
+            "RecoveryFrame": original_loss_frame,
+            "InvalidRows": 0,
+        }
+    sequence = [
+        row for row in rows
+        if int(row["FrameCount"]) >= original_loss_frame
+    ]
+    end = original_loss_frame
+    for row in sequence:
+        frame = int(row["FrameCount"])
+        if str(row["CanonicalCameraValid"]) == "1":
+            return {
+                "StartFrame": original_loss_frame,
+                "EndFrame": end,
+                "RecoveryFrame": frame,
+                "InvalidRows": frame - original_loss_frame,
+            }
+        end = frame
+    return {
+        "StartFrame": original_loss_frame,
+        "EndFrame": end,
+        "RecoveryFrame": None,
+        "InvalidRows": end - original_loss_frame + 1,
+    }
+
+
+def count_value(
+    rows: Sequence[Mapping[str, object]],
+    field: str,
+    value: str,
+) -> int:
+    """Count one categorical runtime value."""
+
+    return sum(1 for row in rows if str(row.get(field, "")) == value)
+
+
+def summarize(
+    source_rows: Sequence[Mapping[str, str]],
+    replay_rows: Sequence[Mapping[str, object]],
+    mask_counts: Mapping[str, int],
+    configuration: Mapping[str, object],
+) -> Dict[str, object]:
+    """Compare the original Q6 episode with the counterfactual replay."""
+
+    old_window: List[Mapping[str, object]] = list(window_rows(source_rows))
+    new_window = window_rows(replay_rows)
+    old_episode = longest_completed_episode(old_window)
+    loss_frame = int(old_episode["StartFrame"])
+    new_episode = counterfactual_episode_at(new_window, loss_frame)
+    old_recovery = int(old_episode["RecoveryFrame"])
+    new_recovery_value = new_episode["RecoveryFrame"]
+    new_recovery = (
+        int(new_recovery_value)
+        if new_recovery_value is not None
+        else None
+    )
+    old_delay = old_recovery - loss_frame
+    new_delay = (
+        new_recovery - loss_frame
+        if new_recovery is not None
+        else int(new_episode["InvalidRows"])
+    )
+    reset_count = count_value(new_window, "SelectionStatus", "SEGMENT_RESET")
+    acquiring_count = count_value(new_window, "SelectionStatus", "ACQUIRING")
+    no_path_count = count_value(
+        new_window,
+        "SelectionReason",
+        "NO_CONTINUITY_SUPPORTED_PATH",
+    )
+    allowable_delay = (
+        int(configuration["ResetAfterBothInvalidFrames"])
+        + int(configuration["AcquireConfirmFrames"])
+        + 4
+    )
+    if (
+        new_recovery is not None
+        and new_recovery < old_recovery
+        and new_delay <= allowable_delay
+    ):
+        hypothesis_code = 1
+        decision = "UPSTREAM_SENTINEL_VALIDITY_CORRECTION_SUFFICIENT_FOR_Q6"
+    elif new_recovery is None or new_recovery >= old_recovery - 1:
+        hypothesis_code = 2
+        decision = "S1_CONTROLLED_TIMEOUT_RESET_REQUIRED_AFTER_VALIDITY_CORRECTION"
+    else:
+        hypothesis_code = 3
+        decision = "PARTIAL_IMPROVEMENT_REQUIRES_COMBINED_REVIEW"
+    return {
+        "Contract": "UDP002_U22B1B7_32766_COUNTERFACTUAL_REPLAY_V0_1",
+        "ProgramId": PROGRAM_ID,
+        "ProgramVersion": VERSION,
+        "ExperimentType": "READ_ONLY_COUNTERFACTUAL_REPLAY",
+        "CounterfactualRule": "eligible AND value != 327.66",
+        "SentinelValue": SENTINEL_VALUE,
+        "WindowStart": WINDOW_START,
+        "WindowEnd": WINDOW_END,
+        "SourceRowCount": len(source_rows),
+        "OriginalEpisode": old_episode,
+        "CounterfactualEpisodeAtOriginalLoss": new_episode,
+        "OriginalRecoveryDelayFrames": old_delay,
+        "CounterfactualRecoveryDelayFrames": new_delay,
+        "RecoveryImprovementFrames": old_delay - new_delay,
+        "CounterfactualResetCountInWindow": reset_count,
+        "CounterfactualAcquiringCountInWindow": acquiring_count,
+        "CounterfactualNoContinuityPathCountInWindow": no_path_count,
+        "AllowedSufficientDelayFrames": allowable_delay,
+        "MaskCounts": dict(mask_counts),
+        "HypothesisCode": hypothesis_code,
+        "Decision": decision,
+        "ClaimLimit": (
+            "The replay tests one exact sentinel rule only; it does not approve "
+            "a U001 profile change or an S1 algorithm revision."
+        ),
+    }
+
+
+def trace_bytes(
+    source_rows: Sequence[Mapping[str, str]],
+    original_records: Sequence[Mapping[str, object]],
+    replay_rows: Sequence[Mapping[str, object]],
+) -> bytes:
+    """Serialize a compact human-inspection table for the Q6 window."""
+
+    import io
+
+    source_by_frame = {
+        int(row["FrameCount"]): row
+        for row in source_rows
+        if WINDOW_START <= int(row["FrameCount"]) <= WINDOW_END
+    }
+    original_by_frame = {
+        int(row["FrameCount"]): row
+        for row in original_records
+        if WINDOW_START <= int(row["FrameCount"]) <= WINDOW_END
+    }
+    replay_by_frame = {
+        int(row["FrameCount"]): row
+        for row in replay_rows
+        if WINDOW_START <= int(row["FrameCount"]) <= WINDOW_END
+    }
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=TRACE_COLUMNS, lineterminator="\n")
+    writer.writeheader()
+    for frame in sorted(source_by_frame):
+        source = source_by_frame[frame]
+        original = original_by_frame[frame]
+        replay = replay_by_frame[frame]
+        writer.writerow({
+            "FrameCount": frame,
+            "Camera1Distance": source["Camera1Distance"],
+            "OriginalCamera1Eligible": source["Camera1Eligible"],
+            "ReplayCamera1Eligible": int(
+                bool(original[ROLE_1]["Eligible"])
+                and not is_sentinel(original[ROLE_1]["Value"])
+            ),
+            "Camera3Distance": source["Camera3Distance"],
+            "OriginalCamera3Eligible": source["Camera3Eligible"],
+            "ReplayCamera3Eligible": int(
+                bool(original[ROLE_3]["Eligible"])
+                and not is_sentinel(original[ROLE_3]["Value"])
+            ),
+            "OriginalCanonicalCameraDistance": source["CanonicalCameraDistance"],
+            "OriginalCanonicalCameraValid": source["CanonicalCameraValid"],
+            "OriginalSelectionStatus": source["SelectionStatus"],
+            "OriginalSelectionReason": source["SelectionReason"],
+            "ReplayCanonicalCameraDistance": replay["CanonicalCameraDistance"],
+            "ReplayCanonicalCameraValid": replay["CanonicalCameraValid"],
+            "ReplaySelectionStatus": replay["SelectionStatus"],
+            "ReplaySelectionReason": replay["SelectionReason"],
+            "ReplaySelectedCameraRole": replay["SelectedCameraRole"],
+            "ReplaySegmentId": replay["SegmentId"],
+        })
+    return buffer.getvalue().encode("utf-8")
+
+
+def compact(summary: Mapping[str, object]) -> Tuple[str, str]:
+    """Return two short machine capsules for manual transport."""
+
+    old_episode = summary["OriginalEpisode"]
+    new_episode = summary["CounterfactualEpisodeAtOriginalLoss"]
+    masks = summary["MaskCounts"]
+    main = (
+        "U22B1B7 N-M1"
+        + str(masks["Camera1WindowMaskedRows"])
+        + "-M3"
+        + str(masks["Camera3WindowMaskedRows"])
+        + "-OL"
+        + str(old_episode["StartFrame"])
+        + "-OR"
+        + str(old_episode["RecoveryFrame"])
+        + "-OD"
+        + str(summary["OriginalRecoveryDelayFrames"])
+        + "-NL"
+        + (str(new_episode["StartFrame"]) if new_episode["StartFrame"] is not None else "0")
+        + "-NR"
+        + (str(new_episode["RecoveryFrame"]) if new_episode["RecoveryFrame"] is not None else "0")
+        + "-ND"
+        + str(summary["CounterfactualRecoveryDelayFrames"])
+        + "-H"
+        + str(summary["HypothesisCode"])
+        + "-X0 C-0"
+    )
+    detail = (
+        "U22B1B7D1 N-Z"
+        + str(summary["CounterfactualResetCountInWindow"])
+        + "-A"
+        + str(summary["CounterfactualAcquiringCountInWindow"])
+        + "-NC"
+        + str(summary["CounterfactualNoContinuityPathCountInWindow"])
+        + "-G"
+        + str(summary["RecoveryImprovementFrames"])
+        + "-X0 C-0"
+    )
+    return main, detail
+
+
+def run(root: Path) -> Tuple[str, str]:
+    """Execute the complete read-only counterfactual replay."""
+
+    run_root, receipt = discover_b1b4(root)
+    table = locate_s1_table(run_root)
+    table_before = sha256_file(table)
+    configuration = load_s1_configuration(run_root)
+    module, implementation, implementation_hash = load_accepted_s1(root)
+    source_rows = read_source_rows(table)
+    original_records, _ = normalized_records(source_rows, mask_sentinel=False)
+    replay_records, mask_counts = normalized_records(source_rows, mask_sentinel=True)
+    try:
+        original_replay = module.reconstruct(original_records, configuration)
+        counterfactual_replay = module.reconstruct(replay_records, configuration)
+    except Exception as exc:
+        raise ReplayError("S1_REPLAY", type(exc).__name__) from exc
+    verify_original_replay(source_rows, original_replay)
+    if len(counterfactual_replay) != len(source_rows):
+        raise ReplayError("COUNTERFACTUAL_ROW_COUNT")
+    summary = summarize(
+        source_rows,
+        counterfactual_replay,
+        mask_counts,
+        configuration,
+    )
+    summary.update({
+        "RunId": receipt.get("RunId"),
+        "SourceTableRelativePath": str(table.relative_to(run_root)),
+        "SourceTableSha256": table_before,
+        "AcceptedImplementationRelativePath": str(implementation.relative_to(root)),
+        "AcceptedImplementationSha256": implementation_hash,
+        "OriginalReplaySemanticMismatchCount": 0,
+        "InputMutationCount": 0,
+    })
+    export_root = run_root / "05_EXPORTS"
+    write_exact(
+        export_root / TRACE_NAME,
+        trace_bytes(source_rows, original_records, counterfactual_replay),
+    )
+    write_exact(export_root / SUMMARY_NAME, canonical_bytes(summary))
+    if sha256_file(table) != table_before:
+        raise ReplayError("SOURCE_TABLE_CHANGED")
+    return compact(summary)
+
+
+def self_test() -> str:
+    """Test masks, episode comparison, replay loader and deterministic output."""
+
+    checks: List[bool] = []
+
+    def check(value: bool) -> None:
+        if not value:
+            raise ReplayError("SELFTEST")
+        checks.append(True)
+
+    source_rows: List[Dict[str, str]] = []
+    for frame in range(52640, 52861):
+        camera_1 = 10.48
+        camera_3 = SENTINEL_VALUE
+        eligible_1 = 1
+        eligible_3 = 0
+        canonical = 10.48
+        valid = 1
+        status = "CONFIDENT"
+        reason = "CURRENT_SOURCE_PLAUSIBLE"
+        if 52657 <= frame <= 52661:
+            camera_1 = SENTINEL_VALUE
+            eligible_3 = 1
+            canonical = None
+            valid = 0
+            status = "AMBIGUOUS"
+            reason = "NO_CONTINUITY_SUPPORTED_PATH"
+        elif 52662 <= frame <= 52840:
+            camera_1 = 16.48
+            eligible_3 = 1
+            canonical = None
+            valid = 0
+            status = "AMBIGUOUS"
+            reason = "NO_CONTINUITY_SUPPORTED_PATH"
+        elif frame == 52841:
+            camera_1 = 10.48
+        row = {name: "" for name in SOURCE_COLUMNS}
+        row.update({
+            "FrameCount": str(frame),
+            "Camera1Distance": format(camera_1, ".12g"),
+            "Camera1Eligible": str(eligible_1),
+            "Camera1Age": "0",
+            "Camera3Distance": format(camera_3, ".12g"),
+            "Camera3Eligible": str(eligible_3),
+            "Camera3Age": "0",
+            "CanonicalCameraDistance": "" if canonical is None else format(canonical, ".12g"),
+            "CanonicalCameraValid": str(valid),
+            "SelectionStatus": status,
+            "SelectionReason": reason,
+        })
+        source_rows.append(row)
+    original, original_counts = normalized_records(source_rows, False)
+    replay, mask_counts = normalized_records(source_rows, True)
+    check(len(original) == 221)
+    check(original_counts["Camera1MaskedRows"] == 0)
+    check(mask_counts["Camera1WindowMaskedRows"] == 5)
+    check(mask_counts["Camera3WindowMaskedRows"] == 184)
+    check(original[17][ROLE_1]["Eligible"] is True)
+    check(replay[17][ROLE_1]["Eligible"] is False)
+    check(is_sentinel(replay[17][ROLE_1]["Value"]))
+    check(not is_sentinel(10.48))
+    check(len(window_rows(source_rows)) == 221)
+    episode = longest_completed_episode(source_rows)
+    check(episode["StartFrame"] == 52657)
+    check(episode["RecoveryFrame"] == 52841)
+    check(episode["InvalidRows"] == 184)
+    synthetic_replay = []
+    for row in source_rows:
+        copied: Dict[str, object] = dict(row)
+        frame = int(row["FrameCount"])
+        if frame == 52659:
+            copied["SelectionStatus"] = "SEGMENT_RESET"
+        if 52660 <= frame <= 52663:
+            copied["SelectionStatus"] = "ACQUIRING"
+        if frame >= 52664:
+            copied["CanonicalCameraValid"] = 1
+            copied["CanonicalCameraDistance"] = "16.48"
+            copied["SelectionStatus"] = "CONFIDENT"
+            copied["SelectionReason"] = "SINGLE_SOURCE_ACQUIRED"
+        synthetic_replay.append(copied)
+    new_episode = counterfactual_episode_at(synthetic_replay, 52657)
+    check(new_episode["RecoveryFrame"] == 52664)
+    check(new_episode["InvalidRows"] == 7)
+    check(count_value(synthetic_replay, "SelectionStatus", "SEGMENT_RESET") == 1)
+    check(count_value(synthetic_replay, "SelectionStatus", "ACQUIRING") == 4)
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        module_path = root / "implementation.py"
+        module_path.write_text(
+            "def reconstruct(records, configuration):\n    return list(records)\n",
+            encoding="utf-8",
+        )
+        spec = importlib.util.spec_from_file_location("b1b7_selftest_module", module_path)
+        check(spec is not None and spec.loader is not None)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        check(callable(module.reconstruct))
+        check(len(module.reconstruct(original, {})) == 221)
+        payload = canonical_bytes({"b": 2, "a": 1})
+        output = root / "evidence.json"
+        write_exact(output, payload)
+        write_exact(output, payload)
+        check(output.read_bytes() == payload)
+        check(len(sha256_file(output)) == 64)
+    check(stable("a/b c") == "A_B_C")
+    check(optional_float("") is None)
+    check(optional_float("327.66") == SENTINEL_VALUE)
+    check(parse_flag("1", "X") is True)
+    check(parse_flag("0", "X") is False)
+    check(len(checks) == 26)
+    return "U22B1B7-ST N-T27-X0 C-0"
+
+
+def write_failure(root: Optional[Path], error: ReplayError) -> None:
+    """Write a reusable full diagnostic while keeping the capsule short."""
+
+    if root is None or not root.is_dir():
+        return
+    payload = {
+        "Contract": "UDP002_U22B1B7_FAILURE_DIAGNOSTIC_V0_1",
+        "ProgramId": PROGRAM_ID,
+        "ProgramVersion": VERSION,
+        "Reason": error.reason,
+        "Detail": error.detail,
+        "NextAction": "Return the one-line failure capsule; keep this JSON locally.",
+    }
+    try:
+        path = root / DIAGNOSTIC_RELATIVE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(canonical_bytes(payload))
+    except Exception:
+        pass
+
+
+def parser() -> argparse.ArgumentParser:
+    """Build the command-line interface."""
+
+    result = argparse.ArgumentParser(description=PROGRAM_ID)
+    result.add_argument("--workspace-root", type=Path)
+    result.add_argument("--self-test", action="store_true")
+    return result
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Run the requested mode and emit bounded machine capsules."""
+
+    arguments = parser().parse_args(argv)
+    root: Optional[Path] = None
+    try:
+        if arguments.self_test:
+            print(self_test())
+            return 0
+        if arguments.workspace_root is None:
+            raise ReplayError("WORKSPACE_ARGUMENT")
+        root = require_workspace(arguments.workspace_root)
+        main_capsule, detail_capsule = run(root)
+        print(main_capsule)
+        print(detail_capsule)
+        return 0
+    except ReplayError as exc:
+        write_failure(root, exc)
+        print(
+            "U22B1B7 N-X1 C-7 K-"
+            + exc.reason
+            + " D-"
+            + exc.detail
+        )
+        return 7
+    except Exception as exc:
+        wrapped = ReplayError("UNEXPECTED", type(exc).__name__)
+        write_failure(root, wrapped)
+        print(
+            "U22B1B7 N-X1 C-7 K-UNEXPECTED D-"
+            + stable(type(exc).__name__)
+        )
+        return 7
+
+
+if __name__ == "__main__":
+    sys.exit(main())

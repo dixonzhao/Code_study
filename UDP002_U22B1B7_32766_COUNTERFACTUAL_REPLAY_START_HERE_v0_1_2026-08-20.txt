@@ -1,0 +1,109 @@
+UDP002 U22B1B7 — 327.66 反事实重放
+版本：v0.1
+日期：2026-08-20
+
+一、这一步回答什么
+
+B1B6 已确认 Q6 的最长失锁区间为 FrameCount 52660–52840，共 181 帧。
+该区间始终处于 NO_CONTINUITY_SUPPORTED_PATH，没有进入 reset 或 acquire；同时 Camera 1/3 的 327.66 无目标默认值仍被 U001 标成 eligible。
+
+B1B7 不修改 U001、不修改 S1、不改变 1.14 m 连续性门限。
+它只进行一次只读反事实实验：
+
+1. 调用已经验收的 S1 v0.1 原实现，用原 eligibility 完整重放；
+2. 原重放必须与现有 S1 输出逐行一致，否则立即 C-7；
+3. 仅将 value=327.66 的候选在内存中改为 ineligible；
+4. 再调用同一份 S1 实现重放；
+5. 比较 Q6 的失锁与恢复时间。
+
+现实意义：把“上游把默认无效值当成有效数据”与“S1 状态机缺少超时重置”两个问题拆开验证，避免凭感觉同时改两层。
+
+二、文件位置
+
+把下载的程序放到：
+
+C-CODE\U-UDP002\04_TEMP\u002_u22b1b7_32766_counterfactual_replay_v0_1.py.txt
+
+本步骤只需要这一份程序。不要移动、覆盖或删除 B1B4 Run、S1 Module、acceptance receipt。
+
+三、CMD 执行
+
+先进入：
+
+cd /d C-CODE
+
+Self-test：
+
+python U-UDP002\04_TEMP\u002_u22b1b7_32766_counterfactual_replay_v0_1.py.txt --self-test
+
+成功应显示：
+
+U22B1B7-ST N-T27-X0 C-0
+
+正式只读重放：
+
+python U-UDP002\04_TEMP\u002_u22b1b7_32766_counterfactual_replay_v0_1.py.txt --workspace-root U-UDP002
+
+四、需要回传
+
+成功时终端只有两行，都请回传：
+
+U22B1B7 ... C-0
+U22B1B7D1 ... C-0
+
+不用回传 self-test；没有报错就表示已通过。
+
+失败时只回传一行：
+
+U22B1B7 N-X1 C-7 K-... D-...
+
+程序同时会把更完整的诊断写入：
+
+U-UDP002\04_TEMP\u22b1b7_counterfactual_diagnostic_v0_1.json
+
+只有项目负责人随后明确要求时，才需要读取其中字段。
+
+五、机器码含义
+
+主行：
+
+M1 / M3  = Q6窗口内被屏蔽的Camera 1 / Camera 3的327.66行数
+OL       = 原始最长失锁开始Frame
+OR       = 原始恢复Frame
+OD       = 原始恢复延迟Frame数
+NL       = 反事实失锁开始Frame；0表示原失锁点已保持有效
+NR       = 反事实恢复Frame；0表示窗口内仍未恢复
+ND       = 反事实恢复延迟Frame数
+H        = 判定码
+
+详细行：
+
+Z        = 反事实窗口内SEGMENT_RESET行数
+A        = 反事实窗口内ACQUIRING行数
+NC       = 反事实窗口内NO_CONTINUITY_SUPPORTED_PATH行数
+G        = 恢复延迟减少的Frame数
+
+H1：仅修正327.66 validity后，Q6在受控时间内恢复。
+    下一步应先修U001 Camera信号Validity Profile，再做正式重跑；不改S1阈值。
+
+H2：屏蔽327.66后仍基本卡到原恢复位置或无法恢复。
+    说明U001 validity必须修，但还不够；S1需另做“长期不可信候选的受控超时重置”Algorithm Card与实验。
+
+H3：有所改善但仍超过受控恢复时间。
+    说明两个层级可能都需处理，先检查生成的trace再决定。
+
+六、本地输出
+
+程序在被选中的B1B4 Run下生成：
+
+05_EXPORTS\u22b1b7_32766_counterfactual_trace_v0_1.csv
+05_EXPORTS\u22b1b7_32766_counterfactual_summary_v0_1.json
+
+CSV只含Frame 52640–52860，可直接比较原始与反事实的eligibility、status、reason和canonical结果。
+
+七、安全与结论边界
+
+- 原S1表、B1B4 Run和U001包均只读，并在执行后重新核对SHA-256。
+- 程序会验证所调用implementation.py与B1B2验收receipt中的Hash一致。
+- 反事实结果不是正式Pipeline输出，不会自动批准U001或S1修改。
+- 327.66目前只作为Camera Distance的已观察无目标默认值验证，不能擅自推广到其他Signal。
