@@ -8,6 +8,7 @@ import csv
 import hashlib
 import importlib.util
 import json
+import math
 from pathlib import Path
 import re
 import sys
@@ -17,7 +18,7 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
 PROGRAM_ID = "U002-U22B1B7-32766-COUNTERFACTUAL-REPLAY"
-VERSION = "0.1"
+VERSION = "0.2"
 MODULE_ID = "CameraRadar.S1.CameraTargetContinuityArbitration"
 MODULE_VERSION = "0.1.0"
 RUN_RECEIPT_NAME = "u22b1b4_normalized_retry_run_receipt_v0_1.json"
@@ -28,9 +29,9 @@ WINDOW_START = 52640
 WINDOW_END = 52860
 SENTINEL_VALUE = 327.66
 SENTINEL_TOLERANCE = 1e-6
-TRACE_NAME = "u22b1b7_32766_counterfactual_trace_v0_1.csv"
-SUMMARY_NAME = "u22b1b7_32766_counterfactual_summary_v0_1.json"
-DIAGNOSTIC_RELATIVE = Path("04_TEMP/u22b1b7_counterfactual_diagnostic_v0_1.json")
+TRACE_NAME = "u22b1b7_32766_counterfactual_trace_v0_2.csv"
+SUMMARY_NAME = "u22b1b7_32766_counterfactual_summary_v0_2.json"
+DIAGNOSTIC_RELATIVE = Path("04_TEMP/u22b1b7_counterfactual_diagnostic_v0_2.json")
 
 ROLE_1 = "CAMERA_1_DISTANCE"
 ROLE_3 = "CAMERA_3_DISTANCE"
@@ -54,7 +55,23 @@ SOURCE_COLUMNS = (
     "CostMargin",
     "SegmentId",
 )
-SEMANTIC_REPLAY_COLUMNS = SOURCE_COLUMNS[7:]
+EXACT_REPLAY_COLUMNS = (
+    "CanonicalCameraValid",
+    "SelectedCameraRole",
+    "SelectionStatus",
+    "SelectionReason",
+    "SelectionChanged",
+    "SegmentId",
+)
+NUMERIC_REPLAY_COLUMNS = (
+    "ProvisionalCameraDistance",
+    "CanonicalCameraDistance",
+    "ContinuityCostCamera1",
+    "ContinuityCostCamera3",
+    "CostMargin",
+)
+REPLAY_ABSOLUTE_TOLERANCE = 1e-9
+REPLAY_RELATIVE_TOLERANCE = 1e-10
 TRACE_COLUMNS = (
     "FrameCount",
     "Camera1Distance",
@@ -388,6 +405,28 @@ def normalized_text(value: object) -> str:
     return str(value)
 
 
+def numeric_text_equal(expected: object, observed: object) -> bool:
+    """Compare serialized diagnostics without treating floating noise as semantics."""
+
+    expected_text = normalized_text(expected).strip()
+    observed_text = normalized_text(observed).strip()
+    if not expected_text or not observed_text:
+        return expected_text == observed_text
+    try:
+        expected_number = float(expected_text)
+        observed_number = float(observed_text)
+    except ValueError:
+        return False
+    if not math.isfinite(expected_number) or not math.isfinite(observed_number):
+        return False
+    return math.isclose(
+        expected_number,
+        observed_number,
+        rel_tol=REPLAY_RELATIVE_TOLERANCE,
+        abs_tol=REPLAY_ABSOLUTE_TOLERANCE,
+    )
+
+
 def verify_original_replay(
     source_rows: Sequence[Mapping[str, str]],
     replay_rows: Sequence[Mapping[str, object]],
@@ -397,12 +436,20 @@ def verify_original_replay(
     if len(source_rows) != len(replay_rows):
         raise ReplayError("ORIGINAL_REPLAY_ROW_COUNT")
     for index, (source, replay) in enumerate(zip(source_rows, replay_rows)):
-        for column in SEMANTIC_REPLAY_COLUMNS:
+        for column in EXACT_REPLAY_COLUMNS:
             observed = normalized_text(replay.get(column, ""))
             expected = normalized_text(source.get(column, ""))
             if observed != expected:
                 raise ReplayError(
                     "ORIGINAL_REPLAY_MISMATCH",
+                    f"{index}_{column}_{expected}_{observed}",
+                )
+        for column in NUMERIC_REPLAY_COLUMNS:
+            observed = replay.get(column, "")
+            expected = source.get(column, "")
+            if not numeric_text_equal(expected, observed):
+                raise ReplayError(
+                    "ORIGINAL_REPLAY_NUMERIC_MISMATCH",
                     f"{index}_{column}_{expected}_{observed}",
                 )
 
@@ -575,7 +622,7 @@ def summarize(
         hypothesis_code = 3
         decision = "PARTIAL_IMPROVEMENT_REQUIRES_COMBINED_REVIEW"
     return {
-        "Contract": "UDP002_U22B1B7_32766_COUNTERFACTUAL_REPLAY_V0_1",
+        "Contract": "UDP002_U22B1B7_32766_COUNTERFACTUAL_REPLAY_V0_2",
         "ProgramId": PROGRAM_ID,
         "ProgramVersion": VERSION,
         "ExperimentType": "READ_ONLY_COUNTERFACTUAL_REPLAY",
@@ -735,6 +782,8 @@ def run(root: Path) -> Tuple[str, str]:
         "AcceptedImplementationRelativePath": str(implementation.relative_to(root)),
         "AcceptedImplementationSha256": implementation_hash,
         "OriginalReplaySemanticMismatchCount": 0,
+        "OriginalReplayNumericAbsoluteTolerance": REPLAY_ABSOLUTE_TOLERANCE,
+        "OriginalReplayNumericRelativeTolerance": REPLAY_RELATIVE_TOLERANCE,
         "InputMutationCount": 0,
     })
     export_root = run_root / "05_EXPORTS"
@@ -857,8 +906,11 @@ def self_test() -> str:
     check(optional_float("327.66") == SENTINEL_VALUE)
     check(parse_flag("1", "X") is True)
     check(parse_flag("0", "X") is False)
-    check(len(checks) == 26)
-    return "U22B1B7-ST N-T27-X0 C-0"
+    check(numeric_text_equal("4.66293670343e-15", "0"))
+    check(numeric_text_equal("1", "1.00000000001"))
+    check(not numeric_text_equal("1", ""))
+    check(len(checks) == 29)
+    return "U22B1B7-ST N-T30-X0 C-0"
 
 
 def write_failure(root: Optional[Path], error: ReplayError) -> None:
@@ -867,7 +919,7 @@ def write_failure(root: Optional[Path], error: ReplayError) -> None:
     if root is None or not root.is_dir():
         return
     payload = {
-        "Contract": "UDP002_U22B1B7_FAILURE_DIAGNOSTIC_V0_1",
+        "Contract": "UDP002_U22B1B7_FAILURE_DIAGNOSTIC_V0_2",
         "ProgramId": PROGRAM_ID,
         "ProgramVersion": VERSION,
         "Reason": error.reason,
