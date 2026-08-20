@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare and execute the first governed real S0-to-S1 U22 Run.
+"""Normalize NONE hold semantics and execute a new governed B1B4 Retry Run.
 
 This program owns orchestration only.  Camera reconstruction mathematics stays
 inside the already-qualified S1 Module installed by U22B1B2.
@@ -18,10 +18,10 @@ import tempfile
 from typing import Dict, List, Mapping, Sequence, Tuple
 
 
-PROGRAM_ID = "U002-U22B1B3-REAL-S1-RECONSTRUCTION-RUN"
-VERSION = "0.3"
+PROGRAM_ID = "U002-U22B1B4-NO-HOLD-NORMALIZATION-RETRY-RUN"
+VERSION = "0.1"
 CONTRACT_VERSION = "U22.0.1"
-DIAGNOSTIC_RELATIVE = Path("04_TEMP/u22b1b3_run_diagnostic_v0_3.json")
+DIAGNOSTIC_RELATIVE = Path("04_TEMP/u22b1b4_run_diagnostic_v0_1.json")
 
 PREFLIGHT = Path("01_PROGRAMS/core/u002_u22_engine_preflight_v0_1.py")
 EXECUTOR = Path("01_PROGRAMS/core/u002_u22_stage_executor_v0_1.py")
@@ -34,7 +34,14 @@ B1B2_RECEIPT = Path(
     "u22b1b2_camera_target_reconstruction_acceptance_receipt_v0_1.json"
 )
 B1AR_RECEIPT_NAME = "u22b1ar_real_handoff_receipt.json"
-RUN_RECEIPT_NAME = "u22b1b3_real_s1_run_receipt_v0_1.json"
+RUN_RECEIPT_NAME = "u22b1b4_normalized_retry_run_receipt_v0_1.json"
+NORMALIZED_PROFILE_RELATIVE = Path(
+    "02_CONFIG/binding_profiles/TC001_camera_radar_base_provisional_v0_2.json"
+)
+NORMALIZED_CONFIG_RELATIVE = Path(
+    "02_CONFIG/module_configs/"
+    "u22b1b4_camera_target_reconstruction_tc001_v0_2.json"
+)
 FRAME_START = 7400
 TC001_VIDEO_FRAME_END = 57597
 
@@ -321,7 +328,7 @@ def write_diagnostic(
         except Exception:
             previous = {}
     evidence: Dict[str, object] = {
-        "DiagnosticContract": "U002_U22B1B3_FAILURE_DIAGNOSTIC",
+        "DiagnosticContract": "U002_U22B1B4_FAILURE_DIAGNOSTIC",
         "DiagnosticVersion": VERSION,
         "Status": "SUCCEEDED" if succeeded else "FAILED",
         "Phase": phase,
@@ -477,24 +484,113 @@ def accepted_s0_identity(
     return str(matches[0]["ModuleId"]), str(matches[0]["ModuleVersion"])
 
 
+def controlled_nonnegative_integer(value: object, field: str) -> int:
+    """Parse a configuration integer without accepting a fractional value."""
+
+    text = str(value if value is not None else "").strip()
+    try:
+        number = float(text)
+    except ValueError as exc:
+        raise RunError("INTEGER_" + field, text or "BLANK", "NORMALIZATION") from exc
+    if not number.is_integer() or number < 0:
+        raise RunError("INTEGER_" + field, text or "BLANK", "NORMALIZATION")
+    return int(number)
+
+
+def normalize_binding_profile(
+    source: Mapping[str, object],
+) -> Tuple[Dict[str, object], List[Dict[str, object]]]:
+    """Compile blank MaxAge under HoldPolicy NONE to the executable integer 0."""
+
+    normalized = json.loads(json.dumps(source, ensure_ascii=False))
+    if not isinstance(normalized, dict):
+        raise RunError("BINDING_PROFILE_TYPE")
+    bindings = normalized.get("Bindings")
+    if not isinstance(bindings, dict):
+        raise RunError("BINDING_PROFILE_BINDINGS")
+    changes: List[Dict[str, object]] = []
+    required_roles = ("CAMERA_1_DISTANCE", "CAMERA_3_DISTANCE")
+    for role in required_roles:
+        selected = bindings.get(role)
+        if not isinstance(selected, list) or len(selected) != 1:
+            raise RunError("BINDING_COUNT_" + role)
+        binding = selected[0]
+        if not isinstance(binding, dict):
+            raise RunError("BINDING_TYPE_" + role)
+        policy = str(binding.get("HoldPolicy", "")).strip().upper()
+        observed = binding.get("MaxAgeFrames")
+        observed_text = str(observed if observed is not None else "").strip()
+        if policy == "NONE" and observed_text == "":
+            binding["MaxAgeFrames"] = 0
+            changes.append(
+                {
+                    "Role": role,
+                    "HoldPolicy": "NONE",
+                    "ObservedMaxAgeFrames": "BLANK",
+                    "NormalizedMaxAgeFrames": 0,
+                    "Rule": "NO_HOLD_IMPLIES_ZERO_FRAME_AGE",
+                }
+            )
+            continue
+        parsed = controlled_nonnegative_integer(observed, role + "_MAX_AGE")
+        if policy == "NONE" and parsed != 0:
+            raise RunError(
+                "NONE_POLICY_NONZERO_MAX_AGE_" + role,
+                str(parsed),
+                "NORMALIZATION",
+            )
+        binding["MaxAgeFrames"] = parsed
+    normalized["BindingProfileVersion"] = "0.2"
+    return normalized, changes
+
+
 def accepted_s1(
     root: Path,
-) -> Tuple[str, str, Dict[str, object], str]:
-    """Load the exact B1B2-qualified S1 identity and configuration."""
+) -> Tuple[str, str, Dict[str, object], str, Dict[str, object]]:
+    """Retain the qualified S1 binary while compiling its real binding profile."""
 
     receipt = load_json(root / B1B2_RECEIPT, "B1B2_RECEIPT")
     if receipt.get("Status") != "S1_MODULE_INSTALLED_AND_QUALIFIED":
         raise RunError("B1B2_STATUS")
-    relative = Path(str(receipt.get("ConfigurationRelativePath", "")))
-    config_path = root / relative
-    if sha256_file(config_path) != receipt.get("ConfigurationSha256"):
+    source_config_relative = Path(str(receipt.get("ConfigurationRelativePath", "")))
+    source_config_path = root / source_config_relative
+    if sha256_file(source_config_path) != receipt.get("ConfigurationSha256"):
         raise RunError("B1B2_CONFIGURATION_HASH")
-    configuration = load_json(config_path, "B1B2_CONFIGURATION")
+    source_configuration = load_json(source_config_path, "B1B2_CONFIGURATION")
+
+    source_profile_relative = Path(str(source_configuration.get("BindingProfilePath", "")))
+    source_profile_path = root / source_profile_relative
+    if sha256_file(source_profile_path) != source_configuration.get("BindingProfileSha256"):
+        raise RunError("B1B2_BINDING_PROFILE_HASH")
+    source_profile = load_json(source_profile_path, "B1B2_BINDING_PROFILE")
+    normalized_profile, changes = normalize_binding_profile(source_profile)
+    normalized_profile_path = root / NORMALIZED_PROFILE_RELATIVE
+    write_exact(normalized_profile_path, normalized_profile)
+    normalized_profile_sha = sha256_file(normalized_profile_path)
+
+    normalized_configuration = dict(source_configuration)
+    normalized_configuration["BindingProfilePath"] = NORMALIZED_PROFILE_RELATIVE.as_posix()
+    normalized_configuration["BindingProfileSha256"] = normalized_profile_sha
+    normalized_config_path = root / NORMALIZED_CONFIG_RELATIVE
+    write_exact(normalized_config_path, normalized_configuration)
+    normalized_config_sha = sha256_file(normalized_config_path)
+    evidence = {
+        "Rule": "HOLD_POLICY_NONE_AND_BLANK_MAX_AGE_TO_INTEGER_ZERO",
+        "SourceProfile": source_profile_relative.as_posix(),
+        "SourceProfileSha256": sha256_file(source_profile_path),
+        "NormalizedProfile": NORMALIZED_PROFILE_RELATIVE.as_posix(),
+        "NormalizedProfileSha256": normalized_profile_sha,
+        "NormalizedConfiguration": NORMALIZED_CONFIG_RELATIVE.as_posix(),
+        "NormalizedConfigurationSha256": normalized_config_sha,
+        "ChangedBindingCount": len(changes),
+        "Changes": changes,
+    }
     return (
         str(receipt["ModuleId"]),
         str(receipt["ModuleVersion"]),
-        configuration,
-        str(receipt["ConfigurationSha256"]),
+        normalized_configuration,
+        normalized_config_sha,
+        evidence,
     )
 
 
@@ -557,7 +653,7 @@ def build_run_configuration(
             "Unit": "m",
             "Purpose": "EXPLORATORY",
         },
-        "CandidatePolicy": "NotAppliedInU22B1B3@0.1",
+        "CandidatePolicy": "NotAppliedInU22B1B4@0.1",
         "OutputSelection": [
             "U001_INTAKE_ACCEPTED",
             "CAMERA_TARGET_RECONSTRUCTION",
@@ -578,7 +674,7 @@ def deterministic_run_id(configuration: Mapping[str, object]) -> str:
     """Bind Run identity to source, Modules, scope and configuration."""
 
     digest = sha256_bytes(canonical_bytes(configuration))[:16]
-    return "U22B1B3_" + digest
+    return "U22B1B4_" + digest
 
 
 def write_exact(path: Path, value: Mapping[str, object]) -> None:
@@ -673,14 +769,15 @@ def write_run_receipt(
     end: int,
     freeze_before: str,
     freeze_after: str,
+    normalization_evidence: Mapping[str, object],
 ) -> None:
-    """Persist the exact technical handoff consumed by the B1B3 gate."""
+    """Persist the exact normalized Retry Run handoff consumed by its gate."""
 
     receipt = {
-        "ReceiptContract": "UDP002_U22B1B3_REAL_S1_RUN_V0_1",
+        "ReceiptContract": "UDP002_U22B1B4_NORMALIZED_RETRY_RUN_V0_1",
         "ProgramId": PROGRAM_ID,
         "ProgramVersion": VERSION,
-        "Status": "REAL_S1_RECONSTRUCTION_RUN_COMPLETED",
+        "Status": "NORMALIZED_RETRY_RUN_COMPLETED",
         "RunId": run_id,
         "SourceB1ARRunId": b1ar_receipt["RunId"],
         "SourceB1ARReceipt": b1ar_path.relative_to(root).as_posix(),
@@ -694,6 +791,9 @@ def write_run_receipt(
         "FrameEnd": end,
         "FoundationBefore": freeze_before,
         "FoundationAfter": freeze_after,
+        "SourceFailedNode": "U22B1B3",
+        "RetryReason": "HOLD_POLICY_NONE_WITH_BLANK_MAX_AGE",
+        "Normalization": dict(normalization_evidence),
         "SemanticStatus": "HUMAN_REVIEW_PENDING",
     }
     write_exact(root / "07_OUTPUT" / run_id / RUN_RECEIPT_NAME, receipt)
@@ -708,7 +808,13 @@ def run_real(root: Path) -> str:
     before = package_snapshot(package, b1ar_receipt)
     fingerprint = str(b1ar_receipt["PackageFingerprintSha256"])
     s0_identity = accepted_s0_identity(b1ar_path)
-    s1_id, s1_version, s1_configuration, configuration_sha = accepted_s1(root)
+    (
+        s1_id,
+        s1_version,
+        s1_configuration,
+        configuration_sha,
+        normalization_evidence,
+    ) = accepted_s1(root)
     start, end = frame_range(b1ar_receipt)
     identity_seed = build_run_configuration(
         "IDENTITY_PENDING",
@@ -755,6 +861,7 @@ def run_real(root: Path) -> str:
         end,
         freeze_before,
         freeze_after,
+        normalization_evidence,
     )
     write_diagnostic(
         root,
@@ -765,7 +872,11 @@ def run_real(root: Path) -> str:
         run_id=run_id,
         succeeded=True,
     )
-    return "U22B1B3R N-M2-S2-A2-I1-X0 C-0"
+    return (
+        "U22B1B4R N-M2-S2-A2-I1-N"
+        + str(normalization_evidence["ChangedBindingCount"])
+        + "-X0 C-0"
+    )
 
 
 def self_test() -> str:
@@ -779,7 +890,7 @@ def self_test() -> str:
         checks.append(True)
 
     check(PROGRAM_ID.startswith("U002"))
-    check(VERSION == "0.3")
+    check(VERSION == "0.1")
     check(CONTRACT_VERSION == "U22.0.1")
     check(stable("a b/c") == "A_B_C")
     check(len(sha256_bytes(b"x")) == 64)
@@ -797,7 +908,7 @@ def self_test() -> str:
         == "VALUEERROR_BAD_SOURCE_COLUMN"
     )
     check(canonical_bytes({"b": 1, "a": 2}).startswith(b"{"))
-    with tempfile.TemporaryDirectory(prefix="u22b1b3_runner_selftest_") as temporary:
+    with tempfile.TemporaryDirectory(prefix="u22b1b4_runner_selftest_") as temporary:
         root = Path(temporary)
         control = root / "control.json"
         write_exact(control, {"a": 1})
@@ -863,12 +974,39 @@ def self_test() -> str:
     identity = dict(synthetic)
     identity["RunId"] = ""
     run_id = deterministic_run_id(identity)
-    check(run_id.startswith("U22B1B3_"))
-    check(len(run_id) == len("U22B1B3_") + 16)
+    check(run_id.startswith("U22B1B4_"))
+    check(len(run_id) == len("U22B1B4_") + 16)
+    blank_profile = {
+        "Bindings": {
+            "CAMERA_1_DISTANCE": [
+                {"HoldPolicy": "NONE", "MaxAgeFrames": ""}
+            ],
+            "CAMERA_3_DISTANCE": [
+                {"HoldPolicy": "NONE", "MaxAgeFrames": None}
+            ],
+        }
+    }
+    normalized, changes = normalize_binding_profile(blank_profile)
+    check(len(changes) == 2)
+    check(normalized["Bindings"]["CAMERA_1_DISTANCE"][0]["MaxAgeFrames"] == 0)
+    check(normalized["Bindings"]["CAMERA_3_DISTANCE"][0]["MaxAgeFrames"] == 0)
+    bounded_profile = {
+        "Bindings": {
+            "CAMERA_1_DISTANCE": [
+                {"HoldPolicy": "BOUNDED_HOLD", "MaxAgeFrames": "1"}
+            ],
+            "CAMERA_3_DISTANCE": [
+                {"HoldPolicy": "BOUNDED_HOLD", "MaxAgeFrames": 1}
+            ],
+        }
+    }
+    bounded, bounded_changes = normalize_binding_profile(bounded_profile)
+    check(bounded_changes == [])
+    check(bounded["Bindings"]["CAMERA_1_DISTANCE"][0]["MaxAgeFrames"] == 1)
     check(FRAME_START == 7400)
     check(TC001_VIDEO_FRAME_END == 57597)
     check(RUN_RECEIPT_NAME.endswith(".json"))
-    return "U22B1B3R-ST N-T" + str(len(checks)) + "-X0 C-0"
+    return "U22B1B4R-ST N-T" + str(len(checks)) + "-X0 C-0"
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -902,7 +1040,7 @@ def main(argv: Sequence[str] = None) -> int:
                 write_diagnostic(root_value, "TIMEOUT", "TIMEOUT", "CHILD_TIMEOUT")
             except Exception:
                 pass
-        print("U22B1B3R N-M0-S0-A0-I0-X1 C-7 R-TIMEOUT")
+        print("U22B1B4R N-M0-S0-A0-I0-N0-X1 C-7 R-TIMEOUT")
         return 7
     except Exception as exc:
         if isinstance(exc, RunError):
@@ -920,7 +1058,7 @@ def main(argv: Sequence[str] = None) -> int:
             except Exception:
                 pass
         print(
-            "U22B1B3R N-M0-S0-A0-I0-X1 C-7"
+            "U22B1B4R N-M0-S0-A0-I0-N0-X1 C-7"
             f" R-{reason} K-{detail} J1"
         )
         return 7

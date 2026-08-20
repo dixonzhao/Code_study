@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independently accept the real U22B1B3 S0-to-S1 technical Run.
+"""Independently accept the governed U22B1B4 normalized Retry Run.
 
 The gate proves structural and lineage correctness.  It deliberately leaves
 target truth to the six-window human semantic review generated for U003.
@@ -19,12 +19,12 @@ import tempfile
 from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
 
 
-PROGRAM_ID = "UDP002-U22B1B3-REAL-S1-RECONSTRUCTION-ACCEPTANCE"
-VERSION = "0.3"
-RUNNER_NAME = "u002_u22b1b3_real_s1_reconstruction_run_v0_3.py.txt"
-DIAGNOSTIC_RELATIVE = Path("04_TEMP/u22b1b3_acceptance_diagnostic_v0_3.json")
-RUN_RECEIPT_NAME = "u22b1b3_real_s1_run_receipt_v0_1.json"
-ACCEPTANCE_RECEIPT_NAME = "u22b1b3_technical_acceptance_receipt_v0_1.json"
+PROGRAM_ID = "UDP002-U22B1B4-NO-HOLD-NORMALIZATION-RETRY-ACCEPTANCE"
+VERSION = "0.1"
+RUNNER_NAME = "u002_u22b1b4_no_hold_normalization_retry_run_v0_1.py.txt"
+DIAGNOSTIC_RELATIVE = Path("04_TEMP/u22b1b4_acceptance_diagnostic_v0_1.json")
+RUN_RECEIPT_NAME = "u22b1b4_normalized_retry_run_receipt_v0_1.json"
+ACCEPTANCE_RECEIPT_NAME = "u22b1b4_technical_acceptance_receipt_v0_1.json"
 FREEZE_AUDITOR = Path(
     "05_TESTS/integration/u002_u22_synthetic_vertical_acceptance_v0_1.py"
 )
@@ -116,13 +116,13 @@ def write_diagnostic(
         except Exception:
             previous = {}
     evidence: Dict[str, object] = {
-        "DiagnosticContract": "U002_U22B1B3_ACCEPTANCE_DIAGNOSTIC",
+        "DiagnosticContract": "U002_U22B1B4_ACCEPTANCE_DIAGNOSTIC",
         "DiagnosticVersion": VERSION,
         "Status": "SUCCEEDED" if succeeded else "FAILED",
         "Phase": phase,
         "Reason": reason,
         "Detail": detail,
-        "RunnerDiagnostic": str(root / "04_TEMP/u22b1b3_run_diagnostic_v0_3.json"),
+        "RunnerDiagnostic": str(root / "04_TEMP/u22b1b4_run_diagnostic_v0_1.json"),
         "PreviousEvidence": previous if previous.get("Status") == "FAILED" else None,
     }
     if result is not None:
@@ -262,7 +262,7 @@ def execute_runner(root: Path) -> None:
     if not regular_file(runner):
         raise AcceptanceError("RUNNER_MISSING")
     selftest = run_child([sys.executable, str(runner), "--self-test"], timeout=120)
-    require_child(root, selftest, "U22B1B3R-ST", "RUNNER_SELFTEST")
+    require_child(root, selftest, "U22B1B4R-ST", "RUNNER_SELFTEST")
     formal = run_child(
         [
             sys.executable,
@@ -272,17 +272,17 @@ def execute_runner(root: Path) -> None:
             str(root),
         ]
     )
-    require_child(root, formal, "U22B1B3R N-M2-S2-A2-I1-X0 C-0", "RUNNER")
+    require_child(root, formal, "U22B1B4R N-M2-S2-A2-I1-N", "RUNNER")
 
 
 def discover_run(root: Path) -> Tuple[Path, Dict[str, object]]:
-    """Select the largest, then newest, completed B1B3 technical Run."""
+    """Select the largest, then newest, completed B1B4 Retry Run."""
 
     candidates: List[Tuple[int, int, Path, Dict[str, object]]] = []
     for path in (root / "07_OUTPUT").glob("*/" + RUN_RECEIPT_NAME):
         try:
             receipt = load_json(path, "RUN_RECEIPT")
-            if receipt.get("Status") != "REAL_S1_RECONSTRUCTION_RUN_COMPLETED":
+            if receipt.get("Status") != "NORMALIZED_RETRY_RUN_COMPLETED":
                 continue
             start = int(receipt.get("FrameStart"))
             end = int(receipt.get("FrameEnd"))
@@ -319,6 +319,41 @@ def validate_status_and_plan(run_root: Path, receipt: Mapping[str, object]) -> N
         raise AcceptanceError("OUTPUT_SELECTION")
     if plan.get("RunId") != receipt.get("RunId"):
         raise AcceptanceError("RUN_ID_MISMATCH")
+
+
+def validate_normalization(receipt: Mapping[str, object]) -> int:
+    """Accept only the declared NONE+blank to integer-zero compilation rule."""
+
+    evidence = receipt.get("Normalization")
+    if not isinstance(evidence, dict):
+        raise AcceptanceError("NORMALIZATION_EVIDENCE")
+    if evidence.get("Rule") != (
+        "HOLD_POLICY_NONE_AND_BLANK_MAX_AGE_TO_INTEGER_ZERO"
+    ):
+        raise AcceptanceError("NORMALIZATION_RULE")
+    changes = evidence.get("Changes")
+    if not isinstance(changes, list):
+        raise AcceptanceError("NORMALIZATION_CHANGES")
+    if int(evidence.get("ChangedBindingCount", -1)) != len(changes):
+        raise AcceptanceError("NORMALIZATION_CHANGE_COUNT")
+    allowed_roles = {"CAMERA_1_DISTANCE", "CAMERA_3_DISTANCE"}
+    observed_roles = set()
+    for change in changes:
+        if not isinstance(change, dict):
+            raise AcceptanceError("NORMALIZATION_CHANGE_TYPE")
+        role = str(change.get("Role", ""))
+        if role not in allowed_roles or role in observed_roles:
+            raise AcceptanceError("NORMALIZATION_ROLE", role)
+        observed_roles.add(role)
+        if change.get("HoldPolicy") != "NONE":
+            raise AcceptanceError("NORMALIZATION_POLICY", role)
+        if change.get("ObservedMaxAgeFrames") != "BLANK":
+            raise AcceptanceError("NORMALIZATION_OBSERVED", role)
+        if change.get("NormalizedMaxAgeFrames") != 0:
+            raise AcceptanceError("NORMALIZATION_RESULT", role)
+        if change.get("Rule") != "NO_HOLD_IMPLIES_ZERO_FRAME_AGE":
+            raise AcceptanceError("NORMALIZATION_CHANGE_RULE", role)
+    return len(changes)
 
 
 def verify_payloads(
@@ -476,7 +511,7 @@ def write_validation_views(
 ) -> Tuple[Path, Path, int]:
     """Write one four-column plot view and one U003-compatible review queue."""
 
-    plot_path = run_root / "05_EXPORTS/u22b1b3_camera_reconstruction_plot_view.csv"
+    plot_path = run_root / "05_EXPORTS/u22b1b4_camera_reconstruction_plot_view.csv"
     plot_payload = csv_bytes(PLOT_COLUMNS, rows)
     write_exact_bytes(plot_path, plot_payload)
     frame_min = int(rows[0]["FrameCount"])
@@ -490,7 +525,7 @@ def write_validation_views(
         "EventType",
         "ReviewMemo",
     )
-    review_path = run_root / "04_REVIEW_PACKAGE/u22b1b3_s1_semantic_review_queue.csv"
+    review_path = run_root / "04_REVIEW_PACKAGE/u22b1b4_s1_semantic_review_queue.csv"
     write_exact_bytes(review_path, csv_bytes(review_fields, review))
     return plot_path, review_path, len(review)
 
@@ -509,7 +544,7 @@ def write_acceptance_receipt(
     """Persist technical acceptance while preserving semantic review as pending."""
 
     receipt = {
-        "ReceiptContract": "UDP002_U22B1B3_TECHNICAL_ACCEPTANCE_V0_1",
+        "ReceiptContract": "UDP002_U22B1B4_TECHNICAL_ACCEPTANCE_V0_1",
         "ProgramId": PROGRAM_ID,
         "ProgramVersion": VERSION,
         "Status": "TECHNICAL_ACCEPTED_SEMANTIC_REVIEW_PENDING",
@@ -526,7 +561,7 @@ def write_acceptance_receipt(
         "ReviewWindowCount": review_count,
         "FoundationAudit": foundation,
         "HumanClaimLimit": "No target-truth claim until U003 semantic review",
-        "NextNode": "U22B1B3_SEMANTIC_REVIEW",
+        "NextNode": "U22B1B4_SEMANTIC_REVIEW",
     }
     write_exact_bytes(
         run_root / ACCEPTANCE_RECEIPT_NAME,
@@ -541,6 +576,7 @@ def accept(root: Path) -> str:
     execute_runner(root)
     run_root, run_receipt = discover_run(root)
     validate_status_and_plan(run_root, run_receipt)
+    normalization_count = validate_normalization(run_receipt)
     _, manifest, payloads = locate_s1_artifact(run_root)
     table_path = payloads.get("camera_target_reconstruction.csv")
     quality_path = payloads.get("camera_target_reconstruction_quality.json")
@@ -567,7 +603,7 @@ def accept(root: Path) -> str:
     )
     write_diagnostic(root, "COMPLETE", "NONE", "NA", succeeded=True)
     return (
-        "U22B1B3 N-F"
+        "U22B1B4 N-F"
         + str(quality["FrameRows"])
         + "-V"
         + str(quality["CanonicalValidRows"])
@@ -575,6 +611,8 @@ def accept(root: Path) -> str:
         + str(quality["ConfirmedSwitchCount"])
         + "-Q"
         + str(review_count)
+        + "-N"
+        + str(normalization_count)
         + "-P1-X0 C-0"
     )
 
@@ -590,12 +628,12 @@ def self_test() -> str:
         checks.append(True)
 
     check(PROGRAM_ID.startswith("UDP002"))
-    check(VERSION == "0.3")
-    check(RUNNER_NAME.endswith("v0_3.py.txt"))
+    check(VERSION == "0.1")
+    check(RUNNER_NAME.endswith("v0_1.py.txt"))
     sample = subprocess.CompletedProcess(
         ["python", "runner.py"],
         7,
-        "U22B1B3R N-M0-S0-A0-I0-X1 C-7 R-PREFLIGHT K-PLAN_ARTIFACT_DEPENDENCY J1\n",
+        "U22B1B4R N-M0-S0-A0-I0-N0-X1 C-7 R-PREFLIGHT K-PLAN_ARTIFACT_DEPENDENCY J1\n",
         "",
     )
     check(child_failure_key(sample) == "PLAN_ARTIFACT_DEPENDENCY")
@@ -615,7 +653,7 @@ def self_test() -> str:
     check(fallback[0]["ReviewMemo"] == "SYNTHETIC_OR_SHORT_RANGE_FALLBACK")
     payload = csv_bytes(("A", "B"), [{"A": 1, "B": 2}])
     check(payload == b"A,B\n1,2\n")
-    with tempfile.TemporaryDirectory(prefix="u22b1b3_gate_selftest_") as temporary:
+    with tempfile.TemporaryDirectory(prefix="u22b1b4_gate_selftest_") as temporary:
         path = Path(temporary) / "x.json"
         write_exact_bytes(path, canonical_bytes({"a": 1}))
         check(load_json(path, "X") == {"a": 1})
@@ -625,7 +663,24 @@ def self_test() -> str:
     check(ACCEPTANCE_RECEIPT_NAME.endswith(".json"))
     check(REVIEW_ANCHORS[2][1] == 37800)
     check(REVIEW_ANCHORS[-1][2] == 53013)
-    return "U22B1B3-ST N-T" + str(len(checks)) + "-X0 C-0"
+    normalization_receipt = {
+        "Normalization": {
+            "Rule": "HOLD_POLICY_NONE_AND_BLANK_MAX_AGE_TO_INTEGER_ZERO",
+            "ChangedBindingCount": 2,
+            "Changes": [
+                {
+                    "Role": role,
+                    "HoldPolicy": "NONE",
+                    "ObservedMaxAgeFrames": "BLANK",
+                    "NormalizedMaxAgeFrames": 0,
+                    "Rule": "NO_HOLD_IMPLIES_ZERO_FRAME_AGE",
+                }
+                for role in ("CAMERA_1_DISTANCE", "CAMERA_3_DISTANCE")
+            ],
+        }
+    }
+    check(validate_normalization(normalization_receipt) == 2)
+    return "U22B1B4-ST N-T" + str(len(checks)) + "-X0 C-0"
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -659,7 +714,7 @@ def main(argv: Sequence[str] = None) -> int:
                 write_diagnostic(root_value, "TIMEOUT", "TIMEOUT", "CHILD_TIMEOUT")
             except Exception:
                 pass
-        print("U22B1B3 N-F0-V0-S0-Q0-P0-X1 C-7 R-TIMEOUT")
+        print("U22B1B4 N-F0-V0-S0-Q0-P0-X1 C-7 R-TIMEOUT")
         return 7
     except Exception as exc:
         if isinstance(exc, AcceptanceError):
@@ -677,7 +732,7 @@ def main(argv: Sequence[str] = None) -> int:
             except Exception:
                 pass
         print(
-            "U22B1B3 N-F0-V0-S0-Q0-P0-X1 C-7"
+            "U22B1B4 N-F0-V0-S0-Q0-P0-X1 C-7"
             f" R-{reason} K-{detail} J1"
         )
         return 7
