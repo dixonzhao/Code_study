@@ -1,0 +1,73 @@
+UDP002 U22B1B3 内置诊断重运行说明
+版本：v0.2
+日期：2026-08-20
+
+一、当前判断
+
+独立诊断结果：
+
+U22B1B3D1 N-C1-M2-O1-A2-D1-P2-X0 C-0 K-NONE S-NA R-NA
+
+说明当前Run Configuration、S0/S1身份、Stage顺序、PackageFiles元数据、
+RequiresArtifacts / ProvidesArtifacts依赖在静态复查时全部成立。
+
+原C-7没有进入真实数据处理。为避免再次出现“先失败、后传Probe”的往返，
+本版本把详细诊断直接集成进Runner和Acceptance Gate。
+
+二、下载文件
+
+将以下三个文件直接下载到：
+
+.\U-UDP002\04_TEMP
+
+1. u002_u22b1b3_real_s1_reconstruction_run_v0_2.py.txt
+2. udp002_u22b1b3_real_s1_reconstruction_acceptance_v0_2.py.txt
+3. 本说明文件
+
+不要覆盖或修改已安装的S0、S1 Module及U22 Core程序。
+
+三、正式执行
+
+从C-CODE根目录使用Windows CMD运行：
+
+python .\U-UDP002\04_TEMP\udp002_u22b1b3_real_s1_reconstruction_acceptance_v0_2.py.txt --accept --workspace-root .\U-UDP002
+
+Acceptance Gate会自动：
+
+1. 运行Runner self-test；
+2. 重新执行或安全重放B1B3；
+3. 验证S0至S1 Artifact与来源；
+4. 生成4列Plot View；
+5. 生成U003语义复核Queue；
+6. 输出技术验收胶囊。
+
+四、返回规则
+
+成功时只回传：
+
+U22B1B3 N-F...-V...-S...-Q...-P1-X0 C-0
+
+失败时也只回传程序打印的一行。新格式会直接包含：
+
+R-失败阶段
+K-关键原因
+J1-已写入详细JSON证据
+
+无需人工打开或抄写JSON，除非后续明确要求。
+
+自动诊断文件：
+
+.\U-UDP002\04_TEMP\u22b1b3_run_diagnostic_v0_2.json
+.\U-UDP002\04_TEMP\u22b1b3_acceptance_diagnostic_v0_2.json
+
+五、工程规则更新
+
+从本节点起，新的Runner、Gate和Validator默认采用：
+
+短Return Capsule
++ 完整本地Diagnostic JSON
++ 失败阶段自动定位
++ 关键原因自动提取
++ 第一排查建议
+
+只有旧程序或外部黑盒工具无法提供内部证据时，才另行交付Probe。

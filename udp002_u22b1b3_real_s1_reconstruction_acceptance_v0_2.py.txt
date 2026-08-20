@@ -1,0 +1,687 @@
+#!/usr/bin/env python3
+"""Independently accept the real U22B1B3 S0-to-S1 technical Run.
+
+The gate proves structural and lineage correctness.  It deliberately leaves
+target truth to the six-window human semantic review generated for U003.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
+
+
+PROGRAM_ID = "UDP002-U22B1B3-REAL-S1-RECONSTRUCTION-ACCEPTANCE"
+VERSION = "0.2"
+RUNNER_NAME = "u002_u22b1b3_real_s1_reconstruction_run_v0_2.py.txt"
+DIAGNOSTIC_RELATIVE = Path("04_TEMP/u22b1b3_acceptance_diagnostic_v0_2.json")
+RUN_RECEIPT_NAME = "u22b1b3_real_s1_run_receipt_v0_1.json"
+ACCEPTANCE_RECEIPT_NAME = "u22b1b3_technical_acceptance_receipt_v0_1.json"
+FREEZE_AUDITOR = Path(
+    "05_TESTS/integration/u002_u22_synthetic_vertical_acceptance_v0_1.py"
+)
+ARTIFACT_INDEX = "run_artifact_index_v0_1.json"
+S1_ARTIFACT_TYPE = "CAMERA_TARGET_RECONSTRUCTION"
+EXPECTED_COLUMNS = (
+    "FrameCount",
+    "Camera1Distance",
+    "Camera1Eligible",
+    "Camera1Age",
+    "Camera3Distance",
+    "Camera3Eligible",
+    "Camera3Age",
+    "ProvisionalCameraDistance",
+    "CanonicalCameraDistance",
+    "CanonicalCameraValid",
+    "SelectedCameraRole",
+    "SelectionStatus",
+    "SelectionReason",
+    "SelectionChanged",
+    "ContinuityCostCamera1",
+    "ContinuityCostCamera3",
+    "CostMargin",
+    "SegmentId",
+)
+PLOT_COLUMNS = (
+    "FrameCount",
+    "Camera1Distance",
+    "Camera3Distance",
+    "CanonicalCameraDistance",
+)
+REVIEW_ANCHORS = (
+    ("SRV001", 15120, 15245, "BOTH_CAMERA_LOSS_AND_REACQUISITION"),
+    ("SRV002", 30488, 30679, "CROSS_SOURCE_ALIGNMENT_REVIEW"),
+    ("SRV003", 37800, 39000, "CAMERA_1_3_SWITCHING_ONSET"),
+    ("SRV004", 41598, 41638, "BOTH_CAMERA_INVALID"),
+    ("SRV005", 42199, 42208, "EXPECTED_STABLE_SELECTION"),
+    ("SRV006", 52592, 53013, "LATE_CASE_CONTINUITY_REVIEW"),
+)
+
+
+class AcceptanceError(RuntimeError):
+    """Represent one deterministic fail-closed acceptance failure."""
+
+    def __init__(self, reason: str, detail: str = "NA", phase: str = "ACCEPTANCE"):
+        self.reason = stable(reason, 48)
+        self.detail = stable(detail, 64)
+        self.phase = stable(phase, 24)
+        super().__init__(self.reason)
+
+
+def stable(value: object, limit: int = 80) -> str:
+    """Convert one error into a compact return token."""
+
+    normalized = re.sub(r"[^A-Z0-9_]+", "_", str(value).upper())
+    return normalized.strip("_")[:limit] or "INTERNAL"
+
+
+def child_failure_key(result: subprocess.CompletedProcess) -> str:
+    """Preserve the child's explicit key before nested capsule truncation."""
+
+    combined = "\n".join((result.stdout or "", result.stderr or ""))
+    key_matches = re.findall(r"(?:^|\s)K-([A-Za-z0-9_]+)", combined)
+    if key_matches:
+        return stable(key_matches[-1], 64)
+    reason_matches = re.findall(r"C-7(?:\s+[^\n]*)?\s+R-([A-Za-z0-9_]+)", combined)
+    if reason_matches:
+        return stable(reason_matches[-1], 64)
+    return stable(result.stderr.strip() or result.stdout.strip() or "NO_DETAIL", 64)
+
+
+def write_diagnostic(
+    root: Path,
+    phase: str,
+    reason: str,
+    detail: str,
+    result: subprocess.CompletedProcess = None,
+    succeeded: bool = False,
+) -> Path:
+    """Write full local evidence while the user returns only one short line."""
+
+    path = root / DIAGNOSTIC_RELATIVE
+    previous: Dict[str, object] = {}
+    if regular_file(path):
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8-sig"))
+            if isinstance(loaded, dict):
+                previous = loaded
+        except Exception:
+            previous = {}
+    evidence: Dict[str, object] = {
+        "DiagnosticContract": "U002_U22B1B3_ACCEPTANCE_DIAGNOSTIC",
+        "DiagnosticVersion": VERSION,
+        "Status": "SUCCEEDED" if succeeded else "FAILED",
+        "Phase": phase,
+        "Reason": reason,
+        "Detail": detail,
+        "RunnerDiagnostic": str(root / "04_TEMP/u22b1b3_run_diagnostic_v0_2.json"),
+        "PreviousEvidence": previous if previous.get("Status") == "FAILED" else None,
+    }
+    if result is not None:
+        evidence["Child"] = {
+            "Command": [str(item) for item in result.args],
+            "ReturnCode": result.returncode,
+            "Stdout": result.stdout,
+            "Stderr": result.stderr,
+            "ExtractedFailureKey": child_failure_key(result),
+        }
+    payload = (
+        json.dumps(evidence, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    ).encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".writing")
+    if temporary.exists():
+        temporary.unlink()
+    temporary.write_bytes(payload)
+    temporary.replace(path)
+    return path
+
+
+def canonical_bytes(value: object) -> bytes:
+    """Serialize one control object deterministically."""
+
+    text = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+        allow_nan=False,
+    )
+    return (text + "\n").encode("utf-8")
+
+
+def sha256_file(path: Path) -> str:
+    """Hash one file without loading it completely into memory."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def regular_file(path: Path) -> bool:
+    """Accept ordinary files only."""
+
+    return path.is_file() and not path.is_symlink()
+
+
+def require_workspace(path: Path) -> Path:
+    """Validate the fixed U002 workspace identity."""
+
+    root = path.resolve()
+    if not root.is_dir() or root.name != "U-UDP002":
+        raise AcceptanceError("WORKSPACE_ROOT")
+    return root
+
+
+def load_json(path: Path, reason: str) -> Dict[str, object]:
+    """Load one JSON object and reject arrays or missing files."""
+
+    if not regular_file(path):
+        raise AcceptanceError(reason + "_MISSING")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        raise AcceptanceError(reason + "_JSON") from exc
+    if not isinstance(value, dict):
+        raise AcceptanceError(reason + "_TYPE")
+    return value
+
+
+def write_exact_bytes(path: Path, payload: bytes) -> None:
+    """Create one output or accept only an identical replay."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if not regular_file(path) or path.read_bytes() != payload:
+            raise AcceptanceError("OUTPUT_CONFLICT_" + path.name)
+        return
+    path.write_bytes(payload)
+
+
+def run_child(command: Sequence[str], timeout: int = 7200) -> subprocess.CompletedProcess:
+    """Run one controlled child and retain diagnostic streams."""
+
+    return subprocess.run(
+        list(command),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def require_child(
+    root: Path,
+    result: subprocess.CompletedProcess,
+    token: str,
+    label: str,
+) -> None:
+    """Require successful process exit and an explicit positive capsule."""
+
+    if result.returncode == 0 and token in result.stdout and "C-0" in result.stdout:
+        return
+    detail = child_failure_key(result)
+    write_diagnostic(root, label, label, detail, result)
+    raise AcceptanceError(label, detail, label)
+
+
+def freeze_audit(root: Path) -> str:
+    """Confirm the frozen U22 foundation is still unchanged."""
+
+    path = root / FREEZE_AUDITOR
+    if not regular_file(path):
+        raise AcceptanceError("FREEZE_AUDITOR_MISSING")
+    result = run_child(
+        [
+            sys.executable,
+            str(path),
+            "--audit-freeze",
+            "--workspace-root",
+            str(root),
+        ],
+        timeout=120,
+    )
+    require_child(root, result, "N-F11-N8-V1-X0 C-0", "FOUNDATION_AUDIT")
+    return result.stdout.strip().splitlines()[-1]
+
+
+def execute_runner(root: Path) -> None:
+    """Self-test and execute the separate orchestration program."""
+
+    runner = root / "04_TEMP" / RUNNER_NAME
+    if not regular_file(runner):
+        raise AcceptanceError("RUNNER_MISSING")
+    selftest = run_child([sys.executable, str(runner), "--self-test"], timeout=120)
+    require_child(root, selftest, "U22B1B3R-ST", "RUNNER_SELFTEST")
+    formal = run_child(
+        [
+            sys.executable,
+            str(runner),
+            "--run",
+            "--workspace-root",
+            str(root),
+        ]
+    )
+    require_child(root, formal, "U22B1B3R N-M2-S2-A2-I1-X0 C-0", "RUNNER")
+
+
+def discover_run(root: Path) -> Tuple[Path, Dict[str, object]]:
+    """Select the largest, then newest, completed B1B3 technical Run."""
+
+    candidates: List[Tuple[int, int, Path, Dict[str, object]]] = []
+    for path in (root / "07_OUTPUT").glob("*/" + RUN_RECEIPT_NAME):
+        try:
+            receipt = load_json(path, "RUN_RECEIPT")
+            if receipt.get("Status") != "REAL_S1_RECONSTRUCTION_RUN_COMPLETED":
+                continue
+            start = int(receipt.get("FrameStart"))
+            end = int(receipt.get("FrameEnd"))
+            candidates.append((end - start, path.stat().st_mtime_ns, path, receipt))
+        except Exception:
+            continue
+    if not candidates:
+        raise AcceptanceError("COMPLETED_RUN_NOT_FOUND")
+    _, _, receipt_path, receipt = max(
+        candidates,
+        key=lambda item: (item[0], item[1], str(item[2])),
+    )
+    return receipt_path.parent, receipt
+
+
+def validate_status_and_plan(run_root: Path, receipt: Mapping[str, object]) -> None:
+    """Require one completed two-stage plan with the selected outputs."""
+
+    status = load_json(run_root / "run_status.json", "RUN_STATUS")
+    if status.get("Status") != "SUCCEEDED":
+        raise AcceptanceError("RUN_NOT_SUCCEEDED")
+    if int(status.get("CompletedModuleCount", 0)) != 2:
+        raise AcceptanceError("COMPLETED_MODULE_COUNT")
+    plan = load_json(run_root / "00_CONFIG/resolved_run_plan.json", "RESOLVED_PLAN")
+    modules = plan.get("ModulePlan")
+    if not isinstance(modules, list) or len(modules) != 2:
+        raise AcceptanceError("RESOLVED_MODULE_COUNT")
+    if [item.get("Stage") for item in modules] != ["S0", "S1"]:
+        raise AcceptanceError("RESOLVED_STAGE_ORDER")
+    if plan.get("OutputSelection") != [
+        "U001_INTAKE_ACCEPTED",
+        "CAMERA_TARGET_RECONSTRUCTION",
+    ]:
+        raise AcceptanceError("OUTPUT_SELECTION")
+    if plan.get("RunId") != receipt.get("RunId"):
+        raise AcceptanceError("RUN_ID_MISMATCH")
+
+
+def verify_payloads(
+    package_root: Path,
+    manifest: Mapping[str, object],
+) -> Dict[str, Path]:
+    """Verify every declared payload and return paths by basename."""
+
+    payloads = manifest.get("Payloads")
+    if not isinstance(payloads, list) or len(payloads) != 2:
+        raise AcceptanceError("S1_PAYLOAD_COUNT")
+    result: Dict[str, Path] = {}
+    for item in payloads:
+        if not isinstance(item, dict):
+            raise AcceptanceError("S1_PAYLOAD_ITEM")
+        relative = str(item.get("RelativePath", ""))
+        path = package_root / relative
+        if not regular_file(path):
+            raise AcceptanceError("S1_PAYLOAD_MISSING")
+        if sha256_file(path) != item.get("Sha256"):
+            raise AcceptanceError("S1_PAYLOAD_HASH")
+        if path.stat().st_size != int(item.get("ByteSize")):
+            raise AcceptanceError("S1_PAYLOAD_SIZE")
+        result[path.name] = path
+    return result
+
+
+def locate_s1_artifact(run_root: Path) -> Tuple[Path, Dict[str, object], Dict[str, Path]]:
+    """Locate and verify the unique S1 reconstruction Artifact package."""
+
+    index = load_json(run_root / ARTIFACT_INDEX, "ARTIFACT_INDEX")
+    artifacts = index.get("Artifacts")
+    if not isinstance(artifacts, list) or len(artifacts) != 2:
+        raise AcceptanceError("ARTIFACT_COUNT")
+    matches = [
+        item
+        for item in artifacts
+        if isinstance(item, dict) and item.get("ArtifactType") == S1_ARTIFACT_TYPE
+    ]
+    if len(matches) != 1:
+        raise AcceptanceError("S1_ARTIFACT_COUNT")
+    entry = matches[0]
+    manifest_path = run_root / str(entry.get("ManifestRelativePath", ""))
+    if sha256_file(manifest_path) != entry.get("ManifestSha256"):
+        raise AcceptanceError("S1_MANIFEST_HASH")
+    manifest = load_json(manifest_path, "S1_MANIFEST")
+    if manifest.get("ArtifactType") != S1_ARTIFACT_TYPE:
+        raise AcceptanceError("S1_MANIFEST_TYPE")
+    parents = manifest.get("ParentArtifactIds")
+    if not isinstance(parents, list) or len(parents) != 1:
+        raise AcceptanceError("S1_PARENT_LINEAGE")
+    payloads = verify_payloads(manifest_path.parent, manifest)
+    return manifest_path.parent, manifest, payloads
+
+
+def read_and_validate_rows(
+    table_path: Path,
+    quality: Mapping[str, object],
+) -> Tuple[List[Dict[str, str]], Dict[str, int]]:
+    """Validate public S1 row semantics without asserting target truth."""
+
+    rows: List[Dict[str, str]] = []
+    status_counts: Dict[str, int] = {}
+    previous: int = -1
+    switches = 0
+    valid_rows = 0
+    with table_path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        if tuple(reader.fieldnames or ()) != EXPECTED_COLUMNS:
+            raise AcceptanceError("S1_TABLE_COLUMNS")
+        for row in reader:
+            frame = int(row["FrameCount"])
+            if frame <= previous:
+                raise AcceptanceError("S1_FRAME_ORDER")
+            previous = frame
+            valid = row["CanonicalCameraValid"]
+            if valid not in {"0", "1"}:
+                raise AcceptanceError("S1_VALID_DOMAIN")
+            if valid == "1":
+                valid_rows += 1
+                if not row["CanonicalCameraDistance"]:
+                    raise AcceptanceError("S1_VALID_VALUE_MISSING")
+                if row["SelectionStatus"] not in {"SEEDED", "CONFIDENT"}:
+                    raise AcceptanceError("S1_VALID_STATUS")
+            elif row["CanonicalCameraDistance"]:
+                raise AcceptanceError("S1_INVALID_VALUE_PRESENT")
+            status = row["SelectionStatus"]
+            status_counts[status] = status_counts.get(status, 0) + 1
+            switches += int(row["SelectionChanged"])
+            rows.append(row)
+    if not rows:
+        raise AcceptanceError("S1_TABLE_EMPTY")
+    if int(rows[0]["FrameCount"]) != int(quality.get("FrameStart")):
+        raise AcceptanceError("S1_FRAME_START")
+    if int(rows[-1]["FrameCount"]) != int(quality.get("FrameEnd")):
+        raise AcceptanceError("S1_FRAME_END")
+    if len(rows) != int(quality.get("FrameRows")):
+        raise AcceptanceError("S1_ROW_COUNT")
+    if valid_rows != int(quality.get("CanonicalValidRows")):
+        raise AcceptanceError("S1_VALID_COUNT")
+    if switches != int(quality.get("ConfirmedSwitchCount")):
+        raise AcceptanceError("S1_SWITCH_COUNT")
+    return rows, status_counts
+
+
+def csv_bytes(fieldnames: Sequence[str], rows: Iterable[Mapping[str, object]]) -> bytes:
+    """Serialize a small CSV deterministically in memory."""
+
+    import io
+
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=list(fieldnames), lineterminator="\n")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({name: row.get(name, "") for name in fieldnames})
+    return buffer.getvalue().encode("utf-8")
+
+
+def review_rows(frame_min: int, frame_max: int) -> List[Dict[str, object]]:
+    """Create the six previously observed TC001 semantic validation anchors."""
+
+    result: List[Dict[str, object]] = []
+    for event_id, start, end, reason in REVIEW_ANCHORS:
+        clipped_start = max(start, frame_min)
+        clipped_end = min(end, frame_max)
+        if clipped_start > clipped_end:
+            continue
+        result.append(
+            {
+                "EventID": event_id,
+                "StartFrameCount": clipped_start,
+                "PeakFrameCount": (clipped_start + clipped_end) // 2,
+                "EndFrameCount": clipped_end,
+                "EventType": "S1_RECONSTRUCTION_VALIDATION",
+                "ReviewMemo": reason,
+            }
+        )
+    if not result:
+        result.append(
+            {
+                "EventID": "SRV001",
+                "StartFrameCount": frame_min,
+                "PeakFrameCount": (frame_min + frame_max) // 2,
+                "EndFrameCount": frame_max,
+                "EventType": "S1_RECONSTRUCTION_VALIDATION",
+                "ReviewMemo": "SYNTHETIC_OR_SHORT_RANGE_FALLBACK",
+            }
+        )
+    return result
+
+
+def write_validation_views(
+    run_root: Path,
+    rows: Sequence[Mapping[str, str]],
+) -> Tuple[Path, Path, int]:
+    """Write one four-column plot view and one U003-compatible review queue."""
+
+    plot_path = run_root / "05_EXPORTS/u22b1b3_camera_reconstruction_plot_view.csv"
+    plot_payload = csv_bytes(PLOT_COLUMNS, rows)
+    write_exact_bytes(plot_path, plot_payload)
+    frame_min = int(rows[0]["FrameCount"])
+    frame_max = int(rows[-1]["FrameCount"])
+    review = review_rows(frame_min, frame_max)
+    review_fields = (
+        "EventID",
+        "StartFrameCount",
+        "PeakFrameCount",
+        "EndFrameCount",
+        "EventType",
+        "ReviewMemo",
+    )
+    review_path = run_root / "04_REVIEW_PACKAGE/u22b1b3_s1_semantic_review_queue.csv"
+    write_exact_bytes(review_path, csv_bytes(review_fields, review))
+    return plot_path, review_path, len(review)
+
+
+def write_acceptance_receipt(
+    run_root: Path,
+    run_receipt: Mapping[str, object],
+    manifest: Mapping[str, object],
+    quality: Mapping[str, object],
+    status_counts: Mapping[str, int],
+    plot_path: Path,
+    review_path: Path,
+    review_count: int,
+    foundation: str,
+) -> None:
+    """Persist technical acceptance while preserving semantic review as pending."""
+
+    receipt = {
+        "ReceiptContract": "UDP002_U22B1B3_TECHNICAL_ACCEPTANCE_V0_1",
+        "ProgramId": PROGRAM_ID,
+        "ProgramVersion": VERSION,
+        "Status": "TECHNICAL_ACCEPTED_SEMANTIC_REVIEW_PENDING",
+        "RunId": run_receipt["RunId"],
+        "S1ArtifactId": manifest["ArtifactId"],
+        "FrameRows": quality["FrameRows"],
+        "CanonicalValidRows": quality["CanonicalValidRows"],
+        "ConfirmedSwitchCount": quality["ConfirmedSwitchCount"],
+        "SelectionStatusCounts": dict(status_counts),
+        "PlotViewRelativePath": plot_path.relative_to(run_root).as_posix(),
+        "PlotViewSha256": sha256_file(plot_path),
+        "ReviewQueueRelativePath": review_path.relative_to(run_root).as_posix(),
+        "ReviewQueueSha256": sha256_file(review_path),
+        "ReviewWindowCount": review_count,
+        "FoundationAudit": foundation,
+        "HumanClaimLimit": "No target-truth claim until U003 semantic review",
+        "NextNode": "U22B1B3_SEMANTIC_REVIEW",
+    }
+    write_exact_bytes(
+        run_root / ACCEPTANCE_RECEIPT_NAME,
+        canonical_bytes(receipt),
+    )
+
+
+def accept(root: Path) -> str:
+    """Execute the real Run and independently validate all technical evidence."""
+
+    foundation_before = freeze_audit(root)
+    execute_runner(root)
+    run_root, run_receipt = discover_run(root)
+    validate_status_and_plan(run_root, run_receipt)
+    _, manifest, payloads = locate_s1_artifact(run_root)
+    table_path = payloads.get("camera_target_reconstruction.csv")
+    quality_path = payloads.get("camera_target_reconstruction_quality.json")
+    if table_path is None or quality_path is None:
+        raise AcceptanceError("S1_PUBLIC_PAYLOADS")
+    quality = load_json(quality_path, "S1_QUALITY")
+    if quality.get("Status") != "PROVISIONAL_RECONSTRUCTION":
+        raise AcceptanceError("S1_QUALITY_STATUS")
+    rows, status_counts = read_and_validate_rows(table_path, quality)
+    plot_path, review_path, review_count = write_validation_views(run_root, rows)
+    foundation_after = freeze_audit(root)
+    if foundation_before != foundation_after:
+        raise AcceptanceError("FOUNDATION_CHANGED")
+    write_acceptance_receipt(
+        run_root,
+        run_receipt,
+        manifest,
+        quality,
+        status_counts,
+        plot_path,
+        review_path,
+        review_count,
+        foundation_after,
+    )
+    write_diagnostic(root, "COMPLETE", "NONE", "NA", succeeded=True)
+    return (
+        "U22B1B3 N-F"
+        + str(quality["FrameRows"])
+        + "-V"
+        + str(quality["CanonicalValidRows"])
+        + "-S"
+        + str(quality["ConfirmedSwitchCount"])
+        + "-Q"
+        + str(review_count)
+        + "-P1-X0 C-0"
+    )
+
+
+def self_test() -> str:
+    """Exercise row semantics, review anchors and deterministic CSV output."""
+
+    checks: List[bool] = []
+
+    def check(value: bool) -> None:
+        if not value:
+            raise AcceptanceError("SELFTEST")
+        checks.append(True)
+
+    check(PROGRAM_ID.startswith("UDP002"))
+    check(VERSION == "0.2")
+    check(RUNNER_NAME.endswith("v0_2.py.txt"))
+    sample = subprocess.CompletedProcess(
+        ["python", "runner.py"],
+        7,
+        "U22B1B3R N-M0-S0-A0-I0-X1 C-7 R-PREFLIGHT K-PLAN_ARTIFACT_DEPENDENCY J1\n",
+        "",
+    )
+    check(child_failure_key(sample) == "PLAN_ARTIFACT_DEPENDENCY")
+    check(stable("a b/c") == "A_B_C")
+    check(len(EXPECTED_COLUMNS) == 18)
+    check(PLOT_COLUMNS == (
+        "FrameCount",
+        "Camera1Distance",
+        "Camera3Distance",
+        "CanonicalCameraDistance",
+    ))
+    review = review_rows(7400, 57597)
+    check(len(review) == 6)
+    check(review[0]["EventID"] == "SRV001")
+    fallback = review_rows(7400, 7420)
+    check(len(fallback) == 1)
+    check(fallback[0]["ReviewMemo"] == "SYNTHETIC_OR_SHORT_RANGE_FALLBACK")
+    payload = csv_bytes(("A", "B"), [{"A": 1, "B": 2}])
+    check(payload == b"A,B\n1,2\n")
+    with tempfile.TemporaryDirectory(prefix="u22b1b3_gate_selftest_") as temporary:
+        path = Path(temporary) / "x.json"
+        write_exact_bytes(path, canonical_bytes({"a": 1}))
+        check(load_json(path, "X") == {"a": 1})
+        check(len(sha256_file(path)) == 64)
+    check(S1_ARTIFACT_TYPE == "CAMERA_TARGET_RECONSTRUCTION")
+    check(RUN_RECEIPT_NAME.endswith(".json"))
+    check(ACCEPTANCE_RECEIPT_NAME.endswith(".json"))
+    check(REVIEW_ANCHORS[2][1] == 37800)
+    check(REVIEW_ANCHORS[-1][2] == 53013)
+    return "U22B1B3-ST N-T" + str(len(checks)) + "-X0 C-0"
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    """Create explicit self-test and acceptance modes."""
+
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--accept", action="store_true")
+    parser.add_argument("--workspace-root")
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] = None) -> int:
+    """Program entry point."""
+
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        if args.self_test:
+            print(self_test())
+            return 0
+        if not args.workspace_root:
+            raise AcceptanceError("WORKSPACE_ROOT_REQUIRED")
+        root = require_workspace(Path(args.workspace_root))
+        print(accept(root))
+        return 0
+    except subprocess.TimeoutExpired:
+        root_value = locals().get("root")
+        if isinstance(root_value, Path):
+            try:
+                write_diagnostic(root_value, "TIMEOUT", "TIMEOUT", "CHILD_TIMEOUT")
+            except Exception:
+                pass
+        print("U22B1B3 N-F0-V0-S0-Q0-P0-X1 C-7 R-TIMEOUT")
+        return 7
+    except Exception as exc:
+        if isinstance(exc, AcceptanceError):
+            reason = exc.reason
+            detail = exc.detail
+            phase = exc.phase
+        else:
+            reason = stable(exc.__class__.__name__, 48)
+            detail = stable(exc, 64)
+            phase = "ACCEPTANCE"
+        root_value = locals().get("root")
+        if isinstance(root_value, Path):
+            try:
+                write_diagnostic(root_value, phase, reason, detail)
+            except Exception:
+                pass
+        print(
+            "U22B1B3 N-F0-V0-S0-Q0-P0-X1 C-7"
+            f" R-{reason} K-{detail} J1"
+        )
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
