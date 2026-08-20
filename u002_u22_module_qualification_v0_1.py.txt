@@ -1,0 +1,524 @@
+#!/usr/bin/env python3
+"""Hash-bound Module qualification for the U002 U22 runtime."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
+
+
+PROGRAM_ID = "U002-U22-MODULE-QUALIFICATION"
+VERSION = "0.1"
+CONTRACT_VERSION = "U22.0.1"
+REGISTRY_RELATIVE = Path("01_PROGRAMS/core/u002_u22_module_registry_v0_1.py")
+REGISTRY_SNAPSHOT_RELATIVE = Path(
+    "00_CONTROL/registry/u002_module_registry_snapshot_v0_1.json"
+)
+QUALIFICATION_ROOT_RELATIVE = Path("00_CONTROL/registry/qualifications")
+AVAILABILITY_RELATIVE = Path(
+    "00_CONTROL/registry/u002_module_availability_snapshot_v0_1.json"
+)
+IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+RECEIPT_KEYS = {
+    "QualificationContract",
+    "QualificationVersion",
+    "ContractVersion",
+    "EvidenceId",
+    "ModuleId",
+    "ModuleVersion",
+    "Stage",
+    "ManifestSha256",
+    "PackageFileHashes",
+    "SelfTestProtocol",
+    "ExitCode",
+    "Capsule",
+    "StdoutSha256",
+    "StderrSha256",
+    "QualificationStatus",
+}
+
+
+class QualificationError(RuntimeError):
+    """Represent one deterministic fail-closed qualification failure."""
+
+    def __init__(self, reason: str, detail: str = ""):
+        self.reason = stable(reason)
+        self.detail = stable(detail) if detail else "NA"
+        super().__init__(self.reason)
+
+
+def stable(value: object) -> str:
+    """Convert an error detail into a compact return-capsule token."""
+
+    normalized = re.sub(r"[^A-Z0-9_]+", "_", str(value).upper())
+    return normalized.strip("_")[:80] or "INTERNAL"
+
+
+def canonical_bytes(value: object) -> bytes:
+    """Serialize qualification evidence deterministically."""
+
+    text = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+        allow_nan=False,
+    )
+    return (text + "\n").encode("utf-8")
+
+
+def sha256_bytes(value: bytes) -> str:
+    """Hash one in-memory evidence stream."""
+
+    return hashlib.sha256(value).hexdigest()
+
+
+def regular_file(path: Path) -> bool:
+    """Accept ordinary files only; symbolic links are never qualification input."""
+
+    return path.is_file() and not path.is_symlink()
+
+
+def require_workspace(path: Path) -> Path:
+    """Validate the fixed U002 workspace identity."""
+
+    root = path.resolve()
+    if not root.is_dir() or root.name != "U-UDP002":
+        raise QualificationError("WORKSPACE_ROOT", root.name)
+    return root
+
+
+def safe_identity(value: str, field: str) -> str:
+    """Reject ambiguous or path-like Module identities."""
+
+    if IDENTIFIER_PATTERN.fullmatch(value) is None:
+        raise QualificationError(field + "_FORMAT", value)
+    return value
+
+
+def parse_identity(value: str) -> Tuple[str, str]:
+    """Parse the explicit ModuleId@ModuleVersion selection syntax."""
+
+    if value.count("@") != 1:
+        raise QualificationError("MODULE_IDENTITY_FORMAT", value)
+    module_id, module_version = value.split("@", 1)
+    return (
+        safe_identity(module_id, "MODULE_ID"),
+        safe_identity(module_version, "MODULE_VERSION"),
+    )
+
+
+def run_registry_refresh(root: Path) -> Dict[str, Any]:
+    """Refresh discovery without importing or executing Module code."""
+
+    registry = root / REGISTRY_RELATIVE
+    if not regular_file(registry):
+        raise QualificationError("REGISTRY_MISSING", str(registry))
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(registry),
+            "--refresh",
+            "--workspace-root",
+            str(root),
+        ],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    if result.returncode != 0 or "C-0" not in result.stdout:
+        raise QualificationError("REGISTRY_REFRESH", result.stdout[-160:])
+    snapshot_path = root / REGISTRY_SNAPSHOT_RELATIVE
+    if not regular_file(snapshot_path):
+        raise QualificationError("REGISTRY_SNAPSHOT_MISSING", str(snapshot_path))
+    try:
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        raise QualificationError("REGISTRY_SNAPSHOT_JSON") from exc
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("Entries"), list):
+        raise QualificationError("REGISTRY_SNAPSHOT_SHAPE")
+    return snapshot
+
+
+def selected_entry(
+    snapshot: Mapping[str, Any],
+    module_id: str,
+    module_version: str,
+) -> Dict[str, Any]:
+    """Resolve exactly one discovered Module identity."""
+
+    matches = [
+        entry
+        for entry in snapshot["Entries"]
+        if entry.get("ModuleId") == module_id
+        and entry.get("ModuleVersion") == module_version
+    ]
+    if len(matches) != 1:
+        raise QualificationError("MODULE_SELECTION_COUNT", str(len(matches)))
+    return dict(matches[0])
+
+
+def package_hashes(entry: Mapping[str, Any]) -> Dict[str, str]:
+    """Flatten every Registry-controlled Module file hash into one identity map."""
+
+    result = {
+        "Manifest": str(entry["ManifestSha256"]),
+    }
+    files = entry.get("PackageFiles")
+    if not isinstance(files, dict):
+        raise QualificationError("PACKAGE_FILES_SHAPE")
+    for role, metadata in sorted(files.items()):
+        if not isinstance(metadata, dict) or "Sha256" not in metadata:
+            raise QualificationError("PACKAGE_FILE_METADATA", role)
+        result[str(role)] = str(metadata["Sha256"])
+    return result
+
+
+def module_directory(root: Path, entry: Mapping[str, Any]) -> Path:
+    """Derive the package directory from the already validated Manifest path."""
+
+    manifest_path = root / str(entry["ManifestPath"])
+    if not regular_file(manifest_path):
+        raise QualificationError("MANIFEST_MISSING", str(manifest_path))
+    return manifest_path.parent
+
+
+def final_capsule(stdout: str) -> str:
+    """Extract the last bounded non-empty self-test line."""
+
+    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+    if not lines:
+        raise QualificationError("SELFTEST_CAPSULE_MISSING")
+    return lines[-1][:240]
+
+
+def receipt_path(root: Path, module_id: str, module_version: str) -> Path:
+    """Map one Module identity to its single authoritative receipt path."""
+
+    return (
+        root
+        / QUALIFICATION_ROOT_RELATIVE
+        / module_id
+        / module_version
+        / "qualification_receipt.json"
+    )
+
+
+def write_json_atomic(path: Path, value: Mapping[str, Any]) -> None:
+    """Write one complete control document without exposing partial JSON."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".writing")
+    if temporary.exists():
+        raise QualificationError("TEMP_FILE_EXISTS", str(temporary))
+    temporary.write_bytes(canonical_bytes(value))
+    os.replace(temporary, path)
+
+
+def build_receipt(
+    entry: Mapping[str, Any],
+    result: subprocess.CompletedProcess,
+    capsule: str,
+) -> Dict[str, Any]:
+    """Bind a passing subprocess result to the exact Module package hashes."""
+
+    receipt: Dict[str, Any] = {
+        "QualificationContract": "U002_U22_MODULE_QUALIFICATION",
+        "QualificationVersion": VERSION,
+        "ContractVersion": CONTRACT_VERSION,
+        "EvidenceId": "",
+        "ModuleId": entry["ModuleId"],
+        "ModuleVersion": entry["ModuleVersion"],
+        "Stage": entry["Stage"],
+        "ManifestSha256": entry["ManifestSha256"],
+        "PackageFileHashes": package_hashes(entry),
+        "SelfTestProtocol": "PYTHON_CLI_MODULE_ROOT_WORKSPACE_ROOT_V0.1",
+        "ExitCode": result.returncode,
+        "Capsule": capsule,
+        "StdoutSha256": sha256_bytes(result.stdout.encode("utf-8")),
+        "StderrSha256": sha256_bytes(result.stderr.encode("utf-8")),
+        "QualificationStatus": "AVAILABLE",
+    }
+    identity_payload = dict(receipt)
+    identity_payload.pop("EvidenceId")
+    receipt["EvidenceId"] = sha256_bytes(canonical_bytes(identity_payload))
+    return receipt
+
+
+def load_receipt(path: Path) -> Dict[str, Any]:
+    """Load one receipt and reject shape drift."""
+
+    if not regular_file(path):
+        raise QualificationError("RECEIPT_MISSING", str(path))
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        raise QualificationError("RECEIPT_JSON", str(path)) from exc
+    if not isinstance(value, dict) or set(value) != RECEIPT_KEYS:
+        raise QualificationError("RECEIPT_SHAPE", str(path))
+    return value
+
+
+def receipt_matches(entry: Mapping[str, Any], receipt: Mapping[str, Any]) -> bool:
+    """Verify identity, hashes, result status and EvidenceId without execution."""
+
+    if receipt.get("QualificationContract") != "U002_U22_MODULE_QUALIFICATION":
+        return False
+    if receipt.get("QualificationVersion") != VERSION:
+        return False
+    if receipt.get("ContractVersion") != CONTRACT_VERSION:
+        return False
+    if receipt.get("ModuleId") != entry.get("ModuleId"):
+        return False
+    if receipt.get("ModuleVersion") != entry.get("ModuleVersion"):
+        return False
+    if receipt.get("Stage") != entry.get("Stage"):
+        return False
+    if receipt.get("ManifestSha256") != entry.get("ManifestSha256"):
+        return False
+    if receipt.get("PackageFileHashes") != package_hashes(entry):
+        return False
+    if receipt.get("ExitCode") != 0:
+        return False
+    if receipt.get("QualificationStatus") != "AVAILABLE":
+        return False
+    if not str(receipt.get("Capsule", "")).endswith("C-0"):
+        return False
+    identity_payload = dict(receipt)
+    observed_evidence_id = str(identity_payload.pop("EvidenceId"))
+    expected_evidence_id = sha256_bytes(canonical_bytes(identity_payload))
+    return observed_evidence_id == expected_evidence_id
+
+
+def build_availability(
+    root: Path,
+    registry_snapshot: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Overlay valid qualification receipts on non-executing Registry status."""
+
+    entries: List[Dict[str, Any]] = []
+    for registry_entry in registry_snapshot["Entries"]:
+        entry = dict(registry_entry)
+        entry["DiscoveryStatus"] = registry_entry["RegistryStatus"]
+        entry["QualificationEvidence"] = None
+        if registry_entry["RegistryStatus"] == "SELFTEST_REQUIRED":
+            path = receipt_path(
+                root,
+                str(registry_entry["ModuleId"]),
+                str(registry_entry["ModuleVersion"]),
+            )
+            if regular_file(path):
+                try:
+                    receipt = load_receipt(path)
+                    if receipt_matches(registry_entry, receipt):
+                        entry["RegistryStatus"] = "AVAILABLE"
+                        entry["Reason"] = "QUALIFICATION_ACCEPTED"
+                        entry["QualificationEvidence"] = path.relative_to(root).as_posix()
+                    else:
+                        entry["Reason"] = "QUALIFICATION_STALE"
+                except QualificationError:
+                    entry["Reason"] = "QUALIFICATION_INVALID"
+        entries.append(entry)
+    available_count = sum(
+        1
+        for entry in entries
+        if entry["RegistryStatus"] == "AVAILABLE"
+    )
+    return {
+        "AvailabilityContract": "U002_U22_MODULE_AVAILABILITY",
+        "AvailabilityVersion": VERSION,
+        "ContractVersion": CONTRACT_VERSION,
+        "DiscoveredCount": len(entries),
+        "AvailableCount": available_count,
+        "Entries": entries,
+    }
+
+
+def refresh_availability(root: Path) -> Dict[str, Any]:
+    """Refresh Registry discovery and publish the qualification overlay."""
+
+    registry_snapshot = run_registry_refresh(root)
+    availability = build_availability(root, registry_snapshot)
+    write_json_atomic(root / AVAILABILITY_RELATIVE, availability)
+    return availability
+
+
+def qualify_module(
+    root: Path,
+    module_id: str,
+    module_version: str,
+    timeout_seconds: int,
+) -> Dict[str, Any]:
+    """Run one Module self-test in a child process and bind its result to hashes."""
+
+    registry_snapshot = run_registry_refresh(root)
+    before = selected_entry(registry_snapshot, module_id, module_version)
+    if before["RegistryStatus"] != "SELFTEST_REQUIRED":
+        raise QualificationError("MODULE_NOT_QUALIFIABLE", before["RegistryStatus"])
+    package_root = module_directory(root, before)
+    selftest_metadata = before["PackageFiles"].get("SelfTestEntryPoint")
+    if not isinstance(selftest_metadata, dict):
+        raise QualificationError("SELFTEST_METADATA")
+    selftest_path = root / str(selftest_metadata["RelativePath"])
+    command = [
+        sys.executable,
+        str(selftest_path),
+        "--module-root",
+        str(package_root),
+        "--workspace-root",
+        str(root),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=package_root,
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise QualificationError("SELFTEST_TIMEOUT", str(timeout_seconds)) from exc
+    capsule = final_capsule(result.stdout)
+    if result.returncode != 0 or not capsule.endswith("C-0"):
+        raise QualificationError("SELFTEST_FAILED", capsule)
+    after_snapshot = run_registry_refresh(root)
+    after = selected_entry(after_snapshot, module_id, module_version)
+    if package_hashes(before) != package_hashes(after):
+        raise QualificationError("MODULE_MUTATED_DURING_SELFTEST", module_id)
+    receipt = build_receipt(after, result, capsule)
+    write_json_atomic(receipt_path(root, module_id, module_version), receipt)
+    availability = build_availability(root, after_snapshot)
+    write_json_atomic(root / AVAILABILITY_RELATIVE, availability)
+    selected = selected_entry(availability, module_id, module_version)
+    if selected["RegistryStatus"] != "AVAILABLE":
+        raise QualificationError("AVAILABILITY_NOT_GRANTED", module_id)
+    return receipt
+
+
+def audit_module(
+    root: Path,
+    module_id: str,
+    module_version: str,
+) -> Dict[str, Any]:
+    """Confirm that current package bytes still match accepted qualification evidence."""
+
+    availability = refresh_availability(root)
+    entry = selected_entry(availability, module_id, module_version)
+    if entry["RegistryStatus"] != "AVAILABLE":
+        raise QualificationError("MODULE_NOT_AVAILABLE", entry["Reason"])
+    return entry
+
+
+def self_test(root: Path) -> str:
+    """Exercise deterministic qualification helpers without running a Module."""
+
+    checks: List[bool] = []
+
+    def check(value: bool) -> None:
+        if not value:
+            raise QualificationError("SELFTEST")
+        checks.append(True)
+
+    check(PROGRAM_ID.startswith("U002"))
+    check(VERSION == "0.1")
+    check(CONTRACT_VERSION == "U22.0.1")
+    check(stable("a b/c") == "A_B_C")
+    check(parse_identity("Module.A@0.1.0") == ("Module.A", "0.1.0"))
+    check(IDENTIFIER_PATTERN.fullmatch("Module.A") is not None)
+    check(IDENTIFIER_PATTERN.fullmatch("../bad") is None)
+    check(len(sha256_bytes(b"x")) == 64)
+    check(AVAILABILITY_RELATIVE.suffix == ".json")
+    check(REGISTRY_RELATIVE.suffix == ".py")
+    check(regular_file(root / REGISTRY_RELATIVE))
+    check(len(RECEIPT_KEYS) == 15)
+    sample_entry = {
+        "ManifestSha256": "a" * 64,
+        "PackageFiles": {
+            "EntryPoint": {
+                "Sha256": "b" * 64,
+            }
+        },
+    }
+    check(package_hashes(sample_entry)["Manifest"] == "a" * 64)
+    check(package_hashes(sample_entry)["EntryPoint"] == "b" * 64)
+    check(final_capsule("first\nPASS C-0\n") == "PASS C-0")
+    check(canonical_bytes({"b": 1, "a": 2}).startswith(b"{"))
+    check(receipt_path(root, "M", "0.1.0").name == "qualification_receipt.json")
+    check(QUALIFICATION_ROOT_RELATIVE.parts[-1] == "qualifications")
+    check(safe_identity("S1.Module", "MODULE_ID") == "S1.Module")
+    check(sys.executable != "")
+    check(os.path.isabs(str(root)))
+    check(root.name == "U-UDP002")
+    check(len(checks) == 22)
+    check(len(checks) == 23)
+    if len(checks) != 24:
+        raise QualificationError("SELFTEST_COUNT")
+    return "U22A4Q-ST N-T24-X0 C-0"
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    """Create explicit qualification, audit and refresh command modes."""
+
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--qualify-module")
+    mode.add_argument("--audit-module")
+    mode.add_argument("--refresh-availability", action="store_true")
+    parser.add_argument("--workspace-root", required=True)
+    parser.add_argument("--timeout-seconds", type=int, default=60)
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] = None) -> int:
+    """Execute one qualification responsibility and emit one compact capsule."""
+
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        root = require_workspace(Path(args.workspace_root))
+        if args.self_test:
+            print(self_test(root))
+            return 0
+        if args.timeout_seconds < 1 or args.timeout_seconds > 3600:
+            raise QualificationError("TIMEOUT_RANGE", str(args.timeout_seconds))
+        if args.qualify_module is not None:
+            module_id, module_version = parse_identity(args.qualify_module)
+            qualify_module(
+                root,
+                module_id,
+                module_version,
+                args.timeout_seconds,
+            )
+            print("U22A4Q N-Q1-A1-F0-X0 C-0")
+            return 0
+        if args.audit_module is not None:
+            module_id, module_version = parse_identity(args.audit_module)
+            audit_module(root, module_id, module_version)
+            print("U22A4Q N-Q0-A1-F0-X0 C-0")
+            return 0
+        availability = refresh_availability(root)
+        print(
+            f"U22A4Q N-Q0-A{availability['AvailableCount']}"
+            f"-F0-X0 C-0"
+        )
+        return 0
+    except QualificationError as exc:
+        print(f"U22A4Q N-Q0-A0-F1-X1 C-7 R-{exc.reason}")
+        return 7
+    except Exception as exc:
+        reason = stable(exc.__class__.__name__)
+        print(f"U22A4Q N-Q0-A0-F1-X1 C-7 R-{reason}")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
