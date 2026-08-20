@@ -1,0 +1,673 @@
+#!/usr/bin/env python3
+"""Non-executing Run preparation for the U002 U22 Engine."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+from typing import Any, Dict, List, Mapping, Sequence, Set, Tuple
+
+
+PROGRAM_ID = "U002-U22-ENGINE-PREFLIGHT"
+VERSION = "0.1"
+CONTRACT_VERSION = "U22.0.1"
+STAGES: Tuple[str, ...] = ("S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7")
+VALIDATOR_RELATIVE = Path("01_PROGRAMS/core/u002_u22_contract_validator_v0_1.py")
+QUALIFICATION_RELATIVE = Path(
+    "01_PROGRAMS/core/u002_u22_module_qualification_v0_1.py"
+)
+AVAILABILITY_RELATIVE = Path(
+    "00_CONTROL/registry/u002_module_availability_snapshot_v0_1.json"
+)
+RUN_CONFIG_ROOT_RELATIVE = Path("02_CONFIG/run_configs")
+RUN_OUTPUT_ROOT_RELATIVE = Path("07_OUTPUT")
+IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+SUPPORTED_SCHEMA_KEYS = {
+    "$schema",
+    "$id",
+    "title",
+    "description",
+    "type",
+    "const",
+    "enum",
+    "allOf",
+    "if",
+    "then",
+    "required",
+    "properties",
+    "additionalProperties",
+    "minItems",
+    "uniqueItems",
+    "items",
+    "minLength",
+    "pattern",
+    "minimum",
+}
+
+
+class PreflightError(RuntimeError):
+    """Represent one deterministic fail-closed Run preparation failure."""
+
+    def __init__(self, reason: str, detail: str = ""):
+        self.reason = stable(reason)
+        self.detail = stable(detail) if detail else "NA"
+        super().__init__(self.reason)
+
+
+def stable(value: object) -> str:
+    """Convert one error detail into a compact return-capsule token."""
+
+    normalized = re.sub(r"[^A-Z0-9_]+", "_", str(value).upper())
+    return normalized.strip("_")[:80] or "INTERNAL"
+
+
+def canonical_bytes(value: object) -> bytes:
+    """Serialize control documents deterministically."""
+
+    text = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+        allow_nan=False,
+    )
+    return (text + "\n").encode("utf-8")
+
+
+def sha256_bytes(value: bytes) -> str:
+    """Hash one complete control document."""
+
+    return hashlib.sha256(value).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    """Hash a file without loading it completely into memory."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def regular_file(path: Path) -> bool:
+    """Accept ordinary files only; symbolic links are not trusted control input."""
+
+    return path.is_file() and not path.is_symlink()
+
+
+def inside(child: Path, parent: Path) -> bool:
+    """Return True only when the resolved child remains inside the parent."""
+
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def require_workspace(path: Path) -> Path:
+    """Validate the fixed U002 workspace identity."""
+
+    root = path.resolve()
+    if not root.is_dir() or root.name != "U-UDP002":
+        raise PreflightError("WORKSPACE_ROOT", root.name)
+    return root
+
+
+def safe_identifier(value: object, field: str) -> str:
+    """Reject path-like or ambiguous identifiers before creating directories."""
+
+    text = str(value)
+    if IDENTIFIER_PATTERN.fullmatch(text) is None:
+        raise PreflightError(field + "_FORMAT", text)
+    return text
+
+
+def load_validator(root: Path) -> Any:
+    """Load only the approved Core Contract Validator from its exact path."""
+
+    path = root / VALIDATOR_RELATIVE
+    if not regular_file(path) or not inside(path, root):
+        raise PreflightError("VALIDATOR_MISSING", str(path))
+    spec = importlib.util.spec_from_file_location(
+        "u002_u22_contract_validator",
+        path,
+    )
+    if spec is None or spec.loader is None:
+        raise PreflightError("VALIDATOR_LOAD", str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    required_api = ("load_json", "validate_document", "validate_schema")
+    if any(not hasattr(module, name) for name in required_api):
+        raise PreflightError("VALIDATOR_API", str(path))
+    if getattr(module, "CONTRACT_VERSION", None) != CONTRACT_VERSION:
+        raise PreflightError("VALIDATOR_VERSION", str(path))
+    return module
+
+
+def load_run_configuration(
+    root: Path,
+    path: Path,
+    validator: Any,
+) -> Dict[str, Any]:
+    """Load one explicit Run Configuration from the controlled config directory."""
+
+    resolved = path.resolve()
+    config_root = (root / RUN_CONFIG_ROOT_RELATIVE).resolve()
+    if not regular_file(resolved) or not inside(resolved, config_root):
+        raise PreflightError("RUN_CONFIG_LOCATION", str(resolved))
+    document = validator.load_json(resolved, "RUN_CONFIGURATION_JSON")
+    validator.validate_document(root, "RUN", document)
+    safe_identifier(document["RunId"], "RUN_ID")
+    return document
+
+
+def refresh_availability(root: Path) -> Dict[str, Any]:
+    """Recompute Module eligibility before resolving any Run Plan."""
+
+    qualification = root / QUALIFICATION_RELATIVE
+    if not regular_file(qualification):
+        raise PreflightError("QUALIFICATION_MISSING", str(qualification))
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(qualification),
+            "--refresh-availability",
+            "--workspace-root",
+            str(root),
+        ],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    if result.returncode != 0 or "C-0" not in result.stdout:
+        raise PreflightError("AVAILABILITY_REFRESH", result.stdout[-160:])
+    path = root / AVAILABILITY_RELATIVE
+    if not regular_file(path):
+        raise PreflightError("AVAILABILITY_MISSING", str(path))
+    try:
+        snapshot = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        raise PreflightError("AVAILABILITY_JSON", str(path)) from exc
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("Entries"), list):
+        raise PreflightError("AVAILABILITY_SHAPE", str(path))
+    return snapshot
+
+
+def availability_entry(
+    snapshot: Mapping[str, Any],
+    module_id: str,
+    module_version: str,
+) -> Dict[str, Any]:
+    """Resolve exactly one Module from the current availability snapshot."""
+
+    matches = [
+        entry
+        for entry in snapshot["Entries"]
+        if entry.get("ModuleId") == module_id
+        and entry.get("ModuleVersion") == module_version
+    ]
+    if len(matches) != 1:
+        raise PreflightError("MODULE_SELECTION_COUNT", str(len(matches)))
+    entry = dict(matches[0])
+    if entry.get("RegistryStatus") != "AVAILABLE":
+        raise PreflightError("MODULE_NOT_AVAILABLE", module_id)
+    if entry.get("AlgorithmStatus") == "DEPRECATED":
+        raise PreflightError("MODULE_DEPRECATED", module_id)
+    evidence = entry.get("QualificationEvidence")
+    if not isinstance(evidence, str) or not regular_file(Path(snapshot_root(snapshot)) / evidence):
+        raise PreflightError("QUALIFICATION_EVIDENCE", module_id)
+    return entry
+
+
+def snapshot_root(snapshot: Mapping[str, Any]) -> str:
+    """Read the temporary non-serialized root attached by the caller."""
+
+    value = snapshot.get("_WorkspaceRoot")
+    if not isinstance(value, str):
+        raise PreflightError("SNAPSHOT_ROOT")
+    return value
+
+
+def load_qualified_manifest(
+    root: Path,
+    entry: Mapping[str, Any],
+    validator: Any,
+) -> Dict[str, Any]:
+    """Load the manifest whose exact hash was accepted by qualification."""
+
+    manifest_path = root / str(entry.get("ManifestPath", ""))
+    if not regular_file(manifest_path) or not inside(manifest_path, root):
+        raise PreflightError("MANIFEST_MISSING", entry.get("ModuleId"))
+    if sha256_file(manifest_path) != entry.get("ManifestSha256"):
+        raise PreflightError("MANIFEST_HASH", entry.get("ModuleId"))
+    manifest = validator.load_json(manifest_path, "MODULE_MANIFEST_JSON")
+    validator.validate_document(root, "MODULE", manifest)
+    identity = (
+        manifest.get("ModuleId"),
+        manifest.get("ModuleVersion"),
+        manifest.get("Stage"),
+    )
+    expected_identity = (
+        entry.get("ModuleId"),
+        entry.get("ModuleVersion"),
+        entry.get("Stage"),
+    )
+    if identity != expected_identity:
+        raise PreflightError("MANIFEST_IDENTITY", entry.get("ModuleId"))
+    return manifest
+
+
+def audit_configuration_schema(schema: Any, path: str = "$") -> None:
+    """Reject unsupported JSON Schema keywords instead of silently ignoring them."""
+
+    if not isinstance(schema, dict):
+        raise PreflightError("CONFIG_SCHEMA_NODE", path)
+    for key, value in schema.items():
+        if key not in SUPPORTED_SCHEMA_KEYS:
+            raise PreflightError("CONFIG_SCHEMA_KEY", key)
+        if key in ("properties",):
+            if not isinstance(value, dict):
+                raise PreflightError("CONFIG_SCHEMA_PROPERTIES", path)
+            for child_name, child_schema in value.items():
+                audit_configuration_schema(
+                    child_schema,
+                    path + ".properties." + str(child_name),
+                )
+        elif key in ("items", "if", "then", "additionalProperties"):
+            if isinstance(value, dict):
+                audit_configuration_schema(value, path + "." + key)
+        elif key == "allOf":
+            if not isinstance(value, list):
+                raise PreflightError("CONFIG_SCHEMA_ALLOF", path)
+            for index, child_schema in enumerate(value):
+                audit_configuration_schema(
+                    child_schema,
+                    f"{path}.allOf[{index}]",
+                )
+
+
+def validate_module_configuration(
+    root: Path,
+    entry: Mapping[str, Any],
+    configuration: Mapping[str, Any],
+    validator: Any,
+) -> None:
+    """Validate one selected Module configuration against its package schema."""
+
+    package_files = entry.get("PackageFiles")
+    if not isinstance(package_files, dict):
+        raise PreflightError("PACKAGE_FILES", entry.get("ModuleId"))
+    schema_metadata = package_files.get("ConfigurationSchema")
+    if schema_metadata is None:
+        if configuration:
+            raise PreflightError("CONFIGURATION_NOT_SUPPORTED", entry.get("ModuleId"))
+        return
+    if not isinstance(schema_metadata, dict):
+        raise PreflightError("CONFIGURATION_SCHEMA_METADATA", entry.get("ModuleId"))
+    schema_path = root / str(schema_metadata.get("RelativePath", ""))
+    if not regular_file(schema_path) or not inside(schema_path, root):
+        raise PreflightError("CONFIGURATION_SCHEMA_MISSING", entry.get("ModuleId"))
+    schema = validator.load_json(schema_path, "CONFIGURATION_SCHEMA_JSON")
+    audit_configuration_schema(schema)
+    try:
+        validator.validate_schema(configuration, schema, "$.Configuration")
+    except Exception as exc:
+        reason = getattr(exc, "reason", exc.__class__.__name__)
+        raise PreflightError("MODULE_CONFIGURATION_" + stable(reason)) from exc
+
+
+def resolve_input_package(root: Path, value: str) -> Path:
+    """Resolve the U001 package reference without modifying its contents."""
+
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    resolved = candidate.resolve()
+    if not resolved.exists() or resolved.is_symlink():
+        raise PreflightError("INPUT_PACKAGE_MISSING", str(resolved))
+    if not resolved.is_file() and not resolved.is_dir():
+        raise PreflightError("INPUT_PACKAGE_TYPE", str(resolved))
+    return resolved
+
+
+def resolved_module_record(
+    root: Path,
+    plan_item: Mapping[str, Any],
+    entry: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Freeze one qualified Module identity and its resolved configuration."""
+
+    manifest_path = root / str(entry["ManifestPath"])
+    module_root = manifest_path.parent
+    entrypoint_metadata = entry["PackageFiles"].get("EntryPoint")
+    if not isinstance(entrypoint_metadata, dict):
+        raise PreflightError("ENTRYPOINT_METADATA", entry.get("ModuleId"))
+    entrypoint = root / str(entrypoint_metadata.get("RelativePath", ""))
+    if not regular_file(entrypoint) or not inside(entrypoint, module_root):
+        raise PreflightError("ENTRYPOINT_MISSING", entry.get("ModuleId"))
+    configuration = plan_item["Configuration"]
+    configuration_hash = sha256_bytes(canonical_bytes(configuration))
+    return {
+        "Sequence": plan_item["Sequence"],
+        "Stage": plan_item["Stage"],
+        "ModuleId": plan_item["ModuleId"],
+        "ModuleVersion": plan_item["ModuleVersion"],
+        "ModuleRoot": module_root.relative_to(root).as_posix(),
+        "EntryPoint": entrypoint.relative_to(root).as_posix(),
+        "ManifestPath": entry["ManifestPath"],
+        "ManifestSha256": entry["ManifestSha256"],
+        "QualificationEvidence": entry["QualificationEvidence"],
+        "AlgorithmStatus": entry["AlgorithmStatus"],
+        "RequiredInputs": list(manifest.get("RequiredInputs", [])),
+        "OptionalInputs": list(manifest.get("OptionalInputs", [])),
+        "RequiresArtifacts": list(manifest.get("RequiresArtifacts", [])),
+        "ProvidesArtifacts": list(manifest.get("ProvidesArtifacts", [])),
+        "FailurePolicy": manifest.get("FailurePolicy"),
+        "ConflictPolicy": manifest.get("ConflictPolicy"),
+        "Configuration": configuration,
+        "ConfigurationSha256": configuration_hash,
+    }
+
+
+def resolve_plan(
+    root: Path,
+    run_configuration: Mapping[str, Any],
+    availability: Dict[str, Any],
+    validator: Any,
+) -> List[Dict[str, Any]]:
+    """Resolve qualified Modules and enforce explicit Artifact dependencies."""
+
+    availability["_WorkspaceRoot"] = str(root)
+    resolved: List[Dict[str, Any]] = []
+    provided: Set[str] = set()
+    for plan_item in run_configuration["ModulePlan"]:
+        entry = availability_entry(
+            availability,
+            str(plan_item["ModuleId"]),
+            str(plan_item["ModuleVersion"]),
+        )
+        if entry["Stage"] != plan_item["Stage"]:
+            raise PreflightError("PLAN_STAGE_IDENTITY", plan_item["ModuleId"])
+        manifest = load_qualified_manifest(root, entry, validator)
+        validate_module_configuration(
+            root,
+            entry,
+            plan_item["Configuration"],
+            validator,
+        )
+        missing = [
+            artifact_type
+            for artifact_type in manifest.get("RequiresArtifacts", [])
+            if artifact_type not in provided
+        ]
+        if missing:
+            raise PreflightError("PLAN_ARTIFACT_DEPENDENCY", missing[0])
+        for artifact_type in manifest.get("ProvidesArtifacts", []):
+            if artifact_type in provided:
+                raise PreflightError("PLAN_ARTIFACT_CONFLICT", artifact_type)
+            provided.add(artifact_type)
+        resolved.append(
+            resolved_module_record(root, plan_item, entry, manifest)
+        )
+    unavailable_outputs = [
+        artifact_type
+        for artifact_type in run_configuration["OutputSelection"]
+        if artifact_type not in provided
+    ]
+    if unavailable_outputs:
+        raise PreflightError("OUTPUT_NOT_PROVIDED", unavailable_outputs[0])
+    availability.pop("_WorkspaceRoot", None)
+    return resolved
+
+
+def build_resolved_plan(
+    root: Path,
+    config_path: Path,
+    run_configuration: Mapping[str, Any],
+    modules: Sequence[Mapping[str, Any]],
+    input_package: Path,
+) -> Dict[str, Any]:
+    """Create the immutable execution intent consumed by a later Executor."""
+
+    plan: Dict[str, Any] = {
+        "EngineContract": "U002_U22_RESOLVED_RUN_PLAN",
+        "EngineVersion": VERSION,
+        "ContractVersion": CONTRACT_VERSION,
+        "RunId": run_configuration["RunId"],
+        "RunPurpose": run_configuration["RunPurpose"],
+        "RunScope": run_configuration["RunScope"],
+        "FrameStart": run_configuration["FrameStart"],
+        "FrameEnd": run_configuration["FrameEnd"],
+        "SourceRunConfiguration": config_path.relative_to(root).as_posix(),
+        "SourceRunConfigurationSha256": sha256_file(config_path),
+        "InputPackageResolved": str(input_package),
+        "InputPackageKind": "DIRECTORY" if input_package.is_dir() else "FILE",
+        "SignalProfile": run_configuration["SignalProfile"],
+        "PrimaryOutcome": run_configuration["PrimaryOutcome"],
+        "CandidatePolicy": run_configuration["CandidatePolicy"],
+        "OutputSelection": run_configuration["OutputSelection"],
+        "ModulePlan": list(modules),
+        "PlanSha256": "",
+    }
+    hash_input = dict(plan)
+    hash_input.pop("PlanSha256")
+    plan["PlanSha256"] = sha256_bytes(canonical_bytes(hash_input))
+    return plan
+
+
+def write_json(path: Path, value: Mapping[str, Any]) -> None:
+    """Write one new control file and refuse silent replacement."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("xb") as stream:
+        stream.write(canonical_bytes(value))
+
+
+def expected_run_directories() -> List[str]:
+    """Return the complete empty Run workspace created by preflight."""
+
+    directories = [
+        "00_CONFIG",
+        "01_LOGS",
+        "02_DIAGNOSTICS",
+        "03_ARTIFACTS/SOURCE",
+        "04_REVIEW_PACKAGE",
+        "05_EXPORTS",
+        "00_STAGING",
+    ]
+    directories.extend(
+        "03_ARTIFACTS/" + stage
+        for stage in STAGES
+    )
+    return directories
+
+
+def prepare_run_directory(
+    root: Path,
+    run_configuration: Mapping[str, Any],
+    resolved_plan: Mapping[str, Any],
+) -> Tuple[Path, bool]:
+    """Create one PREPARED Run atomically or verify an identical replay."""
+
+    output_root = root / RUN_OUTPUT_ROOT_RELATIVE
+    output_root.mkdir(parents=True, exist_ok=True)
+    run_id = str(run_configuration["RunId"])
+    final_root = output_root / run_id
+    config_bytes = canonical_bytes(run_configuration)
+    plan_bytes = canonical_bytes(resolved_plan)
+    status = {
+        "RunId": run_id,
+        "Status": "PREPARED",
+        "LastCompletedStage": None,
+        "NextStage": resolved_plan["ModulePlan"][0]["Stage"],
+        "PlanSha256": resolved_plan["PlanSha256"],
+        "ExecutionStarted": False,
+    }
+    status_bytes = canonical_bytes(status)
+    if final_root.exists():
+        if not final_root.is_dir() or final_root.is_symlink():
+            raise PreflightError("RUN_DIRECTORY_CONFLICT", run_id)
+        expected_files = {
+            final_root / "00_CONFIG/run_configuration.json": config_bytes,
+            final_root / "00_CONFIG/resolved_run_plan.json": plan_bytes,
+            final_root / "run_status.json": status_bytes,
+        }
+        for path, expected in expected_files.items():
+            if not regular_file(path) or path.read_bytes() != expected:
+                raise PreflightError("RUN_REPLAY_CONFLICT", path.name)
+        return final_root, True
+    temporary_root = output_root / (".preparing_" + run_id)
+    if temporary_root.exists():
+        raise PreflightError("RUN_PREPARING_EXISTS", run_id)
+    try:
+        for relative in expected_run_directories():
+            (temporary_root / relative).mkdir(parents=True, exist_ok=True)
+        write_json(
+            temporary_root / "00_CONFIG/run_configuration.json",
+            run_configuration,
+        )
+        write_json(
+            temporary_root / "00_CONFIG/resolved_run_plan.json",
+            resolved_plan,
+        )
+        write_json(
+            temporary_root / "run_status.json",
+            status,
+        )
+        os.replace(temporary_root, final_root)
+    except Exception:
+        if temporary_root.exists():
+            shutil.rmtree(temporary_root)
+        raise
+    return final_root, False
+
+
+def prepare_run(root: Path, config_path: Path) -> Dict[str, Any]:
+    """Validate, resolve and persist one non-executing Run plan."""
+
+    validator = load_validator(root)
+    run_configuration = load_run_configuration(
+        root,
+        config_path,
+        validator,
+    )
+    input_package = resolve_input_package(
+        root,
+        str(run_configuration["InputPackage"]),
+    )
+    availability = refresh_availability(root)
+    modules = resolve_plan(
+        root,
+        run_configuration,
+        availability,
+        validator,
+    )
+    resolved_plan = build_resolved_plan(
+        root,
+        config_path.resolve(),
+        run_configuration,
+        modules,
+        input_package,
+    )
+    run_root, replay = prepare_run_directory(
+        root,
+        run_configuration,
+        resolved_plan,
+    )
+    return {
+        "RunRoot": str(run_root),
+        "ModuleCount": len(modules),
+        "StageCount": len({module["Stage"] for module in modules}),
+        "Replay": replay,
+    }
+
+
+def self_test(root: Path) -> str:
+    """Exercise deterministic helpers without creating a Run."""
+
+    checks: List[bool] = []
+
+    def check(value: bool) -> None:
+        if not value:
+            raise PreflightError("SELFTEST")
+        checks.append(True)
+
+    check(PROGRAM_ID.startswith("U002"))
+    check(VERSION == "0.1")
+    check(CONTRACT_VERSION == "U22.0.1")
+    check(len(STAGES) == 8)
+    check(STAGES[0] == "S0")
+    check(STAGES[-1] == "S7")
+    check(stable("a b/c") == "A_B_C")
+    check(IDENTIFIER_PATTERN.fullmatch("RUN_001") is not None)
+    check(IDENTIFIER_PATTERN.fullmatch("../bad") is None)
+    check(len(sha256_bytes(b"x")) == 64)
+    check(canonical_bytes({"b": 1, "a": 2}).startswith(b"{"))
+    check(inside(root / "02_CONFIG", root))
+    check(not inside(root.parent, root))
+    check(regular_file(root / VALIDATOR_RELATIVE))
+    check(regular_file(root / QUALIFICATION_RELATIVE))
+    check(load_validator(root).CONTRACT_VERSION == CONTRACT_VERSION)
+    check(len(expected_run_directories()) == 15)
+    check("properties" in SUPPORTED_SCHEMA_KEYS)
+    check("minimum" in SUPPORTED_SCHEMA_KEYS)
+    check("oneOf" not in SUPPORTED_SCHEMA_KEYS)
+    check(safe_identifier("Module.A", "MODULE_ID") == "Module.A")
+    check(RUN_CONFIG_ROOT_RELATIVE.parts[-1] == "run_configs")
+    check(RUN_OUTPUT_ROOT_RELATIVE.name == "07_OUTPUT")
+    check(len(checks) == 23)
+    if len(checks) != 24:
+        raise PreflightError("SELFTEST_COUNT")
+    return "U22A5E-ST N-T24-X0 C-0"
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    """Create explicit self-test and non-executing prepare modes."""
+
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--prepare-run")
+    parser.add_argument("--workspace-root", required=True)
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] = None) -> int:
+    """Execute one Engine Preflight responsibility and emit one capsule."""
+
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        root = require_workspace(Path(args.workspace_root))
+        if args.self_test:
+            print(self_test(root))
+            return 0
+        result = prepare_run(root, Path(args.prepare_run))
+        replay = 1 if result["Replay"] else 0
+        print(
+            f"U22A5E N-M{result['ModuleCount']}-S{result['StageCount']}"
+            f"-R{replay}-P1-X0 C-0"
+        )
+        return 0
+    except PreflightError as exc:
+        print(f"U22A5E N-M0-S0-R0-P0-X1 C-7 R-{exc.reason}")
+        return 7
+    except Exception as exc:
+        reason = stable(exc.__class__.__name__)
+        print(f"U22A5E N-M0-S0-R0-P0-X1 C-7 R-{reason}")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
