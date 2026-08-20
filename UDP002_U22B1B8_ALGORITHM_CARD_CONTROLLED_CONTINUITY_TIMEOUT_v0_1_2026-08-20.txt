@@ -1,0 +1,206 @@
+UDP002 ALGORITHM CARD — CONTROLLED CONTINUITY TIMEOUT
+
+AlgorithmId:
+CameraRadar.S1.CameraTargetContinuityArbitration.ControlledContinuityTimeout
+
+CandidateVersion:
+0.2-design-1
+
+Status:
+PROVISIONAL EXPERIMENT DESIGN — NOT INSTALLED
+
+Owner:
+Zhao Zhili
+
+Date:
+2026-08-20
+
+1. Purpose
+
+Prevent the S1 Camera target selector from remaining indefinitely in
+NO_CONTINUITY_SUPPORTED_PATH when one or more candidate streams are still marked
+eligible but none is physically continuous with the last confident target.
+
+This rule creates a new provisional continuity segment after a bounded ambiguous
+period. It does not prove target identity and does not turn an ambiguous Frame
+into an immediate valid output.
+
+2. Evidence requiring this design
+
+U22B1B6 confirmed a long eligible-but-implausible state with no reset and no
+acquisition. U22B1B7 then masked the known Camera no-target sentinel while
+reusing the exact accepted S1 v0.1 implementation. Recovery did not improve.
+
+Therefore:
+
+- correcting U001 invalid-value semantics remains necessary;
+- the existing both-ineligible reset is insufficient for this reproducible state;
+- a separate controlled S1 timeout experiment is justified.
+
+3. Existing behavior retained
+
+The following v0.1 rules remain unchanged:
+
+- eligibility is owned by U001 validity, finite value and age policy;
+- Radar is forbidden as an arbitration input;
+- continuity cost and threshold remain unchanged;
+- switching still requires hysteresis and consecutive confirmation;
+- both-ineligible reset remains active;
+- ambiguous and acquiring rows never emit a valid canonical value;
+- configured seed and FrameCount gap behavior remain unchanged.
+
+4. New state
+
+Add:
+
+NoContinuityCount(i)
+
+This counter increments only when all conditions are true:
+
+1. a source role is currently selected;
+2. at least one Camera candidate remains eligible;
+3. the selected candidate is not continuity-plausible;
+4. the alternative candidate is not continuity-plausible;
+5. the emitted reason would otherwise be NO_CONTINUITY_SUPPORTED_PATH.
+
+The counter returns to zero after:
+
+- a confident current-source output;
+- a plausible alternative or switch-pending path;
+- acquisition processing;
+- both-source invalid processing;
+- configured seed;
+- FrameCount gap;
+- any segment reset.
+
+5. New configuration
+
+Parameter:
+
+ResetAfterNoContinuityFrames
+
+Type:
+positive integer
+
+Unit:
+FrameCount rows
+
+Meaning:
+maximum consecutive eligible-but-implausible Frames retained in one continuity
+segment before controlled reset.
+
+It is profile/run configuration, not a universal constant.
+
+6. Reset transition
+
+When:
+
+NoContinuityCount >= ResetAfterNoContinuityFrames
+
+perform exactly once:
+
+1. preserve the previous selected role only as a re-acquisition hint;
+2. increment SegmentId;
+3. set selected role to NONE;
+4. clear the last confident value;
+5. clear pending switch/acquisition state;
+6. reset both invalid and no-continuity counters;
+7. emit no canonical value;
+8. emit:
+
+   SelectionStatus = SEGMENT_RESET
+   SelectionReason = CONTINUITY_REJECTION_TIMEOUT_RESET
+
+7. Re-acquisition after timeout
+
+Beginning with the next Frame, use the existing v0.1 acquisition rules:
+
+- one eligible candidate: require AcquireConfirmFrames consecutive internally
+  continuous values;
+- multiple eligible candidates: the previous role may be used only as a
+  deterministic re-acquisition hint, not as proof of target identity;
+- no eligible candidate: remain INVALID;
+- no unique deterministic path: remain AMBIGUOUS.
+
+No value is accepted on the reset Frame.
+
+8. Why immediate acceptance is rejected
+
+An abrupt target-distance jump may indicate:
+
+- a real new target;
+- wrong-object capture;
+- background capture;
+- signal/default corruption;
+- channel migration with missing intermediate evidence.
+
+Immediate acceptance would weaken the original safety property. Reset followed
+by consecutive internal-continuity acquisition preserves an explicit evidence
+gap and creates a reviewable segment boundary.
+
+9. Experiment grid
+
+Evaluate only:
+
+ResetAfterNoContinuityFrames in {3, 5, 10, 20}
+
+At 20 Hz these correspond to 0.15, 0.25, 0.50 and 1.00 seconds before reset.
+
+No value is selected before the sweep result is reviewed.
+
+10. Mandatory experiment controls
+
+- Reuse the exact accepted S1 v0.1 implementation identity for baseline replay.
+- First mask only the already confirmed Camera distance sentinel in memory.
+- Candidate implementation with an effectively disabled timeout must reproduce
+  all accepted baseline control decisions.
+- Do not modify U001, B1B4 output or accepted S1 files.
+- Compare the manually reviewed Q1–Q5 windows for lost or changed previously
+  valid outputs.
+- Measure Q6 recovery, new timeout reset count and new valid rows.
+
+11. Acceptance conditions for a threshold candidate
+
+Mandatory:
+
+- Q6 recovers within the expected timeout plus acquisition horizon;
+- zero previously valid rows are lost in protected Q1–Q5 windows;
+- zero previously valid role/value decisions change in protected Q1–Q5 windows;
+- every new segment reset carries the new explicit reason;
+- no accepted input or implementation file changes;
+- full trace and configuration remain reproducible.
+
+Passing the sweep does not itself install S1 v0.2. It only authorizes selection
+of one provisional threshold for a separately versioned implementation and gate.
+
+12. Risks and limitations
+
+- A stable wrong object can be acquired after timeout.
+- Previous-role hint is deterministic but is not target identity evidence.
+- Short timeout increases false segment reset risk.
+- Long timeout increases missing-canonical duration.
+- TC001 results do not transfer automatically to another vehicle or sample rate.
+- U003 video/CAN review remains mandatory.
+
+13. Rejected alternatives
+
+- raising the 1.14 m continuity limit: rejected because it weakens the guard and
+  does not solve state ownership;
+- accepting the first post-jump Frame: rejected as one-Frame guessing;
+- using Radar to choose Camera: rejected as target leakage;
+- treating all large values as invalid inside S1: rejected because validity is
+  signal-specific U001/profile responsibility;
+- silently resetting without SegmentId/reason: rejected as untraceable.
+
+14. Decision boundary
+
+Current decision:
+
+Authorize read-only threshold sweep only.
+
+Not yet authorized:
+
+- S1 v0.2 installation;
+- U001 profile rewrite;
+- formal Pipeline promotion;
+- use of timeout output as confirmed target truth.

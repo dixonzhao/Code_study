@@ -1,0 +1,84 @@
+UDP002 U22B1B8 — Controlled Continuity Timeout Sweep
+版本：v0.1
+日期：2026-08-20
+
+一、目标
+
+B1B7已确认：只屏蔽327.66后，Q6仍失锁181帧，说明S1缺少“eligible但长期不连续”的受控重置。
+
+本步骤不会安装新Module。它只用同一份输入，比较3、5、10、20帧四种timeout。
+
+二、所需文件
+
+下载本包的三个文件。
+
+将以下两个文件放入：
+
+C-CODE\U-UDP002\04_TEMP
+
+1. u002_u22b1b8_controlled_timeout_sweep_v0_1.py.txt
+2. UDP002_U22B1B8_ALGORITHM_CARD_CONTROLLED_CONTINUITY_TIMEOUT_v0_1_2026-08-20.txt
+
+START_HERE可留在下载目录。
+
+必须保留此前已经运行的：
+
+C-CODE\U-UDP002\04_TEMP\u002_u22b1b7_32766_counterfactual_replay_v0_2.py.txt
+
+B1B8会核对它的SHA-256并复用其只读发现、Hash验证和数值比较函数。
+
+三、CMD运行
+
+cd /d C-CODE
+
+Self-test：
+
+python U-UDP002\04_TEMP\u002_u22b1b8_controlled_timeout_sweep_v0_1.py.txt --self-test
+
+没有错误即可，不用回传self-test。
+
+正式扫参：
+
+python U-UDP002\04_TEMP\u002_u22b1b8_controlled_timeout_sweep_v0_1.py.txt --workspace-root U-UDP002
+
+四、需要回传
+
+成功时只回传三行：
+
+U22B1B8 ... C-0
+U22B1B8D1 ... C-0
+U22B1B8D2 ... C-0
+
+失败时只回传一行C-7。
+
+五、机器码
+
+主行：
+
+W = Review窗口总数
+P = 受保护的既有正常窗口数
+T = 测试timeout数量
+E = timeout关闭时是否与原算法等价；必须为1
+
+D1/D2中每个threshold块：
+
+T3 / T5 / T10 / T20 = timeout帧数
+R = Q6恢复Frame；0表示窗口内未恢复
+D = Q6恢复延迟Frame数
+Z = 全范围新增timeout reset次数
+L = Q1–Q5中丢失的原有效行数
+C = Q1–Q5中被改变的原有效Role/Value行数
+P = 该threshold是否满足本次机器验收条件
+
+六、本地输出
+
+选中的B1B4 Run下：
+
+05_EXPORTS\u22b1b8_controlled_timeout_sweep_summary_v0_1.json
+05_EXPORTS\u22b1b8_controlled_timeout_q6_trace_v0_1.csv
+
+七、停止规则
+
+- 不要根据一个P1自行修改或覆盖S1。
+- 四组结果回来后，由项目Decision Log决定候选threshold。
+- 如E0或C-7，停止，不进行任何Module安装。
