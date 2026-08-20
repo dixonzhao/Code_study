@@ -20,9 +20,9 @@ from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
 
 
 PROGRAM_ID = "UDP002-U22B1B3-REAL-S1-RECONSTRUCTION-ACCEPTANCE"
-VERSION = "0.2"
-RUNNER_NAME = "u002_u22b1b3_real_s1_reconstruction_run_v0_2.py.txt"
-DIAGNOSTIC_RELATIVE = Path("04_TEMP/u22b1b3_acceptance_diagnostic_v0_2.json")
+VERSION = "0.3"
+RUNNER_NAME = "u002_u22b1b3_real_s1_reconstruction_run_v0_3.py.txt"
+DIAGNOSTIC_RELATIVE = Path("04_TEMP/u22b1b3_acceptance_diagnostic_v0_3.json")
 RUN_RECEIPT_NAME = "u22b1b3_real_s1_run_receipt_v0_1.json"
 ACCEPTANCE_RECEIPT_NAME = "u22b1b3_technical_acceptance_receipt_v0_1.json"
 FREEZE_AUDITOR = Path(
@@ -122,7 +122,7 @@ def write_diagnostic(
         "Phase": phase,
         "Reason": reason,
         "Detail": detail,
-        "RunnerDiagnostic": str(root / "04_TEMP/u22b1b3_run_diagnostic_v0_2.json"),
+        "RunnerDiagnostic": str(root / "04_TEMP/u22b1b3_run_diagnostic_v0_3.json"),
         "PreviousEvidence": previous if previous.get("Status") == "FAILED" else None,
     }
     if result is not None:
@@ -590,8 +590,8 @@ def self_test() -> str:
         checks.append(True)
 
     check(PROGRAM_ID.startswith("UDP002"))
-    check(VERSION == "0.2")
-    check(RUNNER_NAME.endswith("v0_2.py.txt"))
+    check(VERSION == "0.3")
+    check(RUNNER_NAME.endswith("v0_3.py.txt"))
     sample = subprocess.CompletedProcess(
         ["python", "runner.py"],
         7,

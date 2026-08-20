@@ -19,9 +19,9 @@ from typing import Dict, List, Mapping, Sequence, Tuple
 
 
 PROGRAM_ID = "U002-U22B1B3-REAL-S1-RECONSTRUCTION-RUN"
-VERSION = "0.2"
+VERSION = "0.3"
 CONTRACT_VERSION = "U22.0.1"
-DIAGNOSTIC_RELATIVE = Path("04_TEMP/u22b1b3_run_diagnostic_v0_2.json")
+DIAGNOSTIC_RELATIVE = Path("04_TEMP/u22b1b3_run_diagnostic_v0_3.json")
 
 PREFLIGHT = Path("01_PROGRAMS/core/u002_u22_engine_preflight_v0_1.py")
 EXECUTOR = Path("01_PROGRAMS/core/u002_u22_stage_executor_v0_1.py")
@@ -167,6 +167,137 @@ def recommended_action(phase: str, key: str) -> str:
     return "INSPECT_DIAGNOSTIC_EVIDENCE"
 
 
+def bounded_text(path: Path, limit: int = 32768) -> str:
+    """Read the diagnostic tail without allowing an unbounded log into memory."""
+
+    if not regular_file(path):
+        return ""
+    data = path.read_bytes()
+    return data[-limit:].decode("utf-8", errors="replace")
+
+
+def nested_failure_key(*texts: str) -> str:
+    """Extract the deepest explicit reason or final traceback exception."""
+
+    candidates: List[str] = []
+    for text in texts:
+        if not text:
+            continue
+        candidates.extend(re.findall(r"(?:^|\s)K-([A-Za-z0-9_]+)", text))
+        candidates.extend(re.findall(r"C-7(?:\s+[^\n]*)?\s+R-([A-Za-z0-9_]+)", text))
+    generic = {
+        "MODULE_EXIT",
+        "EXECUTOR",
+        "EXECUTOR_EXIT",
+        "RUNNER",
+        "PREFLIGHT",
+        "NO_DETAIL",
+    }
+    for candidate in reversed(candidates):
+        token = stable(candidate, 64)
+        if token not in generic:
+            return token
+    for text in texts:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        for line in reversed(lines):
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception):", line):
+                return stable(line, 64)
+    return "MODULE_EXIT_UNRESOLVED"
+
+
+def inspect_failed_run(run_root: Path) -> Dict[str, object]:
+    """Follow Run status to Module log and its stdout/stderr/result evidence."""
+
+    evidence: Dict[str, object] = {
+        "RunRoot": str(run_root),
+        "RunStatus": None,
+        "FailedModule": None,
+        "FailureReason": None,
+        "Stage": "UNKNOWN",
+        "ModuleId": "UNKNOWN",
+        "ExitCode": None,
+        "ExecutionRecord": None,
+        "DiagnosticRoot": None,
+        "Stdout": "",
+        "Stderr": "",
+        "RuntimeResult": None,
+        "DeepestFailureKey": "MODULE_EXIT_UNRESOLVED",
+    }
+    status_path = run_root / "run_status.json"
+    if regular_file(status_path):
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8-sig"))
+            if isinstance(status, dict):
+                evidence["RunStatus"] = status.get("Status")
+                evidence["FailedModule"] = status.get("FailedModule")
+                evidence["FailureReason"] = status.get("FailureReason")
+        except Exception:
+            pass
+
+    records: List[Tuple[int, Path, Dict[str, object]]] = []
+    log_root = run_root / "01_LOGS"
+    for path in sorted(log_root.glob("*.json")) if log_root.is_dir() else []:
+        try:
+            record = json.loads(path.read_text(encoding="utf-8-sig"))
+            if not isinstance(record, dict):
+                continue
+            score = 0
+            if record.get("Status") == "FAILED":
+                score += 4
+            if record.get("ModuleId") == evidence["FailedModule"]:
+                score += 2
+            score += int(record.get("Sequence", 0))
+            records.append((score, path, record))
+        except Exception:
+            continue
+    record: Dict[str, object] = {}
+    if records:
+        _, record_path, record = max(records, key=lambda item: item[0])
+        evidence["ExecutionRecord"] = str(record_path)
+        evidence["Stage"] = str(record.get("Stage", "UNKNOWN"))
+        evidence["ModuleId"] = str(record.get("ModuleId", "UNKNOWN"))
+        evidence["ExitCode"] = record.get("ExitCode")
+
+    diagnostic_root: Path = None
+    relative = record.get("DiagnosticRoot") if record else None
+    if isinstance(relative, str):
+        candidate = run_root / relative
+        if candidate.is_dir():
+            diagnostic_root = candidate
+    if diagnostic_root is None:
+        roots = sorted((run_root / "02_DIAGNOSTICS/modules").glob("*"))
+        directories = [path for path in roots if path.is_dir() and not path.is_symlink()]
+        if directories:
+            diagnostic_root = directories[-1]
+    if diagnostic_root is not None:
+        evidence["DiagnosticRoot"] = str(diagnostic_root)
+        stdout = bounded_text(diagnostic_root / "stdout.txt")
+        stderr = bounded_text(diagnostic_root / "stderr.txt")
+        evidence["Stdout"] = stdout
+        evidence["Stderr"] = stderr
+        result_path = diagnostic_root / "module_result.json"
+        runtime_result: Dict[str, object] = {}
+        if regular_file(result_path):
+            try:
+                loaded = json.loads(result_path.read_text(encoding="utf-8-sig"))
+                if isinstance(loaded, dict):
+                    runtime_result = loaded
+                    evidence["RuntimeResult"] = runtime_result
+            except Exception:
+                pass
+        result_text = json.dumps(runtime_result, ensure_ascii=False) if runtime_result else ""
+        evidence["DeepestFailureKey"] = nested_failure_key(
+            stderr,
+            stdout,
+            result_text,
+        )
+    if evidence["DeepestFailureKey"] == "MODULE_EXIT_UNRESOLVED":
+        exit_code = evidence.get("ExitCode")
+        if exit_code is not None:
+            evidence["DeepestFailureKey"] = "MODULE_EXIT_CODE_" + stable(exit_code, 12)
+    return evidence
+
+
 def write_diagnostic(
     root: Path,
     phase: str,
@@ -176,6 +307,7 @@ def write_diagnostic(
     config_path: Path = None,
     run_id: str = None,
     succeeded: bool = False,
+    deep_evidence: Mapping[str, object] = None,
 ) -> Path:
     """Persist complete machine evidence while keeping the manual capsule short."""
 
@@ -199,6 +331,7 @@ def write_diagnostic(
         "RunId": run_id,
         "RunConfiguration": str(config_path) if config_path else None,
         "PreviousEvidence": previous if previous.get("Status") == "FAILED" else None,
+        "DeepFailureEvidence": dict(deep_evidence) if deep_evidence else None,
     }
     if result is not None:
         evidence["Child"] = {
@@ -232,8 +365,27 @@ def require_child(
     if result.returncode == 0 and "C-0" in result.stdout:
         return
     key = child_failure_key(result)
-    write_diagnostic(root, label, label, key, result, config_path, run_id)
-    raise RunError(label, key, label)
+    deep: Dict[str, object] = {}
+    phase = label
+    reason = label
+    if label == "EXECUTOR" and run_id:
+        deep = inspect_failed_run(root / "07_OUTPUT" / run_id)
+        deep_key = str(deep.get("DeepestFailureKey", ""))
+        if deep_key and deep_key != "MODULE_EXIT_UNRESOLVED":
+            key = stable(deep_key, 64)
+        phase = stable(deep.get("Stage", "EXECUTOR"), 24)
+        reason = phase + "_MODULE_FAILED"
+    write_diagnostic(
+        root,
+        phase,
+        reason,
+        key,
+        result,
+        config_path,
+        run_id,
+        deep_evidence=deep,
+    )
+    raise RunError(reason, key, phase)
 
 
 def freeze_audit(root: Path) -> str:
@@ -451,6 +603,21 @@ def execute_pipeline(root: Path, config_path: Path, run_id: str) -> None:
         state = str(status.get("Status", ""))
         if state == "SUCCEEDED":
             already_succeeded = True
+        elif state == "FAILED":
+            deep = inspect_failed_run(run_root)
+            key = stable(deep.get("DeepestFailureKey", "MODULE_EXIT_UNRESOLVED"), 64)
+            phase = stable(deep.get("Stage", "EXECUTOR"), 24)
+            reason = phase + "_MODULE_FAILED"
+            write_diagnostic(
+                root,
+                phase,
+                reason,
+                key,
+                config_path=config_path,
+                run_id=run_id,
+                deep_evidence=deep,
+            )
+            raise RunError(reason, key, phase)
         elif state != "PREPARED":
             raise RunError("EXISTING_RUN_STATE_" + state)
     else:
@@ -612,7 +779,7 @@ def self_test() -> str:
         checks.append(True)
 
     check(PROGRAM_ID.startswith("U002"))
-    check(VERSION == "0.2")
+    check(VERSION == "0.3")
     check(CONTRACT_VERSION == "U22.0.1")
     check(stable("a b/c") == "A_B_C")
     check(len(sha256_bytes(b"x")) == 64)
@@ -624,6 +791,11 @@ def self_test() -> str:
     )
     check(child_failure_key(sample) == "PLAN_ARTIFACT_DEPENDENCY")
     check(recommended_action("PREFLIGHT", "PLAN_ARTIFACT_DEPENDENCY").startswith("INSPECT"))
+    check(nested_failure_key("X C-7 R-INNER_DATA_ERROR") == "INNER_DATA_ERROR")
+    check(
+        nested_failure_key("", "ValueError: bad source column")
+        == "VALUEERROR_BAD_SOURCE_COLUMN"
+    )
     check(canonical_bytes({"b": 1, "a": 2}).startswith(b"{"))
     with tempfile.TemporaryDirectory(prefix="u22b1b3_runner_selftest_") as temporary:
         root = Path(temporary)
@@ -642,6 +814,37 @@ def self_test() -> str:
             input_files.append({"Basename": name, "Sha256": sha256_file(path)})
         receipt = {"InputFiles": input_files}
         check(len(package_snapshot(package, receipt)) == 6)
+        failed_run = root / "failed_run"
+        diagnostic_root = failed_run / "02_DIAGNOSTICS/modules/0002_Test.Module"
+        diagnostic_root.mkdir(parents=True)
+        write_exact(
+            failed_run / "run_status.json",
+            {
+                "Status": "FAILED",
+                "FailedModule": "Test.Module",
+                "FailureReason": "MODULE_EXIT",
+            },
+        )
+        write_exact(
+            failed_run / "01_LOGS/0002_Test.Module.json",
+            {
+                "Status": "FAILED",
+                "Sequence": 2,
+                "Stage": "S1",
+                "ModuleId": "Test.Module",
+                "ExitCode": 7,
+                "DiagnosticRoot": "02_DIAGNOSTICS/modules/0002_Test.Module",
+            },
+        )
+        (diagnostic_root / "stdout.txt").write_text("", encoding="utf-8")
+        (diagnostic_root / "stderr.txt").write_text(
+            "Traceback (most recent call last):\nValueError: missing camera source\n",
+            encoding="utf-8",
+        )
+        deep = inspect_failed_run(failed_run)
+        check(deep["Stage"] == "S1")
+        check(deep["ModuleId"] == "Test.Module")
+        check(deep["DeepestFailureKey"] == "VALUEERROR_MISSING_CAMERA_SOURCE")
     synthetic = build_run_configuration(
         "RUN_TEST",
         Path("package"),
