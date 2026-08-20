@@ -1,0 +1,75 @@
+UDP002 U22B1B6：Q6 重捕获延迟双分支诊断
+版本：v0.2
+日期：2026-08-20
+
+一、为什么升级
+
+v0.1返回 RESET_FRAME_NOT_FOUND。这不是普通执行故障，而是有效的反证：
+Q6可能根本没有进入 reset/re-acquire 分支。
+
+v0.2同时检验：
+
+H1：无更新Frame反复清空pending acquisition。
+
+H2：恢复后的Camera值虽然eligible，但与丢失前Canonical差异超过连续性门限；
+状态机长期停留在NO_CONTINUITY_SUPPORTED_PATH，又没有超时reset/re-acquire路径。
+
+程序仍然完全只读，不修改S1算法、B1B4 Run或源数据。
+
+二、下载
+
+从public中转仓库下载以下两个v0.2文件到：
+
+    C-CODE\U-UDP002\04_TEMP
+
+1. UDP002_U22B1B6_Q6_REACQUISITION_DIAGNOSTIC_START_HERE_v0_2_2026-08-20.txt
+2. u002_u22b1b6_q6_reacquisition_diagnostic_v0_2.py.txt
+
+三、执行（Windows CMD，当前目录为C-CODE）
+
+python .\U-UDP002\04_TEMP\u002_u22b1b6_q6_reacquisition_diagnostic_v0_2.py.txt --self-test
+
+python .\U-UDP002\04_TEMP\u002_u22b1b6_q6_reacquisition_diagnostic_v0_2.py.txt --run --workspace-root .\U-UDP002
+
+四、回传规则
+
+真实诊断会输出两行，两行都回传：
+
+主状态：
+
+    U22B1B6 N-R...-L...-Z...-E...-C...-D...-H...-X0 C-0
+
+详细machine capsule：
+
+    U22B1B6D1 N-NC...-LR...-EL...-A...-B...-PV...-FV...-G...-T...-X0 C-0
+
+字段：
+
+- L：Canonical丢失Frame
+- Z：reset Frame；0表示没有reset
+- E：丢失后首个eligible Frame
+- C：Canonical恢复Frame
+- D：E到C的延迟Frame数
+- H1：支持pending被无更新Frame清空
+- H2：支持eligible-but-implausible状态缺少超时reset
+- NC：NO_CONTINUITY_SUPPORTED_PATH数量
+- LR：该状态最长连续长度
+- EL：恢复前eligible行数
+- A/B：acquisition尝试/被打断次数
+- PV：丢失前Canonical值
+- FV：丢失后首个eligible值
+- G：PV与FV差值
+- T：当前连续性允许门限
+
+五、本地证据
+
+对应B1B4 Run的05_EXPORTS会新增：
+
+- u22b1b6_q6_reacquisition_trace_v0_2.csv
+- u22b1b6_q6_reacquisition_summary_v0_2.json
+
+执行错误也会额外输出一条D1 machine capsule，完整诊断位于：
+
+    U-UDP002\04_TEMP\u22b1b6_diagnostic_v0_2.json
+
+只有真实数据给出H1或H2且C-0后，才批准S1 v0.2算法实验。
