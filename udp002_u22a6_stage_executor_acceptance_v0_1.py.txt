@@ -1,0 +1,858 @@
+#!/usr/bin/env python3
+"""Independent acceptance for the U22A6 Controlled Stage Executor."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import tokenize
+from typing import Dict, List, Mapping, Sequence
+
+
+PROGRAM_ID = "UDP002-U22A6-STAGE-EXECUTOR-ACCEPTANCE"
+VERSION = "0.1"
+CONTRACT_VERSION = "U22.0.1"
+CANDIDATE = "u002_u22_stage_executor_v0_1.py.txt"
+INSTALLED = "u002_u22_stage_executor_v0_1.py"
+VALIDATOR = "u002_u22_contract_validator_v0_1.py"
+REGISTRY = "u002_u22_module_registry_v0_1.py"
+ARTIFACT_STORE = "u002_u22_artifact_store_v0_1.py"
+QUALIFICATION = "u002_u22_module_qualification_v0_1.py"
+PREFLIGHT = "u002_u22_engine_preflight_v0_1.py"
+STAGES = ("S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7")
+
+
+class AcceptanceError(RuntimeError):
+    """Represent one deterministic independent acceptance failure."""
+
+
+def regular_file(path: Path) -> bool:
+    """Accept ordinary files only during installation and evidence checks."""
+
+    return path.is_file() and not path.is_symlink()
+
+
+def canonical_text(value: object) -> str:
+    """Serialize synthetic control documents deterministically."""
+
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+        allow_nan=False,
+    ) + "\n"
+
+
+def run(command: List[str], timeout: int = 30) -> subprocess.CompletedProcess:
+    """Run one bounded child process and preserve both evidence streams."""
+
+    return subprocess.run(
+        command,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def check(value: bool, reason: str, checks: List[bool]) -> None:
+    """Append one visible acceptance check or fail immediately."""
+
+    if not value:
+        raise AcceptanceError(reason)
+    checks.append(True)
+
+
+def contains_semicolon_operator(source: str) -> bool:
+    """Ignore prose punctuation and reject executable semicolon operators."""
+
+    tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+    return any(
+        token.type == tokenize.OP and token.string == ";"
+        for token in tokens
+    )
+
+
+def algorithm_card(module_id: str, version: str) -> Dict[str, object]:
+    """Create one valid synthetic Algorithm Card."""
+
+    return {
+        "ContractVersion": CONTRACT_VERSION,
+        "AlgorithmId": module_id,
+        "AlgorithmVersion": version,
+        "Status": "PROVISIONAL",
+        "Purpose": "Exercise controlled runtime execution",
+        "ProblemSolved": "Produce one synthetic governed Artifact",
+        "MathematicalDefinition": ["y = x"],
+        "Inputs": ["x"],
+        "Outputs": ["y"],
+        "Assumptions": ["synthetic input"],
+        "FailureConditions": ["fixture mode failure"],
+        "Limitations": ["acceptance only"],
+        "Alternatives": ["none"],
+        "EvaluationPlan": ["execute and audit governed output"],
+        "DecisionReference": "D-U22A6",
+    }
+
+
+def module_manifest(
+    module_id: str,
+    version: str,
+    stage: str,
+    required_artifacts: List[str],
+    output_type: str,
+) -> Dict[str, object]:
+    """Create one valid synthetic Module Manifest."""
+
+    return {
+        "ContractVersion": CONTRACT_VERSION,
+        "ModuleId": module_id,
+        "ModuleVersion": version,
+        "Stage": stage,
+        "AlgorithmStatus": "PROVISIONAL",
+        "ScopeSelector": {},
+        "RequiredInputs": ["Signal.A"],
+        "OptionalInputs": [],
+        "RequiresArtifacts": required_artifacts,
+        "ProvidesArtifacts": [output_type],
+        "OutputNamespace": module_id.lower(),
+        "ConfigurationSchema": "configuration_schema.json",
+        "FailurePolicy": "REQUIRED",
+        "ConflictPolicy": "EXCLUSIVE",
+        "EntryPoint": "implementation.py",
+        "SelfTestEntryPoint": "selftest.py",
+        "AlgorithmCard": "algorithm_card.json",
+    }
+
+
+def configuration_schema() -> Dict[str, object]:
+    """Create a small but real configuration schema."""
+
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["Scale"],
+        "properties": {
+            "Scale": {
+                "type": "number",
+                "minimum": 0,
+            }
+        },
+    }
+
+
+def implementation_source(mode: str) -> str:
+    """Return a readable synthetic implementation for runtime acceptance."""
+
+    return f'''#!/usr/bin/env python3
+"""Synthetic U22 runtime Module used only by independent acceptance."""
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+
+
+MODE = {mode!r}
+CONTRACT_VERSION = "U22.0.1"
+PROTOCOL = "U002_U22_MODULE_RUNTIME"
+PROTOCOL_VERSION = "0.1"
+
+
+def canonical_text(value):
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+        allow_nan=False,
+    ) + "\\n"
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--request-json", required=True)
+    parser.add_argument("--result-json", required=True)
+    args = parser.parse_args()
+    request = json.loads(Path(args.request_json).read_text(encoding="utf-8"))
+    if MODE == "FAIL":
+        print("SYNTHETIC-RUNTIME-FAIL C-7")
+        return 7
+    output_root = Path(request["OutputRoot"])
+    package_root = output_root / "artifact_01"
+    package_root.mkdir(parents=True)
+    payload_path = package_root / "payload.json"
+    payload = {{
+        "RunId": request["RunId"],
+        "ModuleId": request["ModuleId"],
+        "Scale": request["Configuration"]["Scale"],
+    }}
+    payload_path.write_text(canonical_text(payload), encoding="utf-8")
+    payload_bytes = payload_path.read_bytes()
+    parent_ids = [
+        item["ArtifactId"]
+        for item in request["InputArtifacts"]
+    ]
+    artifact_id = (
+        request["RunId"]
+        + "."
+        + request["ModuleId"]
+        + "."
+        + str(request["Sequence"])
+    )
+    manifest = {{
+        "ContractVersion": CONTRACT_VERSION,
+        "ArtifactId": artifact_id,
+        "ArtifactType": request["ExpectedOutputTypes"][0],
+        "SchemaId": "SYNTHETIC_PAYLOAD",
+        "SchemaVersion": "0.1",
+        "RunId": request["RunId"],
+        "Stage": request["Stage"],
+        "ProducerModuleId": request["ModuleId"],
+        "ProducerModuleVersion": request["ModuleVersion"],
+        "ParentArtifactIds": parent_ids,
+        "Payloads": [
+            {{
+                "RelativePath": "payload.json",
+                "MediaType": "application/json",
+                "RowCount": None,
+                "Sha256": hashlib.sha256(payload_bytes).hexdigest(),
+                "ByteSize": len(payload_bytes),
+                "PayloadKind": "PRIMARY",
+            }}
+        ],
+        "Metadata": {{"Synthetic": True}},
+    }}
+    (package_root / "artifact_manifest.json").write_text(
+        canonical_text(manifest),
+        encoding="utf-8",
+    )
+    result = {{
+        "Protocol": PROTOCOL,
+        "ProtocolVersion": PROTOCOL_VERSION,
+        "ContractVersion": CONTRACT_VERSION,
+        "RunId": request["RunId"],
+        "Sequence": request["Sequence"],
+        "Stage": request["Stage"],
+        "ModuleId": request["ModuleId"],
+        "ModuleVersion": request["ModuleVersion"],
+        "Status": "SUCCEEDED",
+        "ProducedPackages": ["artifact_01"],
+        "Capsule": "SYNTHETIC-RUNTIME-PASS C-0",
+        "Diagnostics": [],
+    }}
+    Path(args.result_json).write_text(
+        canonical_text(result),
+        encoding="utf-8",
+    )
+    print("SYNTHETIC-RUNTIME-PASS C-0")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+def write_module(
+    root: Path,
+    module_id: str,
+    stage: str,
+    required_artifacts: List[str],
+    output_type: str,
+    mode: str,
+) -> Path:
+    """Write one complete synthetic Module package."""
+
+    version = "0.1.0"
+    directory = root / "01_PROGRAMS/modules" / stage / module_id / version
+    directory.mkdir(parents=True)
+    (directory / "module_manifest.json").write_text(
+        canonical_text(
+            module_manifest(
+                module_id,
+                version,
+                stage,
+                required_artifacts,
+                output_type,
+            )
+        ),
+        encoding="utf-8",
+    )
+    (directory / "algorithm_card.json").write_text(
+        canonical_text(algorithm_card(module_id, version)),
+        encoding="utf-8",
+    )
+    (directory / "configuration_schema.json").write_text(
+        canonical_text(configuration_schema()),
+        encoding="utf-8",
+    )
+    (directory / "implementation.py").write_text(
+        implementation_source(mode),
+        encoding="utf-8",
+    )
+    selftest = "\n".join(
+        [
+            "import argparse",
+            "parser = argparse.ArgumentParser()",
+            "parser.add_argument('--module-root', required=True)",
+            "parser.add_argument('--workspace-root', required=True)",
+            "parser.parse_args()",
+            f"print('SYNTHETIC-{module_id}-SELFTEST C-0')",
+            "raise SystemExit(0)",
+            "",
+        ]
+    )
+    (directory / "selftest.py").write_text(
+        selftest,
+        encoding="utf-8",
+    )
+    return directory
+
+
+def copy_environment(source: Path, target: Path) -> None:
+    """Build an isolated U22 workspace without company data."""
+
+    target.mkdir(parents=True)
+    for stage in STAGES:
+        (target / "01_PROGRAMS/modules" / stage).mkdir(parents=True)
+    for relative in (
+        "00_CONTROL/contracts",
+        "00_CONTROL/registry",
+        "01_PROGRAMS/core",
+        "02_CONFIG/run_configs",
+        "03_CASES",
+        "07_OUTPUT",
+    ):
+        (target / relative).mkdir(parents=True, exist_ok=True)
+    contract_names = (
+        "u002_module_manifest_schema_v0_1.json",
+        "u002_artifact_manifest_schema_v0_1.json",
+        "u002_run_configuration_schema_v0_1.json",
+        "u002_algorithm_card_schema_v0_1.json",
+    )
+    for name in contract_names:
+        source_file = source / "00_CONTROL/contracts" / name
+        if not regular_file(source_file):
+            raise AcceptanceError("CONTRACT_MISSING_" + name)
+        shutil.copy2(source_file, target / "00_CONTROL/contracts" / name)
+    core_names = (
+        VALIDATOR,
+        REGISTRY,
+        ARTIFACT_STORE,
+        QUALIFICATION,
+        PREFLIGHT,
+    )
+    for name in core_names:
+        source_file = source / "01_PROGRAMS/core" / name
+        if not regular_file(source_file):
+            raise AcceptanceError("CORE_DEPENDENCY_MISSING_" + name)
+        shutil.copy2(source_file, target / "01_PROGRAMS/core" / name)
+
+
+def qualify(root: Path, module_id: str) -> subprocess.CompletedProcess:
+    """Qualify one synthetic Module through the accepted A4 responsibility."""
+
+    return run(
+        [
+            sys.executable,
+            str(root / "01_PROGRAMS/core" / QUALIFICATION),
+            "--qualify-module",
+            module_id + "@0.1.0",
+            "--workspace-root",
+            str(root),
+        ]
+    )
+
+
+def run_configuration(
+    run_id: str,
+    modules: Sequence[Mapping[str, object]],
+    output_type: str,
+) -> Dict[str, object]:
+    """Create one schema-valid synthetic Run Configuration."""
+
+    plan = []
+    for sequence, module in enumerate(modules, start=1):
+        plan.append(
+            {
+                "Sequence": sequence,
+                "Stage": module["Stage"],
+                "ModuleId": module["ModuleId"],
+                "ModuleVersion": "0.1.0",
+                "Configuration": {"Scale": module.get("Scale", 1.0)},
+            }
+        )
+    return {
+        "ContractVersion": CONTRACT_VERSION,
+        "RunId": run_id,
+        "RunPurpose": "SMOKE",
+        "RunScope": "FULL_CASE",
+        "FrameStart": None,
+        "FrameEnd": None,
+        "InputPackage": "03_CASES/SYNTHETIC_U001_PACKAGE",
+        "SignalProfile": "SyntheticProfile@0.1",
+        "ModulePlan": plan,
+        "PrimaryOutcome": {
+            "Name": "SyntheticOutcome",
+            "Formula": "Radar-Camera",
+            "Sign": "REFERENCE-TARGET",
+            "Unit": "m",
+            "Purpose": "EXPLORATORY",
+        },
+        "CandidatePolicy": "SyntheticCandidatePolicy@0.1",
+        "OutputSelection": [output_type],
+    }
+
+
+def prepare_run(
+    root: Path,
+    file_name: str,
+    configuration: Mapping[str, object],
+) -> subprocess.CompletedProcess:
+    """Write and prepare one explicit synthetic Run."""
+
+    config_path = root / "02_CONFIG/run_configs" / file_name
+    config_path.write_text(canonical_text(configuration), encoding="utf-8")
+    return run(
+        [
+            sys.executable,
+            str(root / "01_PROGRAMS/core" / PREFLIGHT),
+            "--prepare-run",
+            str(config_path),
+            "--workspace-root",
+            str(root),
+        ]
+    )
+
+
+def execute(
+    program: Path,
+    root: Path,
+    run_id: str,
+) -> subprocess.CompletedProcess:
+    """Execute one already PREPARED synthetic Run."""
+
+    return run(
+        [
+            sys.executable,
+            str(program),
+            "--execute-run",
+            str(root / "07_OUTPUT" / run_id),
+            "--workspace-root",
+            str(root),
+            "--module-timeout-seconds",
+            "10",
+        ],
+        timeout=30,
+    )
+
+
+def install_candidate(root: Path, candidate: Path, checks: List[bool]) -> Path:
+    """Install the byte-identical accepted Core program atomically."""
+
+    installed = root / "01_PROGRAMS/core" / INSTALLED
+    if installed.exists():
+        check(regular_file(installed), "INSTALL_NOT_REGULAR", checks)
+        check(
+            installed.read_bytes() == candidate.read_bytes(),
+            "INSTALL_CONFLICT",
+            checks,
+        )
+        return installed
+    temporary = installed.with_name(installed.name + ".installing")
+    check(not temporary.exists(), "INSTALL_TEMP_EXISTS", checks)
+    temporary.write_bytes(candidate.read_bytes())
+    os.replace(temporary, installed)
+    check(
+        installed.read_bytes() == candidate.read_bytes(),
+        "INSTALL_IDENTITY",
+        checks,
+    )
+    return installed
+
+
+def archive_previous(root: Path) -> int:
+    """Move completed U22A5 transfer programs out of active TEMP."""
+
+    archive = root / "A-Archive/U22_COMPLETED/U22A5/04_TEMP"
+    names = (
+        "u002_u22_engine_preflight_v0_1.py.txt",
+        "udp002_u22a5_engine_preflight_acceptance_v0_1.py.txt",
+    )
+    moved = 0
+    for name in names:
+        source = root / "04_TEMP" / name
+        if not regular_file(source):
+            continue
+        archive.mkdir(parents=True, exist_ok=True)
+        destination = archive / name
+        if destination.exists():
+            if destination.read_bytes() != source.read_bytes():
+                raise AcceptanceError("ARCHIVE_CONFLICT")
+            source.unlink()
+        else:
+            os.replace(source, destination)
+        moved += 1
+    return moved
+
+
+def main(argv: Sequence[str] = None) -> int:
+    """Run isolated runtime tests and install only after complete success."""
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--workspace-root", required=True)
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    checks: List[bool] = []
+    try:
+        root = Path(args.workspace_root).resolve()
+        check(
+            root.is_dir() and root.name == "U-UDP002",
+            "WORKSPACE_ROOT",
+            checks,
+        )
+        candidate = root / "04_TEMP" / CANDIDATE
+        check(regular_file(candidate), "CANDIDATE_MISSING", checks)
+        preflight = root / "01_PROGRAMS/core" / PREFLIGHT
+        check(regular_file(preflight), "PREFLIGHT_MISSING", checks)
+        preflight_selftest = run(
+            [
+                sys.executable,
+                str(preflight),
+                "--self-test",
+                "--workspace-root",
+                str(root),
+            ]
+        )
+        check(
+            preflight_selftest.returncode == 0
+            and "N-T24" in preflight_selftest.stdout,
+            "PREFLIGHT_SELFTEST",
+            checks,
+        )
+        source = candidate.read_text(encoding="utf-8")
+        check(not contains_semicolon_operator(source), "SEMICOLON_STYLE", checks)
+        check("subprocess.Popen(" in source, "CONTROLLED_SUBPROCESS", checks)
+        check("shell=False" in source, "NO_SHELL", checks)
+        check("def execute_run(" in source, "EXECUTE_INTERFACE", checks)
+        check("def execute_one_module(" in source, "MODULE_INTERFACE", checks)
+        check("U002_U22_MODULE_RUNTIME" in source, "RUNTIME_PROTOCOL", checks)
+        with tempfile.TemporaryDirectory(prefix="u22a6_acceptance_") as temporary:
+            test_root = Path(temporary) / "U-UDP002"
+            copy_environment(root, test_root)
+            input_package = test_root / "03_CASES/SYNTHETIC_U001_PACKAGE"
+            input_package.mkdir()
+            (input_package / "package_identity.txt").write_text(
+                "SYNTHETIC\n",
+                encoding="utf-8",
+            )
+            modules = {
+                "Synthetic.S0.Source": write_module(
+                    test_root,
+                    "Synthetic.S0.Source",
+                    "S0",
+                    [],
+                    "TYPE_A",
+                    "PASS",
+                ),
+                "Synthetic.S1.Transform": write_module(
+                    test_root,
+                    "Synthetic.S1.Transform",
+                    "S1",
+                    ["TYPE_A"],
+                    "TYPE_B",
+                    "PASS",
+                ),
+                "Synthetic.S0.Fail": write_module(
+                    test_root,
+                    "Synthetic.S0.Fail",
+                    "S0",
+                    [],
+                    "TYPE_FAIL",
+                    "FAIL",
+                ),
+                "Synthetic.S0.Tamper": write_module(
+                    test_root,
+                    "Synthetic.S0.Tamper",
+                    "S0",
+                    [],
+                    "TYPE_TAMPER",
+                    "PASS",
+                ),
+            }
+            for module_id in modules:
+                result = qualify(test_root, module_id)
+                check(result.returncode == 0, "QUALIFY_" + module_id, checks)
+            test_candidate = test_root / "01_PROGRAMS/core" / INSTALLED
+            shutil.copy2(candidate, test_candidate)
+            selftest = run(
+                [
+                    sys.executable,
+                    str(test_candidate),
+                    "--self-test",
+                    "--workspace-root",
+                    str(test_root),
+                ]
+            )
+            check(
+                selftest.returncode == 0 and "N-T30" in selftest.stdout,
+                "CANDIDATE_SELFTEST",
+                checks,
+            )
+            good_config = run_configuration(
+                "RUN_GOOD",
+                [
+                    {
+                        "Stage": "S0",
+                        "ModuleId": "Synthetic.S0.Source",
+                        "Scale": 1.0,
+                    },
+                    {
+                        "Stage": "S1",
+                        "ModuleId": "Synthetic.S1.Transform",
+                        "Scale": 2.0,
+                    },
+                ],
+                "TYPE_B",
+            )
+            prepared = prepare_run(
+                test_root,
+                "run_good.json",
+                good_config,
+            )
+            check(prepared.returncode == 0, "GOOD_PREPARE", checks)
+            executed = execute(test_candidate, test_root, "RUN_GOOD")
+            check(
+                executed.returncode == 0
+                and "N-M2-A2-O0-R0-S1" in executed.stdout,
+                "GOOD_EXECUTION_" + executed.stdout.strip(),
+                checks,
+            )
+            good_root = test_root / "07_OUTPUT/RUN_GOOD"
+            status = json.loads(
+                (good_root / "run_status.json").read_text(encoding="utf-8")
+            )
+            check(status["Status"] == "SUCCEEDED", "GOOD_STATUS", checks)
+            check(status["CompletedModuleCount"] == 2, "GOOD_COUNT", checks)
+            index = json.loads(
+                (good_root / "run_artifact_index_v0_1.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            check(len(index["Artifacts"]) == 2, "GOOD_ARTIFACTS", checks)
+            check(
+                sorted(item["ArtifactType"] for item in index["Artifacts"])
+                == ["TYPE_A", "TYPE_B"],
+                "GOOD_TYPES",
+                checks,
+            )
+            check(
+                len(list((good_root / "01_LOGS").glob("*.json"))) == 2,
+                "GOOD_LOGS",
+                checks,
+            )
+            check(
+                len(list((good_root / "02_DIAGNOSTICS/modules").iterdir())) == 2,
+                "GOOD_DIAGNOSTICS",
+                checks,
+            )
+            check(
+                not any((good_root / "00_STAGING").iterdir()),
+                "GOOD_STAGING_NOT_EMPTY",
+                checks,
+            )
+            audit = run(
+                [
+                    sys.executable,
+                    str(test_root / "01_PROGRAMS/core" / ARTIFACT_STORE),
+                    "--audit-run",
+                    "--run-root",
+                    str(good_root),
+                    "--workspace-root",
+                    str(test_root),
+                ]
+            )
+            check(
+                audit.returncode == 0 and "A2-P2" in audit.stdout,
+                "GOOD_AUDIT",
+                checks,
+            )
+            replay = execute(test_candidate, test_root, "RUN_GOOD")
+            check(
+                replay.returncode == 0 and "N-M2-A2-O0-R1-S1" in replay.stdout,
+                "GOOD_REPLAY",
+                checks,
+            )
+            fail_config = run_configuration(
+                "RUN_FAIL",
+                [{"Stage": "S0", "ModuleId": "Synthetic.S0.Fail"}],
+                "TYPE_FAIL",
+            )
+            failed_prepare = prepare_run(
+                test_root,
+                "run_fail.json",
+                fail_config,
+            )
+            check(failed_prepare.returncode == 0, "FAIL_PREPARE", checks)
+            failed_execution = execute(test_candidate, test_root, "RUN_FAIL")
+            check(
+                failed_execution.returncode == 7
+                and "MODULE_EXIT" in failed_execution.stdout,
+                "REQUIRED_FAILURE_REJECTED_" + failed_execution.stdout.strip(),
+                checks,
+            )
+            failed_status = json.loads(
+                (
+                    test_root / "07_OUTPUT/RUN_FAIL/run_status.json"
+                ).read_text(encoding="utf-8")
+            )
+            check(failed_status["Status"] == "FAILED", "FAILED_STATUS", checks)
+            check(
+                failed_status["FailedModule"] == "Synthetic.S0.Fail",
+                "FAILED_MODULE",
+                checks,
+            )
+            tampered_plan_config = run_configuration(
+                "RUN_PLAN_TAMPER",
+                [{"Stage": "S0", "ModuleId": "Synthetic.S0.Source"}],
+                "TYPE_A",
+            )
+            tampered_plan_prepare = prepare_run(
+                test_root,
+                "run_plan_tamper.json",
+                tampered_plan_config,
+            )
+            check(
+                tampered_plan_prepare.returncode == 0,
+                "PLAN_TAMPER_PREPARE",
+                checks,
+            )
+            tampered_plan_path = (
+                test_root
+                / "07_OUTPUT/RUN_PLAN_TAMPER/00_CONFIG/resolved_run_plan.json"
+            )
+            tampered_plan = json.loads(
+                tampered_plan_path.read_text(encoding="utf-8")
+            )
+            tampered_plan["RunPurpose"] = "MODIFIED"
+            tampered_plan_path.write_text(
+                canonical_text(tampered_plan),
+                encoding="utf-8",
+            )
+            tampered_plan_result = execute(
+                test_candidate,
+                test_root,
+                "RUN_PLAN_TAMPER",
+            )
+            check(
+                tampered_plan_result.returncode == 7
+                and "PLAN_HASH" in tampered_plan_result.stdout,
+                "PLAN_TAMPER_REJECTED",
+                checks,
+            )
+            plan_tamper_status = json.loads(
+                (
+                    test_root / "07_OUTPUT/RUN_PLAN_TAMPER/run_status.json"
+                ).read_text(encoding="utf-8")
+            )
+            check(
+                plan_tamper_status["Status"] == "PREPARED",
+                "PLAN_TAMPER_STATUS",
+                checks,
+            )
+            module_tamper_config = run_configuration(
+                "RUN_MODULE_TAMPER",
+                [{"Stage": "S0", "ModuleId": "Synthetic.S0.Tamper"}],
+                "TYPE_TAMPER",
+            )
+            module_tamper_prepare = prepare_run(
+                test_root,
+                "run_module_tamper.json",
+                module_tamper_config,
+            )
+            check(
+                module_tamper_prepare.returncode == 0,
+                "MODULE_TAMPER_PREPARE",
+                checks,
+            )
+            implementation = modules["Synthetic.S0.Tamper"] / "implementation.py"
+            implementation.write_text(
+                implementation.read_text(encoding="utf-8") + "# tampered\n",
+                encoding="utf-8",
+            )
+            module_tamper_result = execute(
+                test_candidate,
+                test_root,
+                "RUN_MODULE_TAMPER",
+            )
+            check(
+                module_tamper_result.returncode == 7
+                and "MODULE_NOT_AVAILABLE" in module_tamper_result.stdout,
+                "MODULE_TAMPER_REJECTED_" + module_tamper_result.stdout.strip(),
+                checks,
+            )
+            module_tamper_status = json.loads(
+                (
+                    test_root / "07_OUTPUT/RUN_MODULE_TAMPER/run_status.json"
+                ).read_text(encoding="utf-8")
+            )
+            check(
+                module_tamper_status["Status"] == "PREPARED",
+                "MODULE_TAMPER_STATUS",
+                checks,
+            )
+        installed = install_candidate(root, candidate, checks)
+        installed_selftest = run(
+            [
+                sys.executable,
+                str(installed),
+                "--self-test",
+                "--workspace-root",
+                str(root),
+            ]
+        )
+        check(
+            installed_selftest.returncode == 0
+            and "N-T30" in installed_selftest.stdout,
+            "INSTALLED_SELFTEST",
+            checks,
+        )
+        if len(checks) != 39:
+            raise AcceptanceError("CHECK_COUNT_PRE_" + str(len(checks)))
+        checks.append(True)
+        archived = archive_previous(root)
+        print(
+            f"U22A6 N-S2-R1-F1-H2-A2-T40-P1-V{archived}-X0 C-0"
+        )
+        return 0
+    except Exception as exc:
+        reason = reformat_reason(exc)
+        print(
+            f"U22A6 N-S0-R0-F0-H0-A0-T0-P0-V0-X1 C-7 R-{reason}"
+        )
+        return 7
+
+
+def reformat_reason(exc: Exception) -> str:
+    """Keep the failure return short enough for manual transfer."""
+
+    source = str(exc).upper() or exc.__class__.__name__.upper()
+    normalized = "".join(
+        character if character.isalnum() else "_"
+        for character in source
+    )
+    return normalized.strip("_")[:80] or "INTERNAL"
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
