@@ -1,0 +1,454 @@
+#!/usr/bin/env python3
+"""Build a provisional semantic binding profile from the accepted real S0 Artifact."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+from pathlib import Path
+import re
+import sys
+import tempfile
+from typing import Dict, List, Mapping, Sequence, Tuple
+
+
+PROGRAM_ID = "UDP002-U22B1B0-REAL-SIGNAL-BINDING-PROBE"
+VERSION = "0.1"
+BINDING_CONTRACT = "U002_SIGNAL_BINDING_PROFILE_V0_1"
+ROLE_ORDER = (
+    "CAMERA_1_DISTANCE",
+    "CAMERA_3_DISTANCE",
+    "RADAR_DISTANCE",
+    "RADAR_DETECTION_FLAG",
+    "VEHICLE_SPEED",
+    "FRAMECOUNT_SOURCE",
+)
+ROLE_CODES = {
+    "CAMERA_1_DISTANCE": "C1",
+    "CAMERA_3_DISTANCE": "C3",
+    "RADAR_DISTANCE": "RD",
+    "RADAR_DETECTION_FLAG": "RF",
+    "VEHICLE_SPEED": "VS",
+    "FRAMECOUNT_SOURCE": "FC",
+}
+REQUIRED_ROLES = (
+    "CAMERA_1_DISTANCE",
+    "CAMERA_3_DISTANCE",
+)
+INVENTORY_REQUIRED = (
+    "CanonicalName",
+    "CAN_ID",
+    "Channel",
+    "MessageName",
+    "SignalName",
+    "Unit",
+    "ValueKind",
+    "SignalRole",
+    "UpdateMode",
+    "StorageDtype",
+    "WithinFramePolicy",
+    "HoldPolicy",
+    "MaxAgeFrames",
+    "RequiredForAnalysis",
+    "IncludeInFrameView",
+)
+
+
+class BindingError(RuntimeError):
+    """Represent one deterministic signal-binding failure."""
+
+
+def regular_file(path: Path) -> bool:
+    """Accept ordinary files only."""
+
+    return path.is_file() and not path.is_symlink()
+
+
+def canonical_text(value: object) -> str:
+    """Serialize one control document deterministically."""
+
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ) + "\n"
+
+
+def sha256_file(path: Path) -> str:
+    """Hash one metadata file."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while True:
+            block = stream.read(1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def parse_boolean(value: str, field: str) -> bool:
+    """Parse the controlled CSV boolean representation."""
+
+    text = (value or "").strip().lower()
+    if text in {"1", "true"}:
+        return True
+    if text in {"0", "false"}:
+        return False
+    raise BindingError("BOOLEAN_" + field)
+
+
+def normalize_can_id(value: str) -> str:
+    """Normalize common hexadecimal CAN ID representations."""
+
+    text = (value or "").strip().upper()
+    text = text.removeprefix("ID").removeprefix("0X")
+    if not text or not re.fullmatch(r"[0-9A-F]+", text):
+        return ""
+    return text.lstrip("0") or "0"
+
+
+def normalize_name(value: str) -> str:
+    """Normalize a signal label for deterministic semantic matching."""
+
+    return "".join(char.lower() for char in (value or "") if char.isalnum())
+
+
+def normalize_channel(value: str) -> str:
+    """Normalize an integer-like channel value."""
+
+    text = (value or "").strip()
+    try:
+        number = float(text)
+    except ValueError:
+        return text
+    if number.is_integer():
+        return str(int(number))
+    return text
+
+
+def role_for(row: Mapping[str, str]) -> str | None:
+    """Classify one governed signal using explicit TC001 selectors."""
+
+    can_id = normalize_can_id(row.get("CAN_ID", ""))
+    channel = normalize_channel(row.get("Channel", ""))
+    signal = normalize_name(row.get("SignalName", ""))
+    if can_id == "221" and channel == "2" and signal == "distance":
+        return "CAMERA_1_DISTANCE"
+    if can_id == "251" and channel == "2" and signal == "distance":
+        return "CAMERA_3_DISTANCE"
+    if can_id == "380" and channel == "1" and signal in {
+        "distancetoobject",
+        "distance",
+    }:
+        return "RADAR_DISTANCE"
+    if can_id == "380" and channel == "1" and signal in {
+        "precedingvehicledetection",
+        "precedingvehicledetectionflag",
+    }:
+        return "RADAR_DETECTION_FLAG"
+    if can_id == "5E1" and signal == "vehiclespeed":
+        return "VEHICLE_SPEED"
+    if can_id == "620" and channel == "2" and signal == "framecount":
+        return "FRAMECOUNT_SOURCE"
+    return None
+
+
+def latest_accepted_run(root: Path) -> Path:
+    """Select the latest real B1AR Run with an accepted receipt."""
+
+    candidates: List[Path] = []
+    for receipt in (root / "07_OUTPUT").glob(
+        "U22B1AR_*/u22b1ar_real_handoff_receipt.json"
+    ):
+        if not regular_file(receipt):
+            continue
+        try:
+            payload = json.loads(receipt.read_text(encoding="utf-8-sig"))
+        except Exception:
+            continue
+        if payload.get("Status") == "REAL_U001_HANDOFF_ACCEPTED":
+            candidates.append(receipt.parent)
+    if not candidates:
+        raise BindingError("NO_ACCEPTED_B1AR_RUN")
+    return max(candidates, key=lambda path: path.stat().st_mtime_ns)
+
+
+def inventory_path(run_root: Path) -> Path:
+    """Resolve the only governed U001 signal inventory in the accepted Run."""
+
+    matches = [
+        path
+        for path in run_root.rglob("u001_signal_inventory.csv")
+        if regular_file(path)
+    ]
+    if len(matches) != 1:
+        raise BindingError("INVENTORY_COUNT")
+    return matches[0]
+
+
+def read_inventory(path: Path) -> List[Dict[str, str]]:
+    """Read and validate the metadata-only signal inventory."""
+
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        header = reader.fieldnames or []
+        missing = [name for name in INVENTORY_REQUIRED if name not in header]
+        if missing:
+            raise BindingError("INVENTORY_MISSING_" + missing[0])
+        rows = [{key: row.get(key, "") for key in header} for row in reader]
+    if not rows:
+        raise BindingError("INVENTORY_EMPTY")
+    identities = [row["CanonicalName"] for row in rows]
+    if any(not name for name in identities) or len(identities) != len(set(identities)):
+        raise BindingError("CANONICAL_IDENTITY")
+    return rows
+
+
+def resolve_bindings(
+    rows: Sequence[Mapping[str, str]],
+) -> Tuple[Dict[str, List[Dict[str, object]]], int]:
+    """Return every exact match, preserving ambiguity rather than guessing."""
+
+    result: Dict[str, List[Dict[str, object]]] = {
+        role: [] for role in ROLE_ORDER
+    }
+    unresolved = 0
+    for row in rows:
+        role = role_for(row)
+        if role is None:
+            unresolved += 1
+            continue
+        result[role].append(
+            {
+                "CanonicalName": row["CanonicalName"],
+                "CAN_ID": row["CAN_ID"],
+                "Channel": row["Channel"],
+                "MessageName": row["MessageName"],
+                "SignalName": row["SignalName"],
+                "Unit": row["Unit"],
+                "ValueKind": row["ValueKind"],
+                "SignalRole": row["SignalRole"],
+                "UpdateMode": row["UpdateMode"],
+                "StorageDtype": row["StorageDtype"],
+                "WithinFramePolicy": row["WithinFramePolicy"],
+                "HoldPolicy": row["HoldPolicy"],
+                "MaxAgeFrames": row["MaxAgeFrames"],
+                "RequiredForAnalysis": parse_boolean(
+                    row["RequiredForAnalysis"],
+                    row["CanonicalName"] + "_REQUIRED",
+                ),
+                "IncludeInFrameView": parse_boolean(
+                    row["IncludeInFrameView"],
+                    row["CanonicalName"] + "_FRAME",
+                ),
+            }
+        )
+    return result, unresolved
+
+
+def build_profile(
+    run_root: Path,
+    inventory: Path,
+    rows: Sequence[Mapping[str, str]],
+) -> Tuple[Dict[str, object], Dict[str, int], int, int]:
+    """Build a provisional profile without silently resolving duplicates."""
+
+    bindings, unresolved = resolve_bindings(rows)
+    counts = {role: len(bindings[role]) for role in ROLE_ORDER}
+    duplicates = sum(1 for count in counts.values() if count > 1)
+    missing_required = [role for role in REQUIRED_ROLES if counts[role] != 1]
+    frame_view_count = sum(
+        parse_boolean(row["IncludeInFrameView"], row["CanonicalName"] + "_FRAME")
+        for row in rows
+    )
+    profile = {
+        "ContractVersion": BINDING_CONTRACT,
+        "BindingProfileId": "TC001.CameraRadar.Base.PROVISIONAL",
+        "BindingProfileVersion": "0.1",
+        "Status": "PROVISIONAL_MACHINE_PROPOSAL",
+        "HumanApprovalRequired": True,
+        "SourceRunId": run_root.name,
+        "SourceInventoryRelativePath": str(inventory.relative_to(run_root)),
+        "SourceInventorySha256": sha256_file(inventory),
+        "InventorySignalCount": len(rows),
+        "FrameViewSignalCount": frame_view_count,
+        "RequiredRoles": list(REQUIRED_ROLES),
+        "OptionalRoles": [role for role in ROLE_ORDER if role not in REQUIRED_ROLES],
+        "Bindings": bindings,
+        "BindingCounts": counts,
+        "UnresolvedSignalCount": unresolved,
+        "DuplicateRoleCount": duplicates,
+        "BlockingIssues": [
+            "REQUIRED_ROLE_" + role + "_COUNT_" + str(counts[role])
+            for role in missing_required
+        ],
+        "Prohibitions": [
+            "Recognition_ID is not treated as authoritative target truth",
+            "Radar is not used to select the Camera target",
+            "No continuity arbitration is performed in B1B0",
+            "No signal values are copied into this profile",
+        ],
+    }
+    return profile, counts, frame_view_count, duplicates
+
+
+def write_profile(root: Path, profile: Mapping[str, object]) -> Path:
+    """Write one fingerprint-bound provisional profile into active TEMP."""
+
+    fingerprint = str(profile["SourceInventorySha256"])[:12]
+    path = root / "04_TEMP" / (
+        "u22b1b0_signal_binding_proposal_" + fingerprint + ".json"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = canonical_text(profile)
+    if path.exists():
+        if path.read_text(encoding="utf-8") != content:
+            raise BindingError("PROPOSAL_CONFLICT")
+        return path
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def self_test() -> int:
+    """Validate discovery, exact role matching and ambiguity preservation."""
+
+    checks: List[bool] = []
+
+    def check(condition: bool) -> None:
+        if not condition:
+            raise BindingError("SELFTEST")
+        checks.append(True)
+
+    with tempfile.TemporaryDirectory(prefix="u22b1b0_") as temp:
+        root = Path(temp)
+        run = root / "07_OUTPUT/U22B1AR_TEST"
+        artifact = run / "03_ARTIFACTS/S0/Artifact1"
+        artifact.mkdir(parents=True)
+        receipt = {
+            "Status": "REAL_U001_HANDOFF_ACCEPTED",
+        }
+        (run / "u22b1ar_real_handoff_receipt.json").write_text(
+            canonical_text(receipt),
+            encoding="utf-8",
+        )
+        rows = []
+        fixtures = (
+            ("C1", "0x221", "2", "Distance", "1"),
+            ("C3", "0x251", "2", "Distance", "1"),
+            ("RD", "0x380", "1", "DistanceToObject", "1"),
+            ("RF", "0x380", "1", "PrecedingVehicleDetectionFlag", "1"),
+            ("VS", "0x5E1", "1", "VehicleSpeed", "1"),
+            ("FC", "0x620", "2", "FrameCount", "0"),
+        )
+        for canonical, can_id, channel, signal, in_frame in fixtures:
+            row = {name: "" for name in INVENTORY_REQUIRED}
+            row.update(
+                {
+                    "CanonicalName": canonical,
+                    "CAN_ID": can_id,
+                    "Channel": channel,
+                    "MessageName": canonical,
+                    "SignalName": signal,
+                    "Unit": "m" if "Distance" in signal else "",
+                    "ValueKind": "FLOAT",
+                    "SignalRole": "MEASUREMENT",
+                    "UpdateMode": "PERIODIC",
+                    "StorageDtype": "float64",
+                    "WithinFramePolicy": "LAST_UPDATE",
+                    "HoldPolicy": "NONE",
+                    "MaxAgeFrames": "0",
+                    "RequiredForAnalysis": "1",
+                    "IncludeInFrameView": in_frame,
+                }
+            )
+            rows.append(row)
+        inventory = artifact / "u001_signal_inventory.csv"
+        with inventory.open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(INVENTORY_REQUIRED))
+            writer.writeheader()
+            writer.writerows(rows)
+        selected_run = latest_accepted_run(root)
+        check(selected_run == run)
+        selected_inventory = inventory_path(selected_run)
+        check(selected_inventory == inventory)
+        loaded = read_inventory(inventory)
+        check(len(loaded) == 6)
+        profile, counts, frame_count, duplicates = build_profile(
+            run,
+            inventory,
+            loaded,
+        )
+        check(all(counts[role] == 1 for role in ROLE_ORDER))
+        check(frame_count == 5)
+        check(duplicates == 0)
+        check(profile["BlockingIssues"] == [])
+        check(profile["UnresolvedSignalCount"] == 0)
+        output = write_profile(root, profile)
+        check(regular_file(output))
+        check(write_profile(root, profile) == output)
+    print(f"U22B1B0-ST N-T{len(checks)}-X0 C-0")
+    return 0
+
+
+def main(argv: Sequence[str] = None) -> int:
+    """Build one real-data metadata binding proposal."""
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--workspace-root")
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        if args.self_test:
+            return self_test()
+        if not args.workspace_root:
+            raise BindingError("WORKSPACE_ROOT_REQUIRED")
+        root = Path(args.workspace_root).resolve()
+        run = latest_accepted_run(root)
+        inventory = inventory_path(run)
+        before = (inventory.stat().st_size, inventory.stat().st_mtime_ns, sha256_file(inventory))
+        rows = read_inventory(inventory)
+        profile, counts, frame_count, duplicates = build_profile(
+            run,
+            inventory,
+            rows,
+        )
+        write_profile(root, profile)
+        after = (inventory.stat().st_size, inventory.stat().st_mtime_ns, sha256_file(inventory))
+        if before != after:
+            raise BindingError("SOURCE_INVENTORY_CHANGED")
+        blocking = len(profile["BlockingIssues"])
+        unresolved = int(profile["UnresolvedSignalCount"])
+        parts = [
+            "U22B1B0 N-K" + str(len(rows)),
+            "F" + str(frame_count),
+        ]
+        parts.extend(
+            ROLE_CODES[role] + str(counts[role])
+            for role in ROLE_ORDER
+        )
+        parts.extend(
+            (
+                "U" + str(unresolved),
+                "D" + str(duplicates),
+                "B" + str(blocking),
+                "P1",
+                "I1",
+            )
+        )
+        if blocking:
+            print("-".join(parts) + "-X1 C-7 R-BINDING_BLOCKED")
+            return 7
+        print("-".join(parts) + "-X0 C-0")
+        return 0
+    except Exception as exc:
+        reason = normalize_name(str(exc)).upper()[:80] or exc.__class__.__name__.upper()
+        print("U22B1B0 N-K0-F0-C10-C30-RD0-RF0-VS0-FC0-U0-D0-B1-P0-I0-X1 C-7 R-" + reason)
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
