@@ -1,0 +1,356 @@
+UDP002 ALGORITHM CARD
+
+AlgorithmId:
+CameraRadar.S1.CameraTargetContinuityArbitration
+
+AlgorithmVersion:
+0.1
+
+Status:
+PROVISIONAL DESIGN BASELINE
+
+Owner:
+Zhao Zhili
+
+Date:
+2026-08-20
+
+1. Purpose
+
+Construct one analysis-grade provisional Camera target distance from two governed
+Camera target distance streams when the physical target may move between Camera 1
+and Camera 3 CAN channels.
+
+The result is intended for later Camera-Radar discrepancy analysis and video
+review. It is not a claim that the selected Camera target is ground truth or the
+actual control target.
+
+2. Problem solved
+
+The real test data contains channel migration and invalid/default values. Directly
+analyzing Camera 1 only loses the second half of the test. Directly concatenating
+Camera 1 and Camera 3 without validity, continuity and hysteresis can create false
+jumps and false Camera-Radar discrepancies.
+
+3. Position in U002
+
+Stage:
+S1 Semantic Reconstruction and Analysis Preprocessing
+
+Requires Artifact:
+U001_INTAKE_ACCEPTED
+
+Requires Configuration:
+accepted U002_SIGNAL_BINDING_PROFILE_V0_1
+
+Provides Artifact:
+CAMERA_TARGET_RECONSTRUCTION
+
+It runs before population construction, Camera-Radar discrepancy, baseline,
+residual, evidence scoring and candidate synthesis.
+
+4. Required inputs
+
+Per FrameCount:
+
+- Camera 1 distance value;
+- Camera 1 updated flag;
+- Camera 1 update count;
+- Camera 1 age;
+- Camera 1 valid flag;
+- Camera 1 missing reason;
+- Camera 3 equivalent fields;
+- canonical FrameCount leading column.
+
+Binding metadata:
+
+- exact CanonicalName for Camera 1 and Camera 3;
+- Unit;
+- ValueKind;
+- HoldPolicy;
+- MaxAgeFrames;
+- source inventory SHA-256.
+
+5. Explicitly forbidden inputs
+
+The arbitration cost must not use:
+
+- Radar Distance;
+- Camera-Radar discrepancy;
+- future anomaly score;
+- Recognition_ID as authoritative truth;
+- video labels during automatic selection.
+
+Reason:
+
+Using Radar to select the Camera stream would leak the later comparison target
+into preprocessing and artificially suppress the discrepancy being investigated.
+
+6. Eligibility gate
+
+For source j in {Camera1, Camera3} at Frame i:
+
+eligible_j(i) =
+    U001_valid_j(i)
+    AND finite(value_j(i))
+    AND age_j(i) <= configured_max_age_j
+
+U001 validity remains authoritative for decoded default/invalid values. U002 does
+not reinterpret blank, 0 or 327.66 independently after U001 has already assigned
+valid and missing_reason semantics.
+
+Ineligible values remain visible in the diagnostic columns but cannot become a
+valid canonical output.
+
+7. Segment boundary
+
+A continuity segment ends when:
+
+- FrameCount is not strictly previous FrameCount + 1;
+- a configured analysis range begins;
+- both sources remain ineligible and state is reset by policy.
+
+Continuity state is never propagated across one of the two observed FrameCount
+gap intervals without an explicit re-acquisition.
+
+8. State
+
+The selector state is:
+
+s(i) in {CAMERA_1, CAMERA_3, NONE}
+
+The last confident canonical value is y_conf(i).
+
+An additional pending state records a possible switch or acquisition without
+immediately declaring it confident.
+
+9. Continuity cost
+
+For every eligible source j when a previous confident value exists:
+
+c_j(i) = abs(x_j(i) - y_conf(i-1)) / sigma_cont
+
+where:
+
+x_j(i)      = source j distance at Frame i
+sigma_cont  = configured continuity scale in meters
+
+For TC001 development, prior manually reviewed continuity work produced:
+
+sigma_cont = 0.38 m
+
+The provisional confidence limit is:
+
+tau = 3.0
+
+equivalent to:
+
+abs(x_j(i) - y_conf(i-1)) <= 1.14 m
+
+These are TC001 configuration parameters, not universal constants. They remain
+visible in the Run Configuration and must be revalidated for another vehicle,
+sensor generation, sample rate or signal definition.
+
+10. Hysteresis and confirmation
+
+Default provisional parameters:
+
+AcquireConfirmFrames = 3
+SwitchConfirmFrames  = 3
+SwitchMargin         = 1.0 normalized cost unit
+
+Rules:
+
+A. Existing selected source remains eligible and plausible
+
+Stay on the current source. Do not switch merely because the alternative is
+slightly closer. This is hysteresis against channel flapping.
+
+B. Existing source is implausible or ineligible and the alternative is eligible
+
+Start a pending switch only when the alternative is continuous with the last
+confident value. Confirm after SwitchConfirmFrames consecutive supporting Frames.
+Pending Frames are AMBIGUOUS and are not emitted as valid canonical measurements.
+
+C. Both sources are eligible but they imply materially different targets
+
+Switch only when the alternative cost is below tau and is better than the current
+source by at least SwitchMargin for SwitchConfirmFrames. Otherwise retain state
+but mark the Frame AMBIGUOUS when neither path is sufficiently supported.
+
+D. Neither source is eligible
+
+Emit INVALID and no canonical value.
+
+E. New segment or state NONE
+
+Use an explicit configured seed only for a documented Case range. Otherwise
+acquire a single eligible, internally continuous source after
+AcquireConfirmFrames. If both are plausible and no unique choice exists, remain
+AMBIGUOUS instead of guessing.
+
+11. TC001 development seed
+
+The provisional TC001 development configuration may use:
+
+SeedFrame  = 7400
+SeedSource = CAMERA_1_DISTANCE
+
+This seed is based on the previously reviewed start of the valid road-test range.
+It belongs to the TC001 Binding/Run Configuration, not the generic Module code.
+
+12. Output table
+
+One row per input FrameCount:
+
+- FrameCount
+- Camera1Distance
+- Camera1Eligible
+- Camera1Age
+- Camera3Distance
+- Camera3Eligible
+- Camera3Age
+- ProvisionalCameraDistance
+- CanonicalCameraDistance
+- CanonicalCameraValid
+- SelectedCameraRole
+- SelectionStatus
+- SelectionReason
+- SelectionChanged
+- ContinuityCostCamera1
+- ContinuityCostCamera3
+- CostMargin
+- SegmentId
+
+ProvisionalCameraDistance may support engineering visualization. It must never be
+used as an analysis-grade value when CanonicalCameraValid=false.
+
+13. SelectionStatus vocabulary
+
+- SEEDED
+- ACQUIRING
+- CONFIDENT
+- SWITCH_PENDING
+- AMBIGUOUS
+- INVALID
+- SEGMENT_RESET
+
+Only SEEDED and CONFIDENT rows have CanonicalCameraValid=true in v0.1.
+
+14. Artifact summary
+
+The Artifact also contains metadata-only quality evidence:
+
+- input package fingerprint;
+- binding profile identity and hash;
+- Frame range and segment count;
+- selection count by Camera role;
+- confident, ambiguous and invalid row counts;
+- source switch count;
+- maximum and quantile signal age;
+- configured thresholds and confirmation lengths;
+- deterministic output SHA-256;
+- prohibitions and limitations.
+
+15. Assumptions
+
+- U001 validity and age semantics are correct.
+- The same physical target normally produces locally continuous distance.
+- A real channel migration usually leaves a continuity cue between the old and
+  new source.
+- Three Frames at 20 Hz are sufficient for the first provisional confirmation
+  policy.
+- The TC001 seed has been manually checked at the valid-range start.
+
+16. Known limitations
+
+- Two different physical targets can have similar distance and continuity.
+- A stable background object can also be continuous.
+- Without target identity or lateral/tracking state, source identity may remain
+  ambiguous even when distance is smooth.
+- Gradual drift can be harder to detect than an abrupt default-value jump.
+- A video-visible target switch may not be represented consistently in CAN.
+- TC001 thresholds do not automatically transfer to another dataset.
+
+Therefore the output remains provisional and must pass U003 video/CAN review.
+
+17. Rejected alternatives
+
+Recognition_ID-only selection:
+Rejected because manual video review found repeated mismatch with displayed AKBPTS
+target behavior.
+
+Radar-nearest selection:
+Rejected because it introduces target leakage into Camera-Radar discrepancy.
+
+Always choose the smaller distance:
+Rejected because nearer does not guarantee the intended physical target.
+
+Unlimited forward fill:
+Rejected because stale held values can create false continuity and false dynamic
+memory.
+
+Immediate one-Frame switching:
+Rejected because it amplifies transient invalid values and channel flapping.
+
+Black-box classifier:
+Deferred because labelled ground truth is insufficient and v0.1 must remain
+explainable.
+
+18. Controlled fixture plan
+
+F01 Stable Camera 1.
+F02 Stable Camera 3.
+F03 Camera 1 invalid, Camera 3 continuous, confirmed switch.
+F04 Camera 1 default/invalid jump, Camera 3 continuous.
+F05 Alternative background far away, no switch.
+F06 Both sources invalid.
+F07 Both sources plausible but ambiguous.
+F08 FrameCount gap resets continuity state.
+F09 Stale age rejects an otherwise finite value.
+F10 Pending switch does not become a valid canonical measurement.
+F11 Deterministic replay produces byte-identical output.
+F12 Input U001 package and S0 Artifact remain immutable.
+F13 Radar columns are not resolved or read by the arbitration implementation.
+
+19. Real validation plan
+
+Phase 1:
+Short declared TC001 range beginning at Frame 7400.
+
+Phase 2:
+Full 56,596-Frame accepted range.
+
+Phase 3:
+Generate compact review windows around source switches, ambiguity clusters and
+invalid clusters.
+
+Phase 4:
+Use U003 for video/CAN review. Compare against previously reviewed Camera 1/3
+channel-migration windows without changing the algorithm during the review.
+
+20. Acceptance metrics
+
+Mandatory engineering metrics:
+
+- no input mutation;
+- no Radar use in arbitration;
+- zero schema or lineage errors;
+- all invalid/ambiguous rows excluded from analysis-grade canonical output;
+- switch count and review-window count are bounded and explainable;
+- known stable review cases remain stable;
+- every real switch has a reason code and evidence window.
+
+No target-accuracy percentage is claimed until manual labels are sufficient.
+
+21. Complexity stop rule
+
+Version 0.1 will not add ObjectType, LateralPosition, TrackingState, HMI, SysID or
+machine learning unless the continuity-only real validation demonstrates a
+specific reproducible failure that those inputs can resolve.
+
+22. Decision
+
+Proceed with an explainable continuity-hysteresis S1 Module using explicit
+bindings and TC001 configuration. Preserve ambiguity rather than forcing a target
+choice. Keep Radar completely outside the selection cost.
