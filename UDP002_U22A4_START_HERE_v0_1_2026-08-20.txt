@@ -1,0 +1,65 @@
+UDP002 U22A4——Module Qualification Gate（模块资格验收）
+日期：2026-08-20
+
+一、为什么在Engine之前增加这一步
+
+U22A2只做安全发现。一个结构正确的新模块仍然是SELFTEST_REQUIRED，不能直接交给Engine执行。
+
+U22A4在受控子进程中运行模块自己的selftest，把通过结果绑定到Module Manifest、implementation.py、selftest.py、Algorithm Card和Configuration Schema的Hash。任一文件后来变化，AVAILABLE资格自动失效。
+
+现实意义：防止“模块名字和清单没变，但实际代码已经被修改”的程序进入正式Pipeline。
+
+二、本步骤明确不做什么
+
+- 不执行implementation.py；
+- 不运行分析Pipeline；
+- 不决定Run Plan；
+- 不执行任何S0-S7工程算法。
+
+三、下载文件
+
+把以下两个程序直接下载到：
+
+  .\U-UDP002\04_TEMP
+
+1. u002_u22_module_qualification_v0_1.py.txt
+2. udp002_u22a4_module_qualification_acceptance_v0_1.py.txt
+
+不要让Copilot修改或重新生成程序。
+
+四、运行验收（Windows CMD，从C-CODE目录执行）
+
+python .\U-UDP002\04_TEMP\udp002_u22a4_module_qualification_acceptance_v0_1.py.txt --workspace-root .\U-UDP002
+
+预期：
+
+U22A4 N-Q1-A1-F2-M1-T26-P1-V2-X0 C-0
+
+V可能小于2，只表示某个U22A3中转文件此前已经移走。
+
+五、验收后手动运行已安装程序的self-test
+
+python .\U-UDP002\01_PROGRAMS\core\u002_u22_module_qualification_v0_1.py --self-test --workspace-root .\U-UDP002
+
+预期：
+
+U22A4Q-ST N-T24-X0 C-0
+
+六、用CMD检查安装文件与输出目录
+
+if exist .\U-UDP002\01_PROGRAMS\core\u002_u22_module_qualification_v0_1.py (echo U22A4-INSTALL-OK) else (echo U22A4-INSTALL-MISSING)
+
+if exist .\U-UDP002\00_CONTROL\registry\qualifications (echo U22A4-OUTPUT-DIR-OK) else (echo U22A4-OUTPUT-DIR-MISSING)
+
+七、需要回传的内容
+
+只回传第一条验收结果U22A4...。如果self-test或目录检查不是OK，再额外回传对应错误行。
+
+八、下一步
+
+U22A5开始建立最小Engine Core。Engine只接受：
+
+- 已通过契约验证的Run Configuration；
+- Registry中已发现的模块；
+- U22A4中资格状态为AVAILABLE的模块；
+- 固定S0-S7顺序和显式Run Plan。
