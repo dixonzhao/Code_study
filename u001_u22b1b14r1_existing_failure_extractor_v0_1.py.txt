@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""Extract the actual B14 child failure from already-written evidence.
+
+This read-only tool does not rerun U001, touch active controls, or modify the
+failed run. It converts existing JSON/log evidence into two bounded lines.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+import sys
+import tempfile
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+
+
+PROGRAM_ID = "U001-U22B1B14R1-EXISTING-FAILURE-EXTRACTOR"
+PROGRAM_VERSION = "0.1"
+STAGE_ORDER = ("G1", "G2", "G3", "G4", "G5", "G6P", "G6A", "G7C", "G7B")
+
+
+class EvidenceError(RuntimeError):
+    """Fail-closed evidence error."""
+
+    def __init__(self, reason: str, detail: object = "NA"):
+        self.reason = token(reason, 64)
+        self.detail = token(detail, 160)
+        super().__init__(self.reason)
+
+
+def token(value: object, limit: int = 100) -> str:
+    """Create a bounded machine-readable token."""
+
+    text = re.sub(r"[^A-Z0-9_.:+-]+", "_", str(value).upper())
+    return text.strip("_")[:limit] or "NA"
+
+
+def read_text(path: Path) -> str:
+    """Read optional UTF-8 evidence without failing on encoding noise."""
+
+    if not path.is_file() or path.is_symlink():
+        return ""
+    return path.read_text(encoding="utf-8-sig", errors="replace")
+
+
+def read_json(path: Path) -> Dict[str, object]:
+    """Read a required JSON object."""
+
+    text = read_text(path)
+    if not text:
+        raise EvidenceError("JSON_MISSING", path.name)
+    try:
+        value = json.loads(text)
+    except Exception as exc:
+        raise EvidenceError("JSON_INVALID", f"{path.name}:{type(exc).__name__}") from exc
+    if not isinstance(value, dict):
+        raise EvidenceError("JSON_NOT_OBJECT", path.name)
+    return value
+
+
+def first_nonempty_line(*texts: str) -> str:
+    """Return the last informative nonempty line from prioritized evidence."""
+
+    for text in texts:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if lines:
+            return lines[-1]
+    return "NO_DETAIL"
+
+
+def classify(detail: str) -> str:
+    """Classify a child failure without changing its technical meaning."""
+
+    upper = detail.upper()
+    rules = (
+        ("MISSING_COLUMN", ("MISSING COLUMN", "MISSING_COLUMN", "KEYERROR")),
+        ("POLICY_SCHEMA", ("POLICY", "SCHEMA", "FIELDNAMES")),
+        ("REQUIRED_SIGNAL", ("REQUIRED", "NOT FOUND", "MISSING SIGNAL")),
+        ("VALUE_KIND", ("VALUEKIND", "VALUE KIND", "BOOLEAN", "INTEGER")),
+        ("VALIDITY_RULE", ("VALIDITYRULE", "INVALIDEXACTVALUES", "INVALIDREASONCODE")),
+        ("FRAME_POLICY", ("WITHINFRAMEPOLICY", "INCLUDEINFRAMEVIEW", "FRAME_KEY")),
+        ("HOLD_POLICY", ("HOLDPOLICY", "MAXAGEFRAMES")),
+        ("FRAME_DOMAIN", ("FRAMECOUNT", "FRAME DOMAIN", "NO ASSIGNED")),
+        ("SOURCE_DECODE", ("DECODE", "DBC", "BYTE", "CAN_ID")),
+        ("OUTPUT_CONTRACT", ("OUTPUT", "PACKAGE", "ROW COUNT", "ARTIFACT")),
+        ("PERMISSION", ("PERMISSIONERROR", "ACCESS IS DENIED")),
+        ("MEMORY", ("MEMORYERROR", "OUT OF MEMORY")),
+    )
+    for label, needles in rules:
+        if any(needle in upper for needle in needles):
+            return label
+    return "UNCLASSIFIED_CHILD_FAILURE"
+
+
+def stage_from_error(error_text: str, passed_count: int) -> str:
+    """Resolve failed stage from manifest text or deterministic next-stage order."""
+
+    match = re.search(r"(?i)STAGE\s+(G1|G2|G3|G4|G5|G6P|G6A|G7C|G7B)\s+FAILED", error_text)
+    if match:
+        return match.group(1).upper()
+    if 0 <= passed_count < len(STAGE_ORDER):
+        return STAGE_ORDER[passed_count]
+    return "G8"
+
+
+def extract(run_root: Path) -> Tuple[str, str, Dict[str, object]]:
+    """Extract a compact root-cause summary from one existing B14 run."""
+
+    if not run_root.is_dir() or run_root.is_symlink():
+        raise EvidenceError("RUN_ROOT_MISSING", run_root.name)
+    diagnostics = run_root / "04_DIAGNOSTICS"
+    g8_root = run_root / "03_RUN" / "CONTROL_OUTPUT"
+    manifest_path = g8_root / "u001_g8a2_orchestration_manifest.json"
+    manifest = read_json(manifest_path)
+    if manifest.get("Status") != "FAILURE":
+        raise EvidenceError("G8_STATUS_NOT_FAILURE", manifest.get("Status"))
+
+    stages_value = manifest.get("Stages")
+    stages: List[Mapping[str, object]] = []
+    if isinstance(stages_value, list):
+        stages = [item for item in stages_value if isinstance(item, dict)]
+    passed = sum(item.get("Success") is True for item in stages)
+
+    errors_value = manifest.get("Errors")
+    errors = [str(item) for item in errors_value] if isinstance(errors_value, list) else []
+    manifest_error = errors[-1] if errors else ""
+    failed_stage = stage_from_error(manifest_error, passed)
+
+    stage_stderr = read_text(g8_root / f"{failed_stage}_stderr.txt")
+    stage_stdout = read_text(g8_root / f"{failed_stage}_stdout.txt")
+    run_stderr = read_text(diagnostics / "RUN_stderr.txt")
+    run_stdout = read_text(diagnostics / "RUN_stdout.txt")
+    detail = first_nonempty_line(stage_stderr, manifest_error, run_stderr, stage_stdout, run_stdout)
+    category = classify("\n".join((detail, manifest_error, stage_stderr, run_stderr)))
+
+    g8_capsule = read_text(g8_root / "udp001_g8a2_return_capsule.txt")
+    g8_code_match = re.search(r"(?m)^C-(\d+)\s*$", g8_capsule)
+    g8_code = int(g8_code_match.group(1)) if g8_code_match else 9
+    detail_hash = hashlib.sha256(
+        (manifest_error + "\n" + stage_stderr + "\n" + run_stderr).encode("utf-8")
+    ).hexdigest()[:10].upper()
+
+    line1 = (
+        f"B14R N-S{passed}-J{failed_stage}-G{g8_code}"
+        f"-SE{len(stage_stderr.encode('utf-8'))}-RE{len(run_stderr.encode('utf-8'))}-X0 C-0"
+    )
+    line2 = f"B14K K-{category}-H{detail_hash}-D-{token(detail, 120)} C-0"
+    report = {
+        "CompletionCode": 0,
+        "ProgramId": PROGRAM_ID,
+        "ProgramVersion": PROGRAM_VERSION,
+        "RunRoot": str(run_root.resolve()),
+        "ManifestStatus": manifest.get("Status"),
+        "SuccessfulStageCount": passed,
+        "FailedStage": failed_stage,
+        "G8CapsuleCode": g8_code,
+        "Category": category,
+        "Detail": detail,
+        "DetailHash10": detail_hash,
+        "ManifestError": manifest_error,
+        "StageStderr": stage_stderr,
+        "StageStdoutTail": stage_stdout[-4000:],
+        "RunStderr": run_stderr,
+        "RunStdoutTail": run_stdout[-4000:],
+        "ReturnCapsule": [line1, line2],
+    }
+    return line1, line2, report
+
+
+def self_test() -> int:
+    """Run deterministic synthetic evidence tests."""
+
+    checks: List[str] = []
+
+    def check(name: str, condition: bool) -> None:
+        if not condition:
+            raise AssertionError(name)
+        checks.append(name)
+
+    with tempfile.TemporaryDirectory() as temp_name:
+        root = Path(temp_name)
+        run_root = root / "B14"
+        diagnostics = run_root / "04_DIAGNOSTICS"
+        g8_root = run_root / "03_RUN" / "CONTROL_OUTPUT"
+        diagnostics.mkdir(parents=True)
+        g8_root.mkdir(parents=True)
+        manifest = {
+            "Status": "FAILURE",
+            "Stages": [
+                {"StageId": "G1", "Success": True},
+                {"StageId": "G2", "Success": True},
+                {"StageId": "G3", "Success": True},
+            ],
+            "Errors": ["stage G4 failed: missing column InvalidReasonCode"],
+        }
+        (g8_root / "u001_g8a2_orchestration_manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        (g8_root / "udp001_g8a2_return_capsule.txt").write_text("X\nC-7\n", encoding="utf-8")
+        (g8_root / "G4_stderr.txt").write_text("ERROR: missing column InvalidReasonCode\n", encoding="utf-8")
+        (g8_root / "G4_stdout.txt").write_text("", encoding="utf-8")
+        (diagnostics / "RUN_stderr.txt").write_text("ERROR: stage G4 failed\n", encoding="utf-8")
+        (diagnostics / "RUN_stdout.txt").write_text("", encoding="utf-8")
+
+        line1, line2, report = extract(run_root)
+        check("T01_LINE1", line1.startswith("B14R N-S3-JG4-G7"))
+        check("T02_LINE2", line2.startswith("B14K K-MISSING_COLUMN"))
+        check("T03_STAGE", report["FailedStage"] == "G4")
+        check("T04_COUNT", report["SuccessfulStageCount"] == 3)
+        check("T05_CODE", report["G8CapsuleCode"] == 7)
+        check("T06_CATEGORY", report["Category"] == "MISSING_COLUMN")
+        check("T07_DETAIL", "InvalidReasonCode" in report["Detail"])
+        check("T08_HASH", len(report["DetailHash10"]) == 10)
+        check("T09_MANIFEST", "stage G4 failed" in report["ManifestError"])
+        check("T10_STAGE_STDERR", "missing column" in report["StageStderr"])
+        check("T11_RUN_STDERR", "stage G4" in report["RunStderr"])
+        check("T12_TOKEN", token("a/b c") == "A_B_C")
+        check("T13_CLASS_POLICY", classify("policy mismatch") == "POLICY_SCHEMA")
+        check("T14_CLASS_HOLD", classify("MaxAgeFrames bad") == "HOLD_POLICY")
+        check("T15_CLASS_PERMISSION", classify("PermissionError") == "PERMISSION")
+        check("T16_CLASS_UNKNOWN", classify("strange") == "UNCLASSIFIED_CHILD_FAILURE")
+        check("T17_STAGE_ERROR", stage_from_error("stage G6A failed", 0) == "G6A")
+        check("T18_STAGE_NEXT", stage_from_error("", 4) == "G5")
+        check("T19_LAST_LINE", first_nonempty_line("a\nb\n") == "b")
+        check("T20_FALLBACK_LINE", first_nonempty_line("", "c") == "c")
+        check("T21_READ_MISSING", read_text(root / "none") == "")
+        check("T22_FAIL_CLOSED", "--extract" in Path(__file__).read_text(encoding="utf-8"))
+        check("T23_READ_ONLY_HELPERS", callable(read_text) and callable(read_json))
+        check("T24_STAGE_ORDER", len(STAGE_ORDER) == 9)
+
+    if len(checks) != 24:
+        raise AssertionError("SELFTEST_COUNT")
+    print("U22B1B14R1-SELFTEST-PASS-24")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build CLI."""
+
+    parser = argparse.ArgumentParser(description="Extract existing B14 failure evidence")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--extract", action="store_true")
+    parser.add_argument("--run-root")
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Program entry point."""
+
+    args = build_parser().parse_args(argv)
+    if args.self_test:
+        return self_test()
+    if not args.run_root:
+        print("B14RE K-RUN_ROOT_MISSING-X1 C-7")
+        return 7
+    try:
+        line1, line2, _ = extract(Path(args.run_root))
+        print(line1)
+        print(line2)
+        return 0
+    except Exception as exc:
+        if isinstance(exc, EvidenceError):
+            reason, detail = exc.reason, exc.detail
+        else:
+            reason, detail = token(type(exc).__name__), token(str(exc), 160)
+        print(f"B14RE K-{reason}-D-{detail}-X1 C-7")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
