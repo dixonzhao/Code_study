@@ -1,0 +1,843 @@
+#!/usr/bin/env python3
+"""Build a minimal U003 review package for B1B9 layered differences."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import importlib.machinery
+import importlib.util
+import io
+import json
+from pathlib import Path
+import re
+import sys
+from types import ModuleType
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+
+PROGRAM_ID = "U002-U22B1B10-MINIMAL-LAYERED-REVIEW-PACKAGE"
+VERSION = "0.1"
+B1B9_FILENAME = "u002_u22b1b9_layered_regression_attribution_v0_1.py.txt"
+B1B9_SHA256 = "6cf434aa96b4e2849a1ed1ca85f1d94b88880cbb4431fd70f589bb7cecec9e94"
+SUMMARY_NAME = "u22b1b10_minimal_layered_review_summary_v0_1.json"
+QUEUE_NAME = "u22b1b10_layered_human_review_queue_v0_1.csv"
+MATRIX_NAME = "u22b1b10_layered_human_review_matrix_v0_1.csv"
+PLOT_NAME = "u22b1b10_layered_plot_view_v0_1.csv"
+DIAGNOSTIC_RELATIVE = Path(
+    "04_TEMP/u22b1b10_minimal_layered_review_diagnostic_v0_1.json"
+)
+MARGIN_FRAMES = 20
+GROUP_GAP_FRAMES = 40
+MAX_REVIEW_EVENTS = 10
+
+QUEUE_FIELDS = (
+    "EventID",
+    "StartFrameCount",
+    "PeakFrameCount",
+    "EndFrameCount",
+    "EventType",
+    "ReviewMemo",
+    "SourceEventID",
+    "FocusKinds",
+    "TimeoutCandidates",
+    "ReviewQuestion",
+)
+
+LAYER_NAMES = ("A", "B", "T3", "T5", "T10", "T20")
+MATRIX_FIELDS = (
+    "FrameCount",
+    "SourceEventID",
+    "FocusKinds",
+    "Camera1Distance",
+    "Camera1Eligible",
+    "Camera3Distance",
+    "Camera3Eligible",
+) + tuple(
+    f"{layer}_{suffix}"
+    for layer in LAYER_NAMES
+    for suffix in ("Distance", "Valid", "Role", "Status", "Reason")
+)
+PLOT_FIELDS = (
+    "FrameCount",
+    "Camera1Distance",
+    "Camera3Distance",
+    "A_Accepted",
+    "B_MaskOnly",
+    "T3_Timeout",
+    "T5_Timeout",
+    "T10_Timeout",
+    "T20_Timeout",
+)
+
+
+class ReviewBuildError(RuntimeError):
+    """Represent one deterministic fail-closed review-package failure."""
+
+    def __init__(self, reason: str, detail: object = "NA"):
+        self.reason = stable(reason, 56)
+        self.detail = stable(detail, 96)
+        super().__init__(self.reason)
+
+
+def stable(value: object, limit: int = 80) -> str:
+    """Convert arbitrary diagnostic text to one bounded machine token."""
+
+    normalized = re.sub(r"[^A-Z0-9_]+", "_", str(value).upper())
+    return normalized.strip("_")[:limit] or "NA"
+
+
+def sha256_file(path: Path) -> str:
+    """Hash one ordinary file in bounded blocks."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def load_program(name: str, path: Path) -> ModuleType:
+    """Load a Python text file as a module."""
+
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None:
+        raise ReviewBuildError("IMPORT_SPEC", path.name)
+    module = importlib.util.module_from_spec(spec)
+    try:
+        loader.exec_module(module)
+    except Exception as exc:
+        raise ReviewBuildError("IMPORT_EXEC", type(exc).__name__) from exc
+    return module
+
+
+def load_b1b9(program_directory: Path) -> ModuleType:
+    """Load the exact accepted B1B9 diagnostic dependency."""
+
+    path = program_directory / B1B9_FILENAME
+    if not path.is_file() or path.is_symlink():
+        raise ReviewBuildError("B1B9_V01_MISSING", path.name)
+    observed = sha256_file(path)
+    if observed != B1B9_SHA256:
+        raise ReviewBuildError("B1B9_V01_HASH", observed[:12])
+    return load_program("u22b1b10_b1b9", path)
+
+
+def load_json(path: Path, reason: str) -> Dict[str, object]:
+    """Load one required JSON object."""
+
+    if not path.is_file() or path.is_symlink():
+        raise ReviewBuildError(reason + "_MISSING", path.name)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        raise ReviewBuildError(reason + "_JSON", path.name) from exc
+    if not isinstance(value, dict):
+        raise ReviewBuildError(reason + "_TYPE", path.name)
+    return value
+
+
+def indexed(rows: Sequence[Mapping[str, object]]) -> Dict[int, Mapping[str, object]]:
+    """Index a result sequence by unique FrameCount."""
+
+    result: Dict[int, Mapping[str, object]] = {}
+    for row in rows:
+        frame = int(row["FrameCount"])
+        if frame in result:
+            raise ReviewBuildError("DUPLICATE_FRAME", frame)
+        result[frame] = row
+    return result
+
+
+def valid(row: Mapping[str, object]) -> bool:
+    """Read one canonical-valid flag."""
+
+    return str(row.get("CanonicalCameraValid", "")).strip() == "1"
+
+
+def add_focus(
+    focus: List[Dict[str, object]],
+    frame: int,
+    source_event: str,
+    kind: str,
+    priority: int,
+    timeout: Optional[int] = None,
+) -> None:
+    """Append one de-duplicated review focus point."""
+
+    key = (frame, source_event, kind, timeout)
+    for item in focus:
+        if (
+            int(item["FrameCount"]),
+            str(item["SourceEventID"]),
+            str(item["Kind"]),
+            item.get("TimeoutFrames"),
+        ) == key:
+            return
+    focus.append({
+        "FrameCount": frame,
+        "SourceEventID": source_event,
+        "Kind": kind,
+        "Priority": priority,
+        "TimeoutFrames": timeout,
+    })
+
+
+def event_for_frame(
+    frame: int,
+    windows: Sequence[Mapping[str, object]],
+) -> Mapping[str, object]:
+    """Resolve one FrameCount to exactly one source review event."""
+
+    matches = [
+        item
+        for item in windows
+        if int(item["StartFrame"]) <= frame <= int(item["EndFrame"])
+    ]
+    if len(matches) != 1:
+        raise ReviewBuildError("FOCUS_SOURCE_EVENT_COUNT", frame)
+    return matches[0]
+
+
+def contiguous_spans(frames: Iterable[int]) -> List[Tuple[int, int]]:
+    """Collapse unique integer frames into inclusive contiguous spans."""
+
+    ordered = sorted(set(int(value) for value in frames))
+    if not ordered:
+        return []
+    result: List[Tuple[int, int]] = []
+    start = ordered[0]
+    previous = ordered[0]
+    for frame in ordered[1:]:
+        if frame == previous + 1:
+            previous = frame
+            continue
+        result.append((start, previous))
+        start = frame
+        previous = frame
+    result.append((start, previous))
+    return result
+
+
+def collect_focus(
+    accepted_rows: Sequence[Mapping[str, object]],
+    mask_rows: Sequence[Mapping[str, object]],
+    candidates: Mapping[int, Sequence[Mapping[str, object]]],
+    windows: Sequence[Mapping[str, object]],
+    q6_window: Mapping[str, object],
+    protected: Sequence[Mapping[str, object]],
+    loss_frame: int,
+    original_recovery: Optional[int],
+    b1b9: ModuleType,
+    base: ModuleType,
+) -> Tuple[List[Dict[str, object]], Dict[int, List[Tuple[int, int]]]]:
+    """Collect only decisions that require human interpretation."""
+
+    focus: List[Dict[str, object]] = []
+    _, mask_trace = b1b9.compare_layer(
+        accepted_rows,
+        mask_rows,
+        protected,
+        base,
+        "ACCEPTED_TO_MASK_ONLY",
+        None,
+    )
+    for row in mask_trace:
+        kind = (
+            "MASK_LOST_ACCEPTED"
+            if row["ChangeType"] == "LOST_REFERENCE_VALID"
+            else "MASK_CHANGED_DECISION"
+        )
+        add_focus(
+            focus,
+            int(row["FrameCount"]),
+            str(row["EventID"]),
+            kind,
+            100 if kind == "MASK_LOST_ACCEPTED" else 80,
+        )
+
+    mask_index = indexed(mask_rows)
+    gain_spans: Dict[int, List[Tuple[int, int]]] = {}
+    for timeout, rows in sorted(candidates.items()):
+        _, trace = b1b9.compare_layer(
+            mask_rows,
+            rows,
+            protected,
+            base,
+            "MASK_ONLY_TO_TIMEOUT",
+            timeout,
+        )
+        gained_frames: List[int] = []
+        for row in trace:
+            frame = int(row["FrameCount"])
+            if row["ChangeType"] == "LOST_REFERENCE_VALID":
+                kind = "TIMEOUT_RESET_LOST"
+                priority = 95
+            elif row["ChangeType"] == "CHANGED_REFERENCE_DECISION":
+                kind = "TIMEOUT_CHANGED_DECISION"
+                priority = 90
+            else:
+                kind = "TIMEOUT_GAINED_VALID"
+                priority = 65
+                gained_frames.append(frame)
+            add_focus(
+                focus,
+                frame,
+                str(row["EventID"]),
+                kind,
+                priority,
+                timeout,
+            )
+        gain_spans[timeout] = contiguous_spans(gained_frames)
+
+        candidate_index = indexed(rows)
+        q6_recovery = None
+        for frame in range(loss_frame, int(q6_window["EndFrame"]) + 1):
+            before = mask_index.get(frame)
+            after = candidate_index.get(frame)
+            if before is None or after is None:
+                continue
+            if not valid(before) and valid(after):
+                q6_recovery = frame
+                break
+        for frame in range(loss_frame, int(q6_window["EndFrame"]) + 1):
+            row = candidate_index.get(frame)
+            if row is not None and str(row.get("SelectionReason", "")) == (
+                "CONTINUITY_REJECTION_TIMEOUT_RESET"
+            ):
+                add_focus(
+                    focus,
+                    frame,
+                    str(q6_window["EventID"]),
+                    "Q6_TIMEOUT_RESET",
+                    95,
+                    timeout,
+                )
+                break
+        if q6_recovery is not None:
+            add_focus(
+                focus,
+                q6_recovery,
+                str(q6_window["EventID"]),
+                "Q6_TIMEOUT_RECOVERY",
+                75,
+                timeout,
+            )
+
+    add_focus(
+        focus,
+        loss_frame,
+        str(q6_window["EventID"]),
+        "Q6_ORIGINAL_LOSS_START",
+        100,
+    )
+    if original_recovery is not None:
+        add_focus(
+            focus,
+            original_recovery,
+            str(q6_window["EventID"]),
+            "Q6_ORIGINAL_RECOVERY",
+            70,
+        )
+    if not focus:
+        raise ReviewBuildError("FOCUS_EMPTY")
+    return focus, gain_spans
+
+
+def cluster_focus(
+    focus: Sequence[Mapping[str, object]],
+    windows: Sequence[Mapping[str, object]],
+) -> List[Dict[str, object]]:
+    """Create a small event queue by grouping nearby focus points."""
+
+    by_event: Dict[str, List[Mapping[str, object]]] = {}
+    for item in focus:
+        by_event.setdefault(str(item["SourceEventID"]), []).append(item)
+
+    event_bounds = {str(item["EventID"]): item for item in windows}
+    clusters: List[Dict[str, object]] = []
+    for source_event, points in sorted(by_event.items()):
+        if source_event not in event_bounds:
+            raise ReviewBuildError("SOURCE_EVENT_MISSING", source_event)
+        ordered = sorted(points, key=lambda item: int(item["FrameCount"]))
+        current: List[Mapping[str, object]] = []
+        for point in ordered:
+            if (
+                current
+                and int(point["FrameCount"]) - int(current[-1]["FrameCount"])
+                > GROUP_GAP_FRAMES
+            ):
+                clusters.append(make_cluster(current, event_bounds[source_event]))
+                current = []
+            current.append(point)
+        if current:
+            clusters.append(make_cluster(current, event_bounds[source_event]))
+
+    if len(clusters) > MAX_REVIEW_EVENTS:
+        raise ReviewBuildError("REVIEW_EVENT_LIMIT", len(clusters))
+    clusters.sort(key=lambda item: (int(item["StartFrameCount"]), str(item["SourceEventID"])))
+    for index, item in enumerate(clusters, start=1):
+        item["EventID"] = f"B1B10_Q{index:03d}"
+    return clusters
+
+
+def make_cluster(
+    points: Sequence[Mapping[str, object]],
+    source_window: Mapping[str, object],
+) -> Dict[str, object]:
+    """Convert one focus cluster to a U003-compatible review event."""
+
+    frames = [int(item["FrameCount"]) for item in points]
+    start = max(int(source_window["StartFrame"]), min(frames) - MARGIN_FRAMES)
+    end = min(int(source_window["EndFrame"]), max(frames) + MARGIN_FRAMES)
+    peak_item = sorted(
+        points,
+        key=lambda item: (-int(item["Priority"]), int(item["FrameCount"])),
+    )[0]
+    kinds = sorted(set(str(item["Kind"]) for item in points))
+    timeouts = sorted(
+        set(
+            int(item["TimeoutFrames"])
+            for item in points
+            if item.get("TimeoutFrames") is not None
+        )
+    )
+    if any(kind.startswith("MASK_") for kind in kinds):
+        question = "VIDEO_TARGET_MATCH_A_OR_B"
+    elif "TIMEOUT_RESET_LOST" in kinds or "Q6_TIMEOUT_RESET" in kinds:
+        question = "RESET_BOUNDARY_AND_REACQUIRED_TARGET_CORRECT"
+    else:
+        question = "REACQUIRED_TARGET_CORRECT"
+    memo = " | ".join(kinds)
+    if timeouts:
+        memo += " | T=" + "/".join(str(value) for value in timeouts)
+    return {
+        "EventID": "",
+        "StartFrameCount": start,
+        "PeakFrameCount": int(peak_item["FrameCount"]),
+        "EndFrameCount": end,
+        "EventType": "S1_LAYERED_PARAMETER_REVIEW",
+        "ReviewMemo": memo,
+        "SourceEventID": str(source_window["EventID"]),
+        "FocusKinds": ";".join(kinds),
+        "TimeoutCandidates": ";".join(str(value) for value in timeouts),
+        "ReviewQuestion": question,
+    }
+
+
+def layer_columns(prefix: str, row: Mapping[str, object]) -> Dict[str, object]:
+    """Project one reconstruction row into human-readable matrix columns."""
+
+    return {
+        f"{prefix}_Distance": row.get("CanonicalCameraDistance", ""),
+        f"{prefix}_Valid": row.get("CanonicalCameraValid", ""),
+        f"{prefix}_Role": row.get("SelectedCameraRole", ""),
+        f"{prefix}_Status": row.get("SelectionStatus", ""),
+        f"{prefix}_Reason": row.get("SelectionReason", ""),
+    }
+
+
+def build_matrix(
+    source_records: Sequence[Mapping[str, object]],
+    layers: Mapping[str, Sequence[Mapping[str, object]]],
+    events: Sequence[Mapping[str, object]],
+    focus: Sequence[Mapping[str, object]],
+    base: ModuleType,
+) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
+    """Build detailed and nine-column human views for reviewed frames only."""
+
+    layer_indexes = {name: indexed(rows) for name, rows in layers.items()}
+    record_index = {int(item["FrameCount"]): item for item in source_records}
+    included_frames = sorted(set(
+        frame
+        for event in events
+        for frame in range(
+            int(event["StartFrameCount"]),
+            int(event["EndFrameCount"]) + 1,
+        )
+        if frame in record_index
+    ))
+    if not included_frames:
+        raise ReviewBuildError("MATRIX_FRAME_EMPTY")
+
+    source_by_frame: Dict[int, List[str]] = {}
+    for event in events:
+        for frame in range(
+            int(event["StartFrameCount"]),
+            int(event["EndFrameCount"]) + 1,
+        ):
+            source_by_frame.setdefault(frame, []).append(str(event["SourceEventID"]))
+    focus_by_frame: Dict[int, List[str]] = {}
+    for item in focus:
+        token = str(item["Kind"])
+        if item.get("TimeoutFrames") is not None:
+            token += "_T" + str(item["TimeoutFrames"])
+        focus_by_frame.setdefault(int(item["FrameCount"]), []).append(token)
+
+    matrix: List[Dict[str, object]] = []
+    plot: List[Dict[str, object]] = []
+    for frame in included_frames:
+        record = record_index[frame]
+        row: Dict[str, object] = {
+            "FrameCount": frame,
+            "SourceEventID": ";".join(sorted(set(source_by_frame.get(frame, [])))),
+            "FocusKinds": ";".join(sorted(set(focus_by_frame.get(frame, [])))),
+            "Camera1Distance": record[base.ROLE_1]["Value"],
+            "Camera1Eligible": int(bool(record[base.ROLE_1]["Eligible"])),
+            "Camera3Distance": record[base.ROLE_3]["Value"],
+            "Camera3Eligible": int(bool(record[base.ROLE_3]["Eligible"])),
+        }
+        for layer in LAYER_NAMES:
+            candidate = layer_indexes[layer].get(frame)
+            if candidate is None:
+                raise ReviewBuildError("LAYER_FRAME_MISSING", layer + str(frame))
+            row.update(layer_columns(layer, candidate))
+        matrix.append(row)
+
+        def distance(layer: str) -> object:
+            candidate = layer_indexes[layer][frame]
+            return candidate.get("CanonicalCameraDistance", "") if valid(candidate) else ""
+
+        plot.append({
+            "FrameCount": frame,
+            "Camera1Distance": record[base.ROLE_1]["Value"],
+            "Camera3Distance": record[base.ROLE_3]["Value"],
+            "A_Accepted": distance("A"),
+            "B_MaskOnly": distance("B"),
+            "T3_Timeout": distance("T3"),
+            "T5_Timeout": distance("T5"),
+            "T10_Timeout": distance("T10"),
+            "T20_Timeout": distance("T20"),
+        })
+    return matrix, plot
+
+
+def csv_bytes(
+    rows: Sequence[Mapping[str, object]],
+    fields: Sequence[str],
+) -> bytes:
+    """Serialize deterministic UTF-8 CSV bytes."""
+
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=fields, lineterminator="\n")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({name: row.get(name, "") for name in fields})
+    return buffer.getvalue().encode("utf-8")
+
+
+def verify_b1b9_evidence(
+    run_root: Path,
+    b1b9: ModuleType,
+    run_id: object,
+    table_hash: str,
+) -> Dict[str, object]:
+    """Require B1B9 evidence to match the current governed input."""
+
+    export_root = run_root / "05_EXPORTS"
+    summary = load_json(export_root / b1b9.SUMMARY_NAME, "B1B9_SUMMARY")
+    if summary.get("Contract") != "UDP002_U22B1B9_LAYERED_REGRESSION_ATTRIBUTION_V0_1":
+        raise ReviewBuildError("B1B9_SUMMARY_CONTRACT")
+    if summary.get("RunId") != run_id:
+        raise ReviewBuildError("B1B9_RUN_ID")
+    if summary.get("SourceTableSha256") != table_hash:
+        raise ReviewBuildError("B1B9_SOURCE_HASH")
+    if summary.get("InputMutationCount") != 0:
+        raise ReviewBuildError("B1B9_INPUT_MUTATION")
+    trace = export_root / b1b9.TRACE_NAME
+    if not trace.is_file() or trace.is_symlink():
+        raise ReviewBuildError("B1B9_TRACE_MISSING")
+    return summary
+
+
+def run(root: Path, program_directory: Path) -> Tuple[str, str, str]:
+    """Generate the minimal U003 queue and two synchronized data views."""
+
+    b1b9 = load_b1b9(program_directory)
+    b1b8 = b1b9.load_b1b8(program_directory)
+    base = b1b8.load_base(program_directory)
+    workspace = base.require_workspace(root)
+
+    # Re-run B1B9 through its public API so all evidence is identity checked.
+    b1b9_capsules = b1b9.run(workspace, program_directory)
+    if not b1b9_capsules or not all("C-0" in item for item in b1b9_capsules):
+        raise ReviewBuildError("B1B9_REPLAY_STATUS")
+
+    run_root, receipt = base.discover_b1b4(workspace)
+    table = base.locate_s1_table(run_root)
+    table_hash = base.sha256_file(table)
+    configuration = base.load_s1_configuration(run_root)
+    accepted, implementation, implementation_hash = base.load_accepted_s1(workspace)
+    source_rows = base.read_source_rows(table)
+    original_records, _ = base.normalized_records(source_rows, mask_sentinel=False)
+    masked_records, mask_counts = base.normalized_records(source_rows, mask_sentinel=True)
+    accepted_output = accepted.reconstruct(original_records, configuration)
+    base.verify_original_replay(source_rows, accepted_output)
+    mask_output = accepted.reconstruct(masked_records, configuration)
+    candidates: Dict[int, Sequence[Mapping[str, object]]] = {
+        timeout: b1b8.reconstruct_with_timeout(
+            masked_records,
+            configuration,
+            timeout,
+            accepted,
+        )
+        for timeout in b1b8.TIMEOUT_VALUES
+    }
+    expected_count = len(source_rows)
+    if len(mask_output) != expected_count or any(
+        len(rows) != expected_count for rows in candidates.values()
+    ):
+        raise ReviewBuildError("LAYER_ROW_COUNT")
+
+    windows = b1b8.locate_review_windows(run_root)
+    episode = base.longest_completed_episode(base.window_rows(source_rows))
+    loss_frame = int(episode["StartFrame"])
+    original_recovery_value = episode.get("RecoveryFrame")
+    original_recovery = (
+        int(original_recovery_value)
+        if original_recovery_value is not None
+        else None
+    )
+    q6_window, protected = b1b8.select_q6_and_protected(windows, loss_frame)
+    b1b9_summary = verify_b1b9_evidence(
+        run_root,
+        b1b9,
+        receipt.get("RunId"),
+        table_hash,
+    )
+
+    focus, gain_spans = collect_focus(
+        source_rows,
+        mask_output,
+        candidates,
+        windows,
+        q6_window,
+        protected,
+        loss_frame,
+        original_recovery,
+        b1b9,
+        base,
+    )
+    events = cluster_focus(focus, windows)
+    layers: Dict[str, Sequence[Mapping[str, object]]] = {
+        "A": source_rows,
+        "B": mask_output,
+        "T3": candidates[3],
+        "T5": candidates[5],
+        "T10": candidates[10],
+        "T20": candidates[20],
+    }
+    matrix, plot = build_matrix(
+        masked_records,
+        layers,
+        events,
+        focus,
+        base,
+    )
+
+    summary = {
+        "Contract": "UDP002_U22B1B10_MINIMAL_LAYERED_REVIEW_PACKAGE_V0_1",
+        "ProgramId": PROGRAM_ID,
+        "ProgramVersion": VERSION,
+        "RunId": receipt.get("RunId"),
+        "SourceTableSha256": table_hash,
+        "AcceptedImplementationRelativePath": str(
+            implementation.relative_to(workspace)
+        ),
+        "AcceptedImplementationSha256": implementation_hash,
+        "B1B9DependencySha256": B1B9_SHA256,
+        "B1B9AttributionClass": b1b9_summary.get("AttributionClass"),
+        "ReviewEventCount": len(events),
+        "FocusPointCount": len(focus),
+        "MatrixRowCount": len(matrix),
+        "PlotRowCount": len(plot),
+        "TimeoutGainSpansProtectedWindows": {
+            str(timeout): [
+                {"StartFrame": start, "EndFrame": end}
+                for start, end in spans
+            ]
+            for timeout, spans in gain_spans.items()
+        },
+        "OriginalQ6Episode": episode,
+        "MaskCounts": mask_counts,
+        "ReviewQuestions": [
+            "Does the displayed target agree with accepted A or mask-only B?",
+            "Is the timeout reset boundary physically acceptable?",
+            "Does each timeout candidate reacquire the correct visible target?",
+        ],
+        "DecisionStatus": "HUMAN_REVIEW_REQUIRED_NO_PARAMETER_PROMOTION",
+        "InputMutationCount": 0,
+    }
+
+    review_root = run_root / "04_REVIEW_PACKAGE"
+    export_root = run_root / "05_EXPORTS"
+    base.write_exact(review_root / QUEUE_NAME, csv_bytes(events, QUEUE_FIELDS))
+    base.write_exact(export_root / MATRIX_NAME, csv_bytes(matrix, MATRIX_FIELDS))
+    base.write_exact(export_root / PLOT_NAME, csv_bytes(plot, PLOT_FIELDS))
+    base.write_exact(export_root / SUMMARY_NAME, base.canonical_bytes(summary))
+    if base.sha256_file(table) != table_hash:
+        raise ReviewBuildError("SOURCE_TABLE_CHANGED")
+
+    mask_count = sum(
+        1 for item in focus if str(item["Kind"]).startswith("MASK_")
+    )
+    timeout_lost = sum(
+        1 for item in focus if item["Kind"] == "TIMEOUT_RESET_LOST"
+    )
+    gain_span_count = sum(len(spans) for spans in gain_spans.values())
+    main = (
+        "U22B1B10 N-E"
+        + str(len(events))
+        + "-F"
+        + str(len(focus))
+        + "-M"
+        + str(mask_count)
+        + "-L"
+        + str(timeout_lost)
+        + "-G"
+        + str(gain_span_count)
+        + "-R"
+        + str(len(matrix))
+        + "-X0 C-0"
+    )
+    detail_1 = "U22B1B10D1 " + " ".join(
+        "T" + str(timeout) + "-S" + str(len(gain_spans[timeout]))
+        for timeout in (3, 5)
+    ) + " C-0"
+    detail_2 = "U22B1B10D2 " + " ".join(
+        "T" + str(timeout) + "-S" + str(len(gain_spans[timeout]))
+        for timeout in (10, 20)
+    ) + " C-0"
+    return main, detail_1, detail_2
+
+
+def self_test(program_directory: Path) -> str:
+    """Exercise exact dependency loading, spans, grouping and CSV schemas."""
+
+    checks: List[bool] = []
+
+    def check(value: bool) -> None:
+        if not value:
+            raise ReviewBuildError("SELFTEST")
+        checks.append(True)
+
+    b1b9 = load_b1b9(program_directory)
+    check(b1b9.VERSION == "0.1")
+    b1b8 = b1b9.load_b1b8(program_directory)
+    check(b1b8.VERSION == "0.1")
+    check(contiguous_spans([]) == [])
+    check(contiguous_spans([1, 2, 4, 5, 5]) == [(1, 2), (4, 5)])
+    windows = [{
+        "EventID": "Q001",
+        "StartFrame": 1,
+        "PeakFrame": 50,
+        "EndFrame": 120,
+    }]
+    focus: List[Dict[str, object]] = []
+    add_focus(focus, 10, "Q001", "MASK_CHANGED_DECISION", 80)
+    add_focus(focus, 10, "Q001", "MASK_CHANGED_DECISION", 80)
+    add_focus(focus, 30, "Q001", "TIMEOUT_GAINED_VALID", 65, 3)
+    add_focus(focus, 100, "Q001", "Q6_ORIGINAL_RECOVERY", 70)
+    check(len(focus) == 3)
+    check(event_for_frame(50, windows)["EventID"] == "Q001")
+    events = cluster_focus(focus, windows)
+    check(len(events) == 2)
+    check(events[0]["EventID"] == "B1B10_Q001")
+    check(events[0]["StartFrameCount"] == 1)
+    check(events[0]["EndFrameCount"] == 50)
+    check(events[0]["PeakFrameCount"] == 10)
+    check(events[0]["SourceEventID"] == "Q001")
+    check(events[0]["TimeoutCandidates"] == "3")
+    check(events[1]["StartFrameCount"] == 80)
+    check(events[1]["EndFrameCount"] == 120)
+    check(events[1]["ReviewQuestion"] == "REACQUIRED_TARGET_CORRECT")
+    queue = csv_bytes(events, QUEUE_FIELDS)
+    check(queue.startswith(b"EventID,StartFrameCount"))
+    check(b"B1B10_Q001" in queue)
+    row = {
+        "FrameCount": 1,
+        "CanonicalCameraDistance": "10.0",
+        "CanonicalCameraValid": "1",
+        "SelectedCameraRole": "CAMERA_1_DISTANCE",
+        "SelectionStatus": "CONFIDENT",
+        "SelectionReason": "CURRENT_SOURCE_PLAUSIBLE",
+    }
+    columns = layer_columns("A", row)
+    check(columns["A_Distance"] == "10.0")
+    check(columns["A_Valid"] == "1")
+    check(columns["A_Role"] == "CAMERA_1_DISTANCE")
+    check(len(MATRIX_FIELDS) == 37)
+    check(len(PLOT_FIELDS) == 9)
+    check(MAX_REVIEW_EVENTS == 10)
+    check(MARGIN_FRAMES == 20)
+    check(GROUP_GAP_FRAMES == 40)
+    check(stable("a/b c") == "A_B_C")
+    check(len(checks) == 27)
+    return "U22B1B10-ST N-T28-X0 C-0"
+
+
+def write_failure(root: Optional[Path], error: ReviewBuildError) -> None:
+    """Persist a bounded diagnostic file when a workspace is available."""
+
+    if root is None or not root.is_dir():
+        return
+    payload = {
+        "Contract": "UDP002_U22B1B10_FAILURE_DIAGNOSTIC_V0_1",
+        "ProgramId": PROGRAM_ID,
+        "ProgramVersion": VERSION,
+        "Reason": error.reason,
+        "Detail": error.detail,
+        "NextAction": "Return the C-7 capsule and keep all generated evidence.",
+    }
+    try:
+        path = root / DIAGNOSTIC_RELATIVE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)
+            + "\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def parser() -> argparse.ArgumentParser:
+    """Build the small command-line interface."""
+
+    result = argparse.ArgumentParser(description=PROGRAM_ID)
+    result.add_argument("--workspace-root", type=Path)
+    result.add_argument("--self-test", action="store_true")
+    return result
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Execute one controlled mode and print at most three lines."""
+
+    arguments = parser().parse_args(argv)
+    program_directory = Path(__file__).resolve().parent
+    root: Optional[Path] = None
+    try:
+        if arguments.self_test:
+            print(self_test(program_directory))
+            return 0
+        if arguments.workspace_root is None:
+            raise ReviewBuildError("WORKSPACE_ARGUMENT")
+        root = arguments.workspace_root.resolve()
+        for capsule in run(root, program_directory):
+            print(capsule)
+        return 0
+    except ReviewBuildError as exc:
+        write_failure(root, exc)
+        print("U22B1B10 N-X1 C-7 K-" + exc.reason + " D-" + exc.detail)
+        return 7
+    except Exception as exc:
+        wrapped = ReviewBuildError("INTERNAL", type(exc).__name__)
+        write_failure(root, wrapped)
+        print("U22B1B10 N-X1 C-7 K-INTERNAL D-" + stable(type(exc).__name__))
+        return 7
+
+
+if __name__ == "__main__":
+    sys.exit(main())
