@@ -1,0 +1,87 @@
+UDP002 U22B2F Run Contract修正版执行指南 v0.2
+日期：2026-08-21
+
+一、本次修正内容
+
+旧版Plan Builder错误地把RunPurpose从合法值EVALUATION改成了
+CONTEXT_AWARE_EVALUATION，因此被U22 Run Contract正确拒绝。
+
+v0.2执行以下修正：
+
+1. RunPurpose保持EVALUATION；
+2. ContextFrameStart仍作为Camera Module配置，保持7400；
+3. 自动识别并归档旧版未通过预检的Run Configuration；
+4. 在Engine Preflight前独立运行Run Contract Validator；
+5. 不修改PrimaryOutcome、分析公式或其余Module。
+
+
+二、放置程序
+
+解压ZIP，只把以下文件放入：
+
+U-UDP002\04_TEMP
+
+文件：
+
+u002_u22b2f_context_aware_plan_builder_v0_2.py.txt
+
+旧版v0.1可以暂时保留，但本次不得再运行v0.1。
+
+
+三、自测
+
+在C-CODE目录使用CMD：
+
+python U-UDP002\04_TEMP\u002_u22b2f_context_aware_plan_builder_v0_2.py.txt --self-test
+
+成功结果：
+
+UDP002-U22B2F-PLAN-SELFTEST-PASS-26 C-0
+
+
+四、重新构建Plan
+
+python U-UDP002\04_TEMP\u002_u22b2f_context_aware_plan_builder_v0_2.py.txt --build-plan --workspace-root U-UDP002
+
+首次修复旧配置时，成功结果中的D通常为1：
+
+B2FP N-M5-Q数字-R数字-D1-C7400-E41480.41750-X0 C-0
+
+D1表示旧版未通过Contract的配置已被保留为：
+
+U-UDP002\02_CONFIG\run_configs\U22B2F_TC001_F41480_41750_V01_rejected_v0_1.json
+
+如果没有旧配置，则D0也正常。
+
+
+五、确认Plan输出存在
+
+if not exist U-UDP002\07_OUTPUT\U22B2F_TC001_F41480_41750_V01\00_CONFIG\resolved_run_plan.json echo MISSING-B2F-PLAN
+
+正常情况下不应输出MISSING。
+
+
+六、执行五模块Run
+
+python U-UDP002\04_TEMP\u002_u22b2f_context_aware_run_and_audit_v0_1.py.txt --execute-and-audit --workspace-root U-UDP002
+
+成功格式：
+
+B2F N-M5-A5-R271-CV数字-W数字-V数字-L数字-F数字-I数字-N数字-O数字-P数字-X0 C-0
+
+验收要求：
+
+- R = 271；
+- CV > 0；
+- W > 0；
+- F > 0；
+- O = F；
+- 最后一项为C-0。
+
+
+七、只需回传
+
+B2FP完整一行；
+B2F完整一行。
+
+如出现C-7，只回传程序自动生成的完整错误行。
