@@ -1,0 +1,86 @@
+UDP002 U22B2E 正式比较人群只读诊断执行说明 v0.1
+日期：2026-08-21
+
+一、目的
+
+B2DR3已经证明五个Module和五个Artifact可以完整贯通，但结果为：
+
+F0 / I271 / N0
+
+也就是没有任何一帧进入正式Camera–Radar比较，271帧全部进入调查通道。
+
+本节点只读取B2DR3既有Artifact，确认问题来自哪一层。它不会重跑Module、不会修改Artifact、不会修改算法，也不会创建新的Run。
+
+重点验证：短Run从FrameCount 41480开始，而Camera重建的人工Seed在FrameCount 7400。若两个Camera候选在短Run起点同时存在，Camera有状态重建可能因为缺少历史预热而无法确定当前目标。
+
+
+二、需要放在04_TEMP中的唯一新文件
+
+u002_u22b2e_formal_population_diagnostic_v0_1.py.txt
+
+不要改名，不要删除.txt后缀。
+
+
+三、运行前检查
+
+在C-CODE目录打开CMD，依次执行：
+
+if not exist U-UDP002\04_TEMP\u002_u22b2e_formal_population_diagnostic_v0_1.py.txt echo MISSING-B2E-PROGRAM
+
+if not exist U-UDP002\07_OUTPUT\U22B2DR3_TC001_F41480_41750_V01\run_artifact_index_v0_1.json echo MISSING-B2DR3-INDEX
+
+if not exist U-UDP002\07_OUTPUT\U22B2DR3_TC001_F41480_41750_V01\00_CONFIG\resolved_run_plan.json echo MISSING-B2DR3-PLAN
+
+三条命令都不应输出MISSING。
+
+
+四、Self-test
+
+python U-UDP002\04_TEMP\u002_u22b2e_formal_population_diagnostic_v0_1.py.txt --self-test
+
+成功输出：
+
+UDP002-U22B2E-SELFTEST-PASS-28 C-0
+
+Self-test若不是C-0，立即停止，不执行下一步。
+
+
+五、执行只读诊断
+
+python U-UDP002\04_TEMP\u002_u22b2e_formal_population_diagnostic_v0_1.py.txt --diagnose --workspace-root U-UDP002
+
+程序会在B2DR3原Run的02_DIAGNOSTICS中生成：
+
+b2e_formal_population_diagnostic_v0_1.json
+b2e_formal_population_examples_v0_1.csv
+
+这两个文件是新增诊断证据，不修改任何既有Artifact。
+
+
+六、成功标准与回传
+
+只回传最后一行B2E结果，不需要回传Self-test。
+
+预期格式：
+
+B2E N-R271-CV数字-RV数字-F数字-I数字-N数字-A数字-W数字-X0 C-0
+
+字段含义：
+
+R：总帧数
+CV：Camera正式有效帧数
+RV：Radar正式有效帧数
+F：FORMAL_ELIGIBLE帧数
+I：INVESTIGATION_ONLY帧数
+N：INELIGIBLE帧数
+A：Camera AMBIGUOUS帧数
+W：是否由缺少Camera有状态预热完整证明；1为是，0为否
+
+如果结果为W1，下一步不是修改Camera算法，而是把有状态Module的Context/Warmup范围与正式Evaluation范围分离。
+
+
+七、停止条件
+
+出现任何C-7时立即停止，只回传完整的B2EE一行。
+
+不要自行修改程序、Manifest、Artifact、Run Plan或Camera Module。
