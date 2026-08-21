@@ -1,0 +1,70 @@
+UDP002 U22B2CR1 — Module Self-test Capsule Correction
+版本：0.1
+日期：2026-08-21
+
+已确认的根因
+============
+
+三个 B2 Module 的内部 12 项语义测试可以执行，但 selftest.py 最后一行缺少
+Qualification Protocol 要求的 `C-0` 尾标。
+
+原输出：
+
+B2B-MODULE-ST-RADAR-PASS-12
+
+要求输出：
+
+B2B-MODULE-ST-RADAR-PASS-12 C-0
+
+因此 Qualification fail-close 返回 SELFTEST_FAILED。这不是算法、runtime、数据或
+Module dependency 错误。
+
+修正范围
+========
+
+只修改三个尚未 Qualification 的 selftest.py 输出行。
+
+不会修改：
+
+- module_manifest.json
+- algorithm_card.json
+- configuration_schema.json
+- implementation.py
+- U001 数据
+- B2C Run Configuration
+
+修正程序会检查以上四个受保护文件前后 Hash 完全一致，并立即实际执行三个修正后的
+Module self-test。
+
+Step 1 — 下载
+===============
+
+把下面文件下载到：
+
+C-CODE\U-UDP002\04_TEMP
+
+u002_u22b2cr1_module_selftest_capsule_correction_v0_1.py.txt
+
+Step 2 — Self-test
+==================
+
+在 C-CODE 使用 CMD：
+
+python U-UDP002\04_TEMP\u002_u22b2cr1_module_selftest_capsule_correction_v0_1.py.txt --self-test
+
+成功：
+
+B2CR1-ST N-T10-X0 C-0
+
+通过时不用回传。
+
+Step 3 — 受控修正
+=================
+
+python U-UDP002\04_TEMP\u002_u22b2cr1_module_selftest_capsule_correction_v0_1.py.txt --apply-correction --workspace-root U-UDP002
+
+首次成功：
+
+B2CR1 N-M3-P3-R0-T3-X0 C-0
+
+只回传这一行。先不要重跑 B2C；收到 B2CR1 后将直接继续原 B2C。
