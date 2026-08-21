@@ -16,7 +16,7 @@ from typing import Dict, Optional, Sequence, Tuple
 
 
 PROGRAM_ID = "UDP002-U22B2CR1-MODULE-SELFTEST-CAPSULE-CORRECTION"
-PROGRAM_VERSION = "0.1"
+PROGRAM_VERSION = "0.2"
 MODULES = (
     ("S1", "CameraRadar.S1.RadarMeasurementValidity", "RADAR"),
     ("S2", "CameraRadar.S2.ComparisonPopulation", "POPULATION"),
@@ -54,8 +54,20 @@ def module_root(workspace: Path, stage: str, module_id: str) -> Path:
         "module_manifest.json", "algorithm_card.json", "configuration_schema.json",
         "implementation.py", "selftest.py",
     }
-    if {path.name for path in root.iterdir()} != expected:
+    actual_files = {
+        path.name
+        for path in root.iterdir()
+        if path.is_file() and not path.is_symlink()
+    }
+    if actual_files != expected:
         raise CorrectionError("MODULE_FILESET_" + stage)
+    unexpected_entries = [
+        path.name
+        for path in root.iterdir()
+        if path.name not in expected and path.name != "__pycache__"
+    ]
+    if unexpected_entries:
+        raise CorrectionError("MODULE_EXTRA_ENTRY_" + stage)
     manifest = json.loads((root / "module_manifest.json").read_text(encoding="utf-8-sig"))
     if manifest.get("ModuleId") != module_id or manifest.get("ModuleVersion") != VERSION:
         raise CorrectionError("MODULE_IDENTITY_" + stage)
@@ -131,7 +143,7 @@ def self_test() -> str:
             raise AssertionError("SELFTEST")
         checks.append(True)
     ck(PROGRAM_ID.startswith("UDP002"))
-    ck(PROGRAM_VERSION == "0.1")
+    ck(PROGRAM_VERSION == "0.2")
     ck(len(MODULES) == 3)
     ck(OLD_LINE != NEW_LINE)
     ck(NEW_LINE.endswith(b'C-0")'))
@@ -159,6 +171,8 @@ def self_test() -> str:
                 "print(\"B2B-MODULE-ST-\" + MODE + \"-PASS-12\")\n"
             )
             (root / "selftest.py").write_text(selftest_source, encoding="utf-8")
+            # Qualification may leave this normal Python runtime cache directory.
+            (root / "__pycache__").mkdir()
         result = apply_correction(workspace)
         ck(result == "B2CR1 N-M3-P3-R0-T3-X0 C-0")
         ck(apply_correction(workspace) == "B2CR1 N-M3-P0-R3-T3-X0 C-0")
