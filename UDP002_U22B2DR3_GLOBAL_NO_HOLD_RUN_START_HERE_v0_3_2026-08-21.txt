@@ -1,5 +1,5 @@
 UDP002 U22B2DR3 全角色 No-Hold 配置编译与新 Run
-版本：v0.2
+版本：v0.3
 日期：2026-08-21
 
 一、当前结论
@@ -29,9 +29,9 @@ B2DR3 将规则提升为通用配置编译规则：
 
 文件：
 
-    u002_u22b2dr3_global_no_hold_compilation_plan_v0_2.py.txt
+    u002_u22b2dr3_global_no_hold_compilation_plan_v0_3.py.txt
     u002_u22b2dr3_global_no_hold_run_and_audit_v0_1.py.txt
-    UDP002_U22B2DR3_GLOBAL_NO_HOLD_RUN_START_HERE_v0_2_2026-08-21.txt
+    UDP002_U22B2DR3_GLOBAL_NO_HOLD_RUN_START_HERE_v0_3_2026-08-21.txt
 
 不要改文件名，不要放入 04_TEMP 子文件夹。
 
@@ -48,17 +48,17 @@ B2DR3 将规则提升为通用配置编译规则：
 
 五、Self-test
 
-    python U-UDP002\04_TEMP\u002_u22b2dr3_global_no_hold_compilation_plan_v0_2.py.txt --self-test
+    python U-UDP002\04_TEMP\u002_u22b2dr3_global_no_hold_compilation_plan_v0_3.py.txt --self-test
     python U-UDP002\04_TEMP\u002_u22b2dr3_global_no_hold_run_and_audit_v0_1.py.txt --self-test
 
 应看到：
 
-    B2DR3PST N-T37-X0 C-0
+    B2DR3PST N-T44-X0 C-0
     B2DR3ST N-T30-X0 C-0
 
 六、诊断旧失败并创建新 Plan
 
-    python U-UDP002\04_TEMP\u002_u22b2dr3_global_no_hold_compilation_plan_v0_2.py.txt --qualify-and-prepare --workspace-root U-UDP002
+    python U-UDP002\04_TEMP\u002_u22b2dr3_global_no_hold_compilation_plan_v0_3.py.txt --qualify-and-prepare --workspace-root U-UDP002
 
 程序会自动：
 
@@ -69,6 +69,15 @@ B2DR3 将规则提升为通用配置编译规则：
 3. 编译完整 Binding Profile v0.3；
 4. 创建新 RunId U22B2DR3_TC001_F41480_41750_V01；
 5. 生成并预检五模块计划。
+
+完整 Profile 处理规则：
+
+- 可选角色未绑定（空列表）：合法保留，不参与编译；
+- 一个角色一个 Binding：统一验证并编译；
+- 一个角色多个 Binding：按歧义 fail-close；
+- 当前五模块必需的 Camera1、Camera3、Radar Distance、Radar Flag：
+  必须各有且仅有一个 Binding；
+- 因此不会再按 VehicleSpeed 等可选变量逐个补丁。
 
 成功回传：
 

@@ -22,7 +22,7 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 
 PROGRAM_ID = "UDP002-U22B2DR3-GLOBAL-NO-HOLD-COMPILATION-PLAN"
-PROGRAM_VERSION = "0.2"
+PROGRAM_VERSION = "0.3"
 CONTRACT_VERSION = "U22.0.1"
 RUN_ID = "U22B2DR3_TC001_F41480_41750_V01"
 FAILED_RUN_ID = "U22B2DR2_TC001_F41480_41750_V01"
@@ -406,21 +406,38 @@ def failed_radar_evidence(root: Path) -> Dict[str, object]:
 
 def compile_global_no_hold_profile(
     source: Mapping[str, object],
-) -> Tuple[Dict[str, object], List[Dict[str, object]]]:
-    """Compile every NONE plus blank MaxAgeFrames binding to integer zero."""
+) -> Tuple[Dict[str, object], List[Dict[str, object]], List[str], int]:
+    """Compile all selected bindings while preserving optional unbound roles.
+
+    Binding states are handled exhaustively:
+    - [] is a valid optional-unbound role and is preserved;
+    - exactly one binding is compiled;
+    - more than one binding is rejected as ambiguous;
+    - NONE plus blank age becomes integer zero;
+    - NONE plus a value must be integer zero;
+    - another hold policy requires an explicit nonnegative integer age.
+    """
 
     compiled = json.loads(json.dumps(source, ensure_ascii=False))
     bindings = compiled.get("Bindings")
     if not isinstance(bindings, dict):
         raise PlanError("COMPILED_BINDINGS")
     changes: List[Dict[str, object]] = []
+    unbound_roles: List[str] = []
+    selected_binding_count = 0
     for role in sorted(bindings):
         selected = bindings[role]
-        if not isinstance(selected, list) or not selected:
-            raise PlanError("COMPILED_BINDING_COUNT", role)
+        if not isinstance(selected, list):
+            raise PlanError("COMPILED_BINDING_COLLECTION", role)
+        if len(selected) == 0:
+            unbound_roles.append(role)
+            continue
+        if len(selected) > 1:
+            raise PlanError("COMPILED_BINDING_AMBIGUOUS", role)
         for index, binding in enumerate(selected):
             if not isinstance(binding, dict):
                 raise PlanError("COMPILED_BINDING_TYPE", role)
+            selected_binding_count += 1
             policy = str(binding.get("HoldPolicy", "")).strip().upper()
             observed = binding.get("MaxAgeFrames")
             observed_text = str(observed if observed is not None else "").strip()
@@ -447,8 +464,18 @@ def compile_global_no_hold_profile(
             if policy == "NONE" and parsed != 0:
                 raise PlanError("NONE_NONZERO_MAX_AGE", role)
             binding["MaxAgeFrames"] = parsed
+    required_roles = (
+        "CAMERA_1_DISTANCE",
+        "CAMERA_3_DISTANCE",
+        "RADAR_DISTANCE",
+        "RADAR_DETECTION_FLAG",
+    )
+    for role in required_roles:
+        selected = bindings.get(role)
+        if not isinstance(selected, list) or len(selected) != 1:
+            raise PlanError("CURRENT_PLAN_REQUIRED_BINDING", role)
     compiled["BindingProfileVersion"] = "0.3"
-    return compiled, changes
+    return compiled, changes, unbound_roles, selected_binding_count
 
 
 def accepted_camera(
@@ -470,7 +497,12 @@ def accepted_camera(
     if sha256_file(profile_path) != configuration.get("BindingProfileSha256"):
         raise PlanError("NORMALIZED_PROFILE_HASH")
     source_profile = load_json(profile_path, "NORMALIZED_PROFILE")
-    compiled_profile, changes = compile_global_no_hold_profile(source_profile)
+    (
+        compiled_profile,
+        changes,
+        unbound_roles,
+        selected_binding_count,
+    ) = compile_global_no_hold_profile(source_profile)
     write_exact(root / COMPILED_PROFILE, compiled_profile)
     compiled_profile_sha = sha256_file(root / COMPILED_PROFILE)
     configuration = dict(configuration)
@@ -486,6 +518,8 @@ def accepted_camera(
         "CompiledConfiguration": COMPILED_CONFIG.as_posix(),
         "CompiledConfigurationSha256": sha256_file(root / COMPILED_CONFIG),
         "ChangedBindingCount": len(changes),
+        "SelectedBindingCount": selected_binding_count,
+        "UnboundOptionalRoles": unbound_roles,
         "Changes": changes,
     }
     return (
@@ -625,7 +659,7 @@ def self_test() -> str:
             raise AssertionError("SELFTEST_" + str(len(checks) + 1))
         checks.append(True)
     ck(PROGRAM_ID.startswith("UDP002"))
-    ck(PROGRAM_VERSION == "0.2")
+    ck(PROGRAM_VERSION == "0.3")
     ck(CONTRACT_VERSION == "U22.0.1")
     ck(FRAME_START < FRAME_END)
     ck(FRAME_END - FRAME_START + 1 == 271)
@@ -680,6 +714,8 @@ def self_test() -> str:
                 "RADAR_DETECTION_FLAG": [
                     {"HoldPolicy": "NONE", "MaxAgeFrames": None}
                 ],
+                "VEHICLE_SPEED": [],
+                "FRAMECOUNT_SOURCE": [],
             }
         }
         write_exact(workspace / profile_relative, profile)
@@ -717,9 +753,32 @@ def self_test() -> str:
             == sha256_file(workspace / COMPILED_PROFILE)
         )
         ck(camera[3]["ChangedBindingCount"] == 2)
+        ck(camera[3]["SelectedBindingCount"] == 4)
+        ck(camera[3]["UnboundOptionalRoles"] == ["FRAMECOUNT_SOURCE", "VEHICLE_SPEED"])
         compiled = load_json(workspace / COMPILED_PROFILE, "TEST_COMPILED")
         ck(compiled["Bindings"]["RADAR_DISTANCE"][0]["MaxAgeFrames"] == 0)
         ck(compiled["Bindings"]["RADAR_DETECTION_FLAG"][0]["MaxAgeFrames"] == 0)
+        ck(compiled["Bindings"]["VEHICLE_SPEED"] == [])
+        bounded_source = json.loads(json.dumps(profile))
+        bounded_source["Bindings"]["VEHICLE_SPEED"] = [
+            {"HoldPolicy": "BOUNDED_HOLD", "MaxAgeFrames": 1}
+        ]
+        bounded, _, unbound, selected_count = compile_global_no_hold_profile(
+            bounded_source
+        )
+        ck(bounded["Bindings"]["VEHICLE_SPEED"][0]["MaxAgeFrames"] == 1)
+        ck(unbound == ["FRAMECOUNT_SOURCE"])
+        ck(selected_count == 5)
+        duplicate_source = json.loads(json.dumps(profile))
+        duplicate_source["Bindings"]["RADAR_DISTANCE"].append(
+            {"HoldPolicy": "NONE", "MaxAgeFrames": ""}
+        )
+        try:
+            compile_global_no_hold_profile(duplicate_source)
+            duplicate_rejected = False
+        except PlanError as exc:
+            duplicate_rejected = exc.reason == "COMPILED_BINDING_AMBIGUOUS"
+        ck(duplicate_rejected)
         failed_root = workspace / "07_OUTPUT" / FAILED_RUN_ID
         diagnostic_root = failed_root / "02_DIAGNOSTICS/modules/0003_Radar"
         write_exact(failed_root / "run_status.json", {"Status": "FAILED"})
@@ -752,9 +811,9 @@ def self_test() -> str:
     ck(AVAILABILITY.name.endswith(".json"))
     ck(QUALIFICATION.suffix == ".py")
     ck(PREFLIGHT.suffix == ".py")
-    if len(checks) != 37:
+    if len(checks) != 44:
         raise AssertionError("SELFTEST_COUNT")
-    return "B2DR3PST N-T37-X0 C-0"
+    return "B2DR3PST N-T44-X0 C-0"
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
