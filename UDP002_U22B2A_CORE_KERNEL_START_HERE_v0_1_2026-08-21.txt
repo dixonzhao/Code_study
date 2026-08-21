@@ -1,0 +1,76 @@
+UDP002 U22B2A — Radar / Population / Discrepancy Core
+版本：0.1
+日期：2026-08-21
+
+本节点的作用
+============
+
+B15 已完成 B1 封口。B2A 先冻结并验证三个不依赖公司路径的纯计算内核：
+
+S1 Radar validity
+  -> S2 comparison population
+  -> S3 signed discrepancy
+
+正式公式：
+
+CameraRadarDiscrepancy = RadarDistance - CanonicalCameraDistance
+
+只有 FORMAL_ELIGIBLE 才计算。Radar 丢目标、Camera ambiguous 或任一侧无效时，
+discrepancy 保持空白；相关帧按规则保留为 INVESTIGATION_ONLY 或 INELIGIBLE。
+
+这一节点不读取公司数据、不安装正式 Module、不修改 U001/U002，也不做 baseline。
+通过后，下一节点会把同一套已验证内核封装为 S1/S2/S3 Module Pack。
+
+需要下载
+========
+
+把下面文件放到：
+
+C-CODE\U-UDP002\04_TEMP
+
+文件：
+
+u002_u22b2_radar_population_discrepancy_core_v0_1.py.txt
+
+Step 1 — Self-test
+==================
+
+从 C-CODE 使用 CMD：
+
+python U-UDP002\04_TEMP\u002_u22b2_radar_population_discrepancy_core_v0_1.py.txt --self-test
+
+成功：
+
+U22B2-CORE-SELFTEST-PASS-27
+
+通过时不用回传。
+
+Step 2 — 生成一个可读示例
+===========================
+
+python U-UDP002\04_TEMP\u002_u22b2_radar_population_discrepancy_core_v0_1.py.txt --demo --out-root U-UDP002\04_TEMP\U22B2A_DEMO_V01
+
+成功时只回传一行：
+
+B2A N-R8-F2-I4-X2-O2-L1 C-0
+
+目录内有：
+
+u22b2_core_demo.csv
+u22b2_core_demo_summary.json
+
+CSV 展示八种受控情况。请重点观察：
+
+1. 正常 pair：Radar 12 m、Camera 10 m，结果为 +2 m；
+2. Radar target loss：即使距离字节仍残留，也不计算 discrepancy；
+3. Camera ambiguous：保留调查信息但不进入正式总体；
+4. 双方无效：INELIGIBLE；
+5. 数字 0 本身不会被 B2 全局写死为无效，当前 TC001 的 0 invalid 规则仍由
+   U001 Profile 负责。
+
+现实意义
+========
+
+这一步把“Radar 有值就直接相减”拆成三个能解释、能测试的判断层。以后看到
+Radar 在转弯中丢失目标时，系统会保留它作为目标丢失调查证据，但不会让假 0
+污染 Camera-Radar discrepancy、baseline 或后续统计模型。
