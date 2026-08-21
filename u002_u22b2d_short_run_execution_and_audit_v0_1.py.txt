@@ -1,0 +1,657 @@
+#!/usr/bin/env python3
+"""Execute and audit the frozen U22B2C short Camera-Radar Run.
+
+This controller owns no analysis mathematics.  It invokes the already accepted
+U22 Stage Executor, then independently checks artifact identity, FrameCount
+alignment, three-lane population accounting and the signed discrepancy rule.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+import math
+import os
+from pathlib import Path, PurePosixPath
+import re
+import subprocess
+import sys
+import tempfile
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+
+
+PROGRAM_ID = "UDP002-U22B2D-SHORT-RUN-EXECUTION-AND-AUDIT"
+PROGRAM_VERSION = "0.1"
+CONTRACT_VERSION = "U22.0.1"
+RUN_ID = "U22B2C_TC001_F41480_41750_V01"
+FRAME_START = 41480
+FRAME_END = 41750
+
+EXECUTOR = Path("01_PROGRAMS/core/u002_u22_stage_executor_v0_1.py")
+ARTIFACT_STORE = Path("01_PROGRAMS/core/u002_u22_artifact_store_v0_1.py")
+FREEZE_AUDITOR = Path(
+    "05_TESTS/integration/u002_u22_synthetic_vertical_acceptance_v0_1.py"
+)
+RUN_PLAN = Path("00_CONFIG/resolved_run_plan.json")
+RUN_STATUS = Path("run_status.json")
+ARTIFACT_INDEX = Path("run_artifact_index_v0_1.json")
+ACCEPTANCE_REPORT = Path("02_DIAGNOSTICS/b2d_short_run_acceptance_v0_1.json")
+FAILURE_REPORT = Path("02_DIAGNOSTICS/b2d_short_run_failure_v0_1.json")
+
+EXPECTED_TYPES = (
+    "U001_INTAKE_ACCEPTED",
+    "CAMERA_TARGET_RECONSTRUCTION",
+    "RADAR_VALIDITY",
+    "COMPARISON_POPULATION",
+    "PRIMARY_OUTCOME",
+)
+TARGET_TYPES = (
+    "RADAR_VALIDITY",
+    "COMPARISON_POPULATION",
+    "PRIMARY_OUTCOME",
+)
+
+
+class B2DError(RuntimeError):
+    """Represent one deterministic B2D failure."""
+
+    def __init__(self, reason: str, detail: object = "NA"):
+        self.reason = token(reason, 64)
+        self.detail = token(detail, 120)
+        super().__init__(self.reason)
+
+
+def token(value: object, limit: int = 80) -> str:
+    """Convert one diagnostic detail into a compact machine-code token."""
+
+    text = re.sub(r"[^A-Z0-9_.:+-]+", "_", str(value).upper())
+    return text.strip("_")[:limit] or "NA"
+
+
+def canonical_bytes(value: object) -> bytes:
+    """Serialize one control record deterministically."""
+
+    text = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+        allow_nan=False,
+    )
+    return (text + "\n").encode("utf-8")
+
+
+def sha256_file(path: Path) -> str:
+    """Hash one regular file without loading it all into memory."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def regular_file(path: Path) -> bool:
+    return path.is_file() and not path.is_symlink()
+
+
+def load_json(path: Path, reason: str) -> Dict[str, object]:
+    """Load one JSON object and reject missing, linked or non-object input."""
+
+    if not regular_file(path):
+        raise B2DError(reason + "_MISSING", path.name)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        raise B2DError(reason + "_JSON", path.name) from exc
+    if not isinstance(value, dict):
+        raise B2DError(reason + "_TYPE", path.name)
+    return value
+
+
+def write_json_atomic(path: Path, value: Mapping[str, object]) -> None:
+    """Write one deterministic diagnostic file atomically."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".writing")
+    temporary.write_bytes(canonical_bytes(value))
+    os.replace(temporary, path)
+
+
+def safe_relative(value: object, field: str) -> PurePosixPath:
+    """Accept a portable relative artifact path only."""
+
+    text = str(value)
+    if "\\" in text:
+        raise B2DError(field + "_SEPARATOR", text)
+    path = PurePosixPath(text)
+    if path.is_absolute() or not path.parts:
+        raise B2DError(field + "_PATH", text)
+    if any(part in {"", ".", ".."} for part in path.parts):
+        raise B2DError(field + "_PATH", text)
+    return path
+
+
+def resolve_inside(root: Path, relative: object, field: str) -> Path:
+    """Resolve one portable relative path and keep it inside its owner."""
+
+    parts = safe_relative(relative, field).parts
+    path = root.joinpath(*parts).resolve()
+    try:
+        path.relative_to(root.resolve())
+    except ValueError as exc:
+        raise B2DError(field + "_ESCAPE", relative) from exc
+    return path
+
+
+def require_workspace(path: Path) -> Tuple[Path, Path]:
+    """Validate the governed workspace and the frozen B2C Run root."""
+
+    root = path.resolve()
+    if not root.is_dir() or root.name != "U-UDP002":
+        raise B2DError("WORKSPACE_ROOT", root.name)
+    for relative in (EXECUTOR, ARTIFACT_STORE, FREEZE_AUDITOR):
+        if not regular_file(root / relative):
+            raise B2DError("WORKSPACE_DEPENDENCY", relative.as_posix())
+    run_root = root / "07_OUTPUT" / RUN_ID
+    if not run_root.is_dir() or run_root.is_symlink():
+        raise B2DError("RUN_ROOT", RUN_ID)
+    if not regular_file(run_root / RUN_PLAN) or not regular_file(run_root / RUN_STATUS):
+        raise B2DError("RUN_CONTROL_FILES", RUN_ID)
+    return root, run_root
+
+
+def run_child(
+    root: Path,
+    program: Path,
+    arguments: Sequence[str],
+    expected_prefix: str,
+    timeout: int,
+) -> str:
+    """Run one accepted child, retaining its compact failure evidence."""
+
+    completed = subprocess.run(
+        [sys.executable, str(root / program), *arguments],
+        cwd=root.parent,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+    lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    capsule = lines[-1] if lines else "MISSING"
+    if (
+        completed.returncode != 0
+        or not capsule.startswith(expected_prefix)
+        or not capsule.endswith("C-0")
+    ):
+        detail = capsule if capsule != "MISSING" else completed.stderr[-240:]
+        raise B2DError("CHILD_" + program.stem, detail)
+    return capsule
+
+
+def freeze_audit(root: Path) -> str:
+    """Confirm the accepted U22 foundation before and after the real Run."""
+
+    return run_child(
+        root,
+        FREEZE_AUDITOR,
+        ["--audit-freeze", "--workspace-root", str(root)],
+        "U22A7F",
+        timeout=90,
+    )
+
+
+def execute_frozen_run(root: Path, run_root: Path) -> Tuple[int, int, int]:
+    """Invoke the accepted Stage Executor and parse its bounded capsule."""
+
+    capsule = run_child(
+        root,
+        EXECUTOR,
+        [
+            "--execute-run",
+            str(run_root),
+            "--workspace-root",
+            str(root),
+            "--module-timeout-seconds",
+            "600",
+        ],
+        "U22A6X",
+        timeout=3600,
+    )
+    match = re.search(r"N-M(\d+)-A(\d+)-O(\d+)-R([01])-S1-X0 C-0$", capsule)
+    if match is None:
+        raise B2DError("EXECUTOR_CAPSULE", capsule)
+    modules = int(match.group(1))
+    artifacts = int(match.group(2))
+    replay = int(match.group(4))
+    if modules != 5 or artifacts != 5 or int(match.group(3)) != 0:
+        raise B2DError("EXECUTOR_COUNTS", capsule)
+    return modules, artifacts, replay
+
+
+def parse_integer(value: object, field: str) -> int:
+    """Parse one nonnegative integer from a quality record."""
+
+    if isinstance(value, bool):
+        raise B2DError(field, value)
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise B2DError(field, value) from exc
+    if number < 0 or number != value:
+        raise B2DError(field, value)
+    return number
+
+
+def parse_float(value: object, field: str) -> float:
+    """Parse one finite numeric CSV field."""
+
+    try:
+        number = float(str(value).strip())
+    except ValueError as exc:
+        raise B2DError(field, value) from exc
+    if not math.isfinite(number):
+        raise B2DError(field, value)
+    return number
+
+
+def read_csv(path: Path, required: Sequence[str]) -> Tuple[List[Dict[str, str]], List[int]]:
+    """Read one short primary payload and validate FrameCount ordering."""
+
+    if not regular_file(path):
+        raise B2DError("PRIMARY_CSV_MISSING", path.name)
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        header = reader.fieldnames or []
+        missing = [name for name in required if name not in header]
+        if missing:
+            raise B2DError("PRIMARY_COLUMN", missing[0])
+        rows = [dict(row) for row in reader]
+    if not rows:
+        raise B2DError("PRIMARY_EMPTY", path.name)
+    frames: List[int] = []
+    for row in rows:
+        frame = parse_float(row["FrameCount"], "FRAMECOUNT")
+        if not frame.is_integer():
+            raise B2DError("FRAMECOUNT_INTEGER", frame)
+        frames.append(int(frame))
+    if any(right <= left for left, right in zip(frames, frames[1:])):
+        raise B2DError("FRAMECOUNT_ORDER", path.name)
+    if frames[0] < FRAME_START or frames[-1] > FRAME_END:
+        raise B2DError("FRAMECOUNT_SCOPE", f"{frames[0]}.{frames[-1]}")
+    return rows, frames
+
+
+def target_payloads(
+    run_root: Path,
+    entry: Mapping[str, object],
+) -> Tuple[Dict[str, object], Path, Dict[str, object]]:
+    """Resolve and hash-check one target Artifact's primary and quality payloads."""
+
+    manifest_path = resolve_inside(run_root, entry.get("ManifestRelativePath"), "MANIFEST")
+    if not regular_file(manifest_path):
+        raise B2DError("MANIFEST_MISSING", entry.get("ArtifactType"))
+    if sha256_file(manifest_path) != entry.get("ManifestSha256"):
+        raise B2DError("MANIFEST_HASH", entry.get("ArtifactType"))
+    manifest = load_json(manifest_path, "MANIFEST")
+    if manifest.get("ArtifactType") != entry.get("ArtifactType"):
+        raise B2DError("MANIFEST_TYPE", entry.get("ArtifactType"))
+    payloads = manifest.get("Payloads")
+    if not isinstance(payloads, list) or len(payloads) != 2:
+        raise B2DError("PAYLOAD_COUNT", entry.get("ArtifactType"))
+    primary = [
+        item for item in payloads
+        if isinstance(item, dict)
+        and item.get("PayloadKind") == "PRIMARY"
+        and item.get("MediaType") == "text/csv"
+    ]
+    quality = [
+        item for item in payloads
+        if isinstance(item, dict)
+        and item.get("PayloadKind") == "AUXILIARY"
+        and item.get("MediaType") == "application/json"
+    ]
+    if len(primary) != 1 or len(quality) != 1:
+        raise B2DError("PAYLOAD_ROLES", entry.get("ArtifactType"))
+    package_root = manifest_path.parent
+    primary_path = resolve_inside(package_root, primary[0].get("RelativePath"), "PRIMARY")
+    quality_path = resolve_inside(package_root, quality[0].get("RelativePath"), "QUALITY")
+    for path, payload in ((primary_path, primary[0]), (quality_path, quality[0])):
+        if not regular_file(path) or sha256_file(path) != payload.get("Sha256"):
+            raise B2DError("PAYLOAD_HASH", path.name)
+    return manifest, primary_path, load_json(quality_path, "QUALITY")
+
+
+def inspect_artifacts(run_root: Path) -> Dict[str, object]:
+    """Audit artifact identity, frame alignment, populations and equation semantics."""
+
+    index = load_json(run_root / ARTIFACT_INDEX, "ARTIFACT_INDEX")
+    entries = index.get("Artifacts")
+    if not isinstance(entries, list) or len(entries) != 5:
+        raise B2DError("ARTIFACT_COUNT", len(entries) if isinstance(entries, list) else "NA")
+    by_type: Dict[str, Mapping[str, object]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise B2DError("ARTIFACT_ENTRY_TYPE")
+        artifact_type = str(entry.get("ArtifactType"))
+        if artifact_type in by_type:
+            raise B2DError("ARTIFACT_TYPE_DUPLICATE", artifact_type)
+        by_type[artifact_type] = entry
+    if tuple(sorted(by_type)) != tuple(sorted(EXPECTED_TYPES)):
+        raise B2DError("ARTIFACT_TYPE_SET", ".".join(sorted(by_type)))
+
+    radar_manifest, radar_path, radar_quality = target_payloads(
+        run_root, by_type["RADAR_VALIDITY"]
+    )
+    population_manifest, population_path, population_quality = target_payloads(
+        run_root, by_type["COMPARISON_POPULATION"]
+    )
+    outcome_manifest, outcome_path, outcome_quality = target_payloads(
+        run_root, by_type["PRIMARY_OUTCOME"]
+    )
+
+    radar_rows, radar_frames = read_csv(
+        radar_path,
+        ("FrameCount", "RadarMeasurementValid", "RadarValidityReason"),
+    )
+    population_rows, population_frames = read_csv(
+        population_path,
+        ("FrameCount", "ComparisonEligibility", "EligibilityReason"),
+    )
+    outcome_rows, outcome_frames = read_csv(
+        outcome_path,
+        (
+            "FrameCount",
+            "RadarDistance",
+            "CanonicalCameraDistance",
+            "ComparisonEligibility",
+            "CameraRadarDiscrepancy",
+            "OutcomeValid",
+            "OutcomeDirection",
+            "OutcomeUnit",
+        ),
+    )
+    if radar_frames != population_frames or radar_frames != outcome_frames:
+        raise B2DError("TARGET_FRAME_ALIGNMENT")
+
+    rows = len(radar_rows)
+    radar_valid = parse_integer(radar_quality.get("RadarValidRows"), "RADAR_VALID")
+    radar_invalid = parse_integer(radar_quality.get("RadarInvalidRows"), "RADAR_INVALID")
+    radar_loss = parse_integer(
+        radar_quality.get("RadarTargetLossEvidenceRows"), "RADAR_LOSS"
+    )
+    if parse_integer(radar_quality.get("FrameRows"), "RADAR_ROWS") != rows:
+        raise B2DError("RADAR_ROW_COUNT")
+    if radar_valid + radar_invalid != rows or radar_loss > radar_invalid:
+        raise B2DError("RADAR_ACCOUNTING")
+
+    formal = parse_integer(population_quality.get("FormalEligibleRows"), "FORMAL")
+    investigation = parse_integer(
+        population_quality.get("InvestigationOnlyRows"), "INVESTIGATION"
+    )
+    ineligible = parse_integer(population_quality.get("IneligibleRows"), "INELIGIBLE")
+    if parse_integer(population_quality.get("FrameRows"), "POPULATION_ROWS") != rows:
+        raise B2DError("POPULATION_ROW_COUNT")
+    if formal + investigation + ineligible != rows:
+        raise B2DError("POPULATION_ACCOUNTING")
+
+    outcome_valid = parse_integer(outcome_quality.get("OutcomeValidRows"), "OUTCOME_VALID")
+    outcome_invalid = parse_integer(
+        outcome_quality.get("OutcomeInvalidRows"), "OUTCOME_INVALID"
+    )
+    if parse_integer(outcome_quality.get("FrameRows"), "OUTCOME_ROWS") != rows:
+        raise B2DError("OUTCOME_ROW_COUNT")
+    if outcome_valid != formal or outcome_valid + outcome_invalid != rows:
+        raise B2DError("OUTCOME_ACCOUNTING")
+    expected_metadata = {
+        "OutcomeFormula": "RadarDistance-CanonicalCameraDistance",
+        "OutcomeDirection": "RADAR_MINUS_CAMERA",
+        "OutcomeUnit": "m",
+        "RadarIsGroundTruth": False,
+        "BaselineApplied": False,
+        "ZeroFillApplied": False,
+    }
+    for field, expected in expected_metadata.items():
+        if outcome_quality.get(field) != expected:
+            raise B2DError("OUTCOME_METADATA_" + field, outcome_quality.get(field))
+
+    observed_valid = 0
+    for row in outcome_rows:
+        valid_text = str(row["OutcomeValid"]).strip()
+        if valid_text not in {"0", "1"}:
+            raise B2DError("OUTCOME_VALID_BOOLEAN", valid_text)
+        is_valid = valid_text == "1"
+        discrepancy_text = str(row["CameraRadarDiscrepancy"]).strip()
+        if is_valid:
+            if row["ComparisonEligibility"] != "FORMAL_ELIGIBLE":
+                raise B2DError("OUTCOME_LANE")
+            radar = parse_float(row["RadarDistance"], "RADAR_DISTANCE")
+            camera = parse_float(row["CanonicalCameraDistance"], "CAMERA_DISTANCE")
+            discrepancy = parse_float(discrepancy_text, "DISCREPANCY")
+            if not math.isclose(discrepancy, radar - camera, abs_tol=1e-9):
+                raise B2DError("OUTCOME_EQUATION", row["FrameCount"])
+            observed_valid += 1
+        elif discrepancy_text != "":
+            raise B2DError("INVALID_OUTCOME_NOT_BLANK", row["FrameCount"])
+    if observed_valid != outcome_valid:
+        raise B2DError("OUTCOME_VALID_OBSERVED", observed_valid)
+
+    if radar_manifest.get("ParentArtifactIds") is None:
+        raise B2DError("RADAR_LINEAGE")
+    if len(population_manifest.get("ParentArtifactIds", [])) != 2:
+        raise B2DError("POPULATION_LINEAGE")
+    if len(outcome_manifest.get("ParentArtifactIds", [])) != 1:
+        raise B2DError("OUTCOME_LINEAGE")
+
+    return {
+        "FrameRows": rows,
+        "FrameFirst": radar_frames[0],
+        "FrameLast": radar_frames[-1],
+        "RadarValidRows": radar_valid,
+        "RadarInvalidRows": radar_invalid,
+        "RadarTargetLossEvidenceRows": radar_loss,
+        "FormalEligibleRows": formal,
+        "InvestigationOnlyRows": investigation,
+        "IneligibleRows": ineligible,
+        "OutcomeValidRows": outcome_valid,
+        "ArtifactCount": len(entries),
+    }
+
+
+def diagnostic_snapshot(run_root: Path) -> Dict[str, object]:
+    """Collect bounded structured evidence after a failure without another probe."""
+
+    snapshot: Dict[str, object] = {
+        "RunRootExists": run_root.is_dir(),
+        "RunStatus": "MISSING",
+        "CompletedModuleCount": 0,
+        "FailedModule": None,
+        "FailureReason": None,
+        "ArtifactCount": 0,
+        "LatestExecutionRecord": None,
+    }
+    try:
+        status = load_json(run_root / RUN_STATUS, "STATUS")
+        snapshot.update({
+            "RunStatus": status.get("Status"),
+            "CompletedModuleCount": status.get("CompletedModuleCount", 0),
+            "FailedModule": status.get("FailedModule"),
+            "FailureReason": status.get("FailureReason"),
+        })
+    except Exception:
+        pass
+    try:
+        index = load_json(run_root / ARTIFACT_INDEX, "INDEX")
+        entries = index.get("Artifacts")
+        if isinstance(entries, list):
+            snapshot["ArtifactCount"] = len(entries)
+    except Exception:
+        pass
+    records = sorted((run_root / "01_LOGS").glob("*.json"))
+    if records:
+        try:
+            latest = load_json(records[-1], "EXECUTION_RECORD")
+            snapshot["LatestExecutionRecord"] = {
+                "ModuleId": latest.get("ModuleId"),
+                "Status": latest.get("Status"),
+                "Reason": latest.get("Reason"),
+                "ExitCode": latest.get("ExitCode"),
+            }
+        except Exception:
+            pass
+    return snapshot
+
+
+def execute_and_audit(root: Path, run_root: Path) -> str:
+    """Execute once, verify all artifacts and write one stable acceptance record."""
+
+    plan = load_json(run_root / RUN_PLAN, "RESOLVED_PLAN")
+    if plan.get("RunId") != RUN_ID:
+        raise B2DError("RUN_PLAN_ID", plan.get("RunId"))
+    if plan.get("FrameStart") != FRAME_START or plan.get("FrameEnd") != FRAME_END:
+        raise B2DError("RUN_PLAN_SCOPE")
+    freeze_before = freeze_audit(root)
+    modules, artifacts, replay = execute_frozen_run(root, run_root)
+    store_capsule = run_child(
+        root,
+        ARTIFACT_STORE,
+        ["--audit-run", "--workspace-root", str(root), "--run-root", str(run_root)],
+        "U22A3S",
+        timeout=300,
+    )
+    freeze_after = freeze_audit(root)
+    if freeze_before != freeze_after:
+        raise B2DError("FOUNDATION_CHANGED")
+    status = load_json(run_root / RUN_STATUS, "RUN_STATUS")
+    if status.get("Status") != "SUCCEEDED":
+        raise B2DError("RUN_STATUS", status.get("Status"))
+    if status.get("CompletedModuleCount") != 5 or status.get("OptionalFailureCount") != 0:
+        raise B2DError("RUN_STATUS_COUNTS")
+    metrics = inspect_artifacts(run_root)
+    report = {
+        "AcceptanceContract": "UDP002_U22B2D_SHORT_RUN_ACCEPTANCE_V0_1",
+        "ProgramId": PROGRAM_ID,
+        "ProgramVersion": PROGRAM_VERSION,
+        "ContractVersion": CONTRACT_VERSION,
+        "RunId": RUN_ID,
+        "RunStatus": "SUCCEEDED",
+        "ExecutorReplay": bool(replay),
+        "ExecutorModuleCount": modules,
+        "ExecutorArtifactCount": artifacts,
+        "ArtifactStoreAuditCapsule": store_capsule,
+        "FoundationAuditCapsule": freeze_after,
+        "Metrics": metrics,
+        "Accepted": True,
+    }
+    write_json_atomic(run_root / ACCEPTANCE_REPORT, report)
+    failure_path = run_root / FAILURE_REPORT
+    if failure_path.exists():
+        failure_path.unlink()
+    return (
+        f"B2D N-M{modules}-A{metrics['ArtifactCount']}-R{metrics['FrameRows']}"
+        f"-V{metrics['RadarValidRows']}-L{metrics['RadarTargetLossEvidenceRows']}"
+        f"-F{metrics['FormalEligibleRows']}-I{metrics['InvestigationOnlyRows']}"
+        f"-N{metrics['IneligibleRows']}-O{metrics['OutcomeValidRows']}"
+        f"-P{replay}-X0 C-0"
+    )
+
+
+def self_test() -> str:
+    """Exercise path, parsing and semantic-accounting helpers locally."""
+
+    checks: List[bool] = []
+
+    def ck(value: bool) -> None:
+        if not value:
+            raise AssertionError("SELFTEST")
+        checks.append(True)
+
+    ck(PROGRAM_ID.startswith("UDP002"))
+    ck(PROGRAM_VERSION == "0.1")
+    ck(CONTRACT_VERSION == "U22.0.1")
+    ck(RUN_ID.startswith("U22B2C_"))
+    ck(FRAME_START < FRAME_END)
+    ck(len(EXPECTED_TYPES) == 5)
+    ck(len(TARGET_TYPES) == 3)
+    ck(token("a b/c") == "A_B_C")
+    ck(parse_integer(3, "T") == 3)
+    ck(parse_float("2.5", "T") == 2.5)
+    ck(safe_relative("a/b.csv", "T").parts == ("a", "b.csv"))
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        csv_path = root / "test.csv"
+        csv_path.write_text(
+            "FrameCount,OutcomeValid\n41480,1\n41481,0\n",
+            encoding="utf-8",
+        )
+        rows, frames = read_csv(csv_path, ("FrameCount", "OutcomeValid"))
+        ck(len(rows) == 2)
+        ck(frames == [41480, 41481])
+        json_path = root / "test.json"
+        write_json_atomic(json_path, {"b": 1, "a": 2})
+        ck(load_json(json_path, "TEST") == {"a": 2, "b": 1})
+        ck(len(sha256_file(json_path)) == 64)
+        ck(resolve_inside(root, "test.json", "TEST") == json_path.resolve())
+    ck(EXECUTOR.suffix == ".py")
+    ck(ARTIFACT_STORE.suffix == ".py")
+    ck(FREEZE_AUDITOR.suffix == ".py")
+    ck(ACCEPTANCE_REPORT.suffix == ".json")
+    ck(FAILURE_REPORT.suffix == ".json")
+    ck("RADAR_VALIDITY" in EXPECTED_TYPES)
+    ck("COMPARISON_POPULATION" in EXPECTED_TYPES)
+    ck("PRIMARY_OUTCOME" in EXPECTED_TYPES)
+    ck(math.isclose(12.0 - 10.0, 2.0, abs_tol=1e-9))
+    ck(len(hashlib.sha256(b"x").hexdigest()) == 64)
+    if len(checks) != 26:
+        raise AssertionError("SELFTEST_COUNT")
+    return "B2D-ST N-T26-X0 C-0"
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--execute-and-audit", action="store_true")
+    parser.add_argument("--workspace-root")
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    run_root: Optional[Path] = None
+    try:
+        if args.self_test:
+            print(self_test())
+            return 0
+        if not args.workspace_root:
+            raise B2DError("WORKSPACE_ROOT_REQUIRED")
+        root, run_root = require_workspace(Path(args.workspace_root))
+        print(execute_and_audit(root, run_root))
+        return 0
+    except Exception as exc:
+        reason = getattr(exc, "reason", token(exc.__class__.__name__))
+        detail = getattr(exc, "detail", token(exc))
+        print(f"B2DE K-{reason}-D-{detail}-X1 C-7")
+        if run_root is not None:
+            snapshot = diagnostic_snapshot(run_root)
+            failure = {
+                "FailureContract": "UDP002_U22B2D_FAILURE_V0_1",
+                "ProgramId": PROGRAM_ID,
+                "RunId": RUN_ID,
+                "Reason": reason,
+                "Detail": detail,
+                "Snapshot": snapshot,
+            }
+            write_json_atomic(run_root / FAILURE_REPORT, failure)
+            latest = snapshot.get("LatestExecutionRecord")
+            latest_reason = latest.get("Reason") if isinstance(latest, dict) else "NA"
+            print(
+                f"B2DD N-S{token(snapshot.get('RunStatus'), 20)}"
+                f"-M{snapshot.get('CompletedModuleCount', 0)}"
+                f"-A{snapshot.get('ArtifactCount', 0)}"
+                f"-R{token(latest_reason, 40)}-X0 C-0"
+            )
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
