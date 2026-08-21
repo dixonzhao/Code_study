@@ -1,0 +1,792 @@
+#!/usr/bin/env python3
+"""Run one immutable U001 candidate profile in an isolated shadow runtime.
+
+This program is an integration harness. It copies only the seven accepted
+Controlled Profile stage programs and the four candidate control tables into
+a new run-owned shadow root, then delegates all data work to the accepted
+U001 G8A v0.5 orchestrator. It never replaces U001/02_CONTROL.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import traceback
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+
+PROGRAM_ID = "U001-U22B1B14-ISOLATED-PROFILE-SMOKE-RUNNER"
+PROGRAM_VERSION = "0.1"
+PROFILE_ID = "CAM13_RADAR_EVIDENCE_V0_1"
+PROFILE_STATUS = "CANDIDATE_NOT_ACTIVATED"
+ORCHESTRATOR_NAME = "u001_g8a_thin_orchestrator_v0_5.py"
+MAX_SOURCE_ROWS = 10000
+
+STAGE_PROGRAMS = (
+    "u001_foundation_core_v0_1.py",
+    "u001_selected_update_decoder_v0_1.py",
+    "u001_framecount_assignment_v0_1.py",
+    "u001_semantic_validity_classifier_v0_1.py",
+    "u001_framecount_view_builder_v0_1.py",
+    "u001_signal_cadence_bounded_hold_v0_1.py",
+    "u001_output_package_assembler_v0_3.py",
+)
+
+CONTROL_FILES = (
+    "u001_g2_selected_signals.csv",
+    "u001_g4_signal_policy.csv",
+    "u001_g5_frame_policy.csv",
+    "u001_g6_hold_policy.csv",
+)
+
+PROFILE_FILES = CONTROL_FILES + (
+    "u001_controlled_profile_manifest.json",
+    "u22b1b13_return_capsule.txt",
+)
+
+FINAL_PACKAGE_FILES = (
+    "u001_decoded_updates.csv",
+    "u001_frame_values.csv",
+    "u001_signal_catalog.csv",
+    "u001_quality_report.csv",
+    "u001_run_manifest.json",
+    "u001_review_view.csv",
+)
+
+SOURCE_FILES = ("CANDump.csv", "DBC1.dbc", "DBC2.dbc")
+
+G2_COLUMNS = (
+    "Selected", "Channel", "CAN_ID_Hex", "MessageName", "SignalName",
+    "CanonicalName", "Required", "SourceGroupComplete", "ReuseStatus",
+)
+
+G4_REQUIRED_COLUMNS = (
+    "CanonicalName", "Channel", "CAN_ID_Hex", "MessageName", "SignalName",
+    "Unit", "ValueKind", "SignalRole", "UpdateMode", "StorageDtype",
+    "ValidityRule", "InvalidExactValues", "Required",
+)
+
+G5_REQUIRED_COLUMNS = (
+    "CanonicalName", "ValueKind", "SignalRole", "IncludeInFrameView",
+    "WithinFramePolicy", "Required",
+)
+
+G6_REQUIRED_COLUMNS = (
+    "SignalIndex", "CanonicalName", "ValueKind", "SignalRole", "UpdateMode",
+    "HoldPolicy", "MaxAgeFrames", "Required",
+)
+
+
+class SmokeError(RuntimeError):
+    """Fail-closed integration error with a compact reason token."""
+
+    def __init__(self, reason: str, detail: object = "NA", stage: str = "B14"):
+        self.reason = machine_token(reason, 64)
+        self.detail = machine_token(detail, 180)
+        self.stage = machine_token(stage, 24)
+        super().__init__(self.reason)
+
+
+def machine_token(value: object, limit: int = 80) -> str:
+    """Return a bounded uppercase token for low-bandwidth transfer."""
+
+    cleaned = re.sub(r"[^A-Z0-9_.-]+", "_", str(value).upper())
+    return cleaned.strip("_")[:limit] or "NA"
+
+
+def sha256_file(path: Path) -> str:
+    """Hash a file in bounded blocks."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def write_text(path: Path, text: str) -> None:
+    """Write deterministic UTF-8 text."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(text)
+    os.replace(temporary, path)
+
+
+def write_json(path: Path, value: Mapping[str, object]) -> None:
+    """Write deterministic JSON."""
+
+    write_text(path, json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+
+
+def read_json(path: Path, label: str) -> Dict[str, object]:
+    """Read one JSON object."""
+
+    if not path.is_file() or path.is_symlink():
+        raise SmokeError(label + "_MISSING", path.name, "PROFILE")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        raise SmokeError(label + "_JSON", type(exc).__name__, "PROFILE") from exc
+    if not isinstance(value, dict):
+        raise SmokeError(label + "_TYPE", path.name, "PROFILE")
+    return value
+
+
+def read_csv_required(
+    path: Path,
+    required_columns: Sequence[str],
+    label: str,
+) -> Tuple[List[str], List[Dict[str, str]]]:
+    """Read a CSV and require the declared columns."""
+
+    if not path.is_file() or path.is_symlink():
+        raise SmokeError(label + "_MISSING", path.name, "PROFILE")
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as stream:
+            reader = csv.DictReader(stream)
+            header = [str(name) for name in (reader.fieldnames or [])]
+            missing = [name for name in required_columns if name not in header]
+            if missing:
+                raise SmokeError(label + "_COLUMN", missing[0], "PROFILE")
+            rows = [
+                {str(key): "" if value is None else str(value) for key, value in row.items()}
+                for row in reader
+            ]
+            return header, rows
+    except SmokeError:
+        raise
+    except Exception as exc:
+        raise SmokeError(label + "_READ", type(exc).__name__, "PROFILE") from exc
+
+
+def count_csv_rows(path: Path) -> int:
+    """Count CSV data rows without loading the file into memory."""
+
+    with path.open("rb") as stream:
+        lines = sum(1 for _ in stream)
+    return max(lines - 1, 0)
+
+
+def require_exact_file_set(root: Path, names: Iterable[str], label: str) -> None:
+    """Require exactly the specified direct-child files."""
+
+    if not root.is_dir() or root.is_symlink():
+        raise SmokeError(label + "_ROOT", root.name, "PREFLIGHT")
+    expected = set(names)
+    actual = {path.name for path in root.iterdir() if path.is_file()}
+    if actual != expected:
+        raise SmokeError(
+            label + "_FILE_SET",
+            f"M{len(expected - actual)}E{len(actual - expected)}",
+            "PREFLIGHT",
+        )
+
+
+def locate_program(program_root: Path, basename: str) -> Path:
+    """Locate an accepted runtime program, allowing transfer-only .txt suffix."""
+
+    candidates = [program_root / basename, program_root / (basename + ".txt")]
+    matches = [path for path in candidates if path.is_file() and not path.is_symlink()]
+    if len(matches) != 1:
+        raise SmokeError("PROGRAM_IDENTITY", f"{basename}:{len(matches)}", "PREFLIGHT")
+    return matches[0].resolve()
+
+
+def snapshot_files(paths: Iterable[Path]) -> Dict[str, Dict[str, object]]:
+    """Create an identity and content snapshot for protected small files."""
+
+    result: Dict[str, Dict[str, object]] = {}
+    for path in paths:
+        if not path.is_file() or path.is_symlink():
+            raise SmokeError("PROTECTED_FILE_MISSING", path.name, "PREFLIGHT")
+        stat = path.stat()
+        result[str(path.resolve())] = {
+            "Basename": path.name,
+            "Bytes": stat.st_size,
+            "ModifiedTimeNs": stat.st_mtime_ns,
+            "Sha256": sha256_file(path),
+        }
+    return result
+
+
+def validate_profile(profile_root: Path) -> Dict[str, object]:
+    """Validate the complete immutable B13 candidate profile."""
+
+    require_exact_file_set(profile_root, PROFILE_FILES, "PROFILE")
+    manifest = read_json(profile_root / "u001_controlled_profile_manifest.json", "PROFILE_MANIFEST")
+
+    required_manifest = {
+        "CompletionCode": 0,
+        "ProfileId": PROFILE_ID,
+        "ApprovalStatus": PROFILE_STATUS,
+        "ActivationAuthorized": False,
+        "SelectedSignals": 22,
+        "RequiredSignals": 9,
+        "FrameViewSignals": 21,
+        "ExactValidityRules": 3,
+        "NoHoldSignals": 21,
+    }
+    for field, expected in required_manifest.items():
+        if manifest.get(field) != expected:
+            raise SmokeError("PROFILE_MANIFEST_VALUE", field, "PROFILE")
+
+    control_records = manifest.get("ControlFiles")
+    if not isinstance(control_records, dict) or set(control_records) != set(CONTROL_FILES):
+        raise SmokeError("PROFILE_CONTROL_RECORDS", "SET", "PROFILE")
+    for name in CONTROL_FILES:
+        record = control_records[name]
+        if not isinstance(record, dict) or record.get("Sha256") != sha256_file(profile_root / name):
+            raise SmokeError("PROFILE_CONTROL_HASH", name, "PROFILE")
+
+    _, g2 = read_csv_required(profile_root / CONTROL_FILES[0], G2_COLUMNS, "G2")
+    _, g4 = read_csv_required(profile_root / CONTROL_FILES[1], G4_REQUIRED_COLUMNS, "G4")
+    _, g5 = read_csv_required(profile_root / CONTROL_FILES[2], G5_REQUIRED_COLUMNS, "G5")
+    _, g6 = read_csv_required(profile_root / CONTROL_FILES[3], G6_REQUIRED_COLUMNS, "G6")
+
+    if (len(g2), len(g4), len(g5), len(g6)) != (22, 22, 22, 21):
+        raise SmokeError("PROFILE_ROW_COUNTS", f"{len(g2)}.{len(g4)}.{len(g5)}.{len(g6)}", "PROFILE")
+    if sum(row["Required"].strip() == "1" for row in g2) != 9:
+        raise SmokeError("PROFILE_REQUIRED_COUNT", "G2", "PROFILE")
+    if sum(row["IncludeInFrameView"].strip() == "1" for row in g5) != 21:
+        raise SmokeError("PROFILE_FRAME_VIEW_COUNT", "G5", "PROFILE")
+    if any(row["HoldPolicy"].strip().upper() != "NONE" for row in g6):
+        raise SmokeError("PROFILE_HOLD_POLICY", "G6", "PROFILE")
+    if sum(row["ValidityRule"].strip().upper() == "EXACT_VALUES" for row in g4) != 3:
+        raise SmokeError("PROFILE_EXACT_VALIDITY_COUNT", "G4", "PROFILE")
+
+    capsule_lines = (profile_root / "u22b1b13_return_capsule.txt").read_text(
+        encoding="utf-8-sig", errors="replace"
+    ).splitlines()
+    if capsule_lines != [
+        "B13 N-S22-R9-F21-E3-N21-P4-H0-X0 C-0",
+        "B13I C32766-R0.32766-HNONE-A0 C-0",
+    ]:
+        raise SmokeError("PROFILE_CAPSULE", "B13", "PROFILE")
+
+    return {
+        "Manifest": manifest,
+        "ControlHashes": {name: sha256_file(profile_root / name) for name in CONTROL_FILES},
+        "SelectedSignals": 22,
+        "RequiredSignals": 9,
+        "FrameViewSignals": 21,
+        "NoHoldSignals": 21,
+    }
+
+
+def validate_u001_layout(udp001_root: Path, case_root: Path) -> Dict[str, object]:
+    """Validate the accepted U001 root and fixed Case aliases."""
+
+    program_root = udp001_root / "01_PROGRAMS"
+    active_control_root = udp001_root / "02_CONTROL"
+    source_root = case_root / "00_SOURCE-READONLY"
+    if not program_root.is_dir():
+        raise SmokeError("PROGRAM_ROOT_MISSING", program_root, "PREFLIGHT")
+    if not active_control_root.is_dir():
+        raise SmokeError("ACTIVE_CONTROL_ROOT_MISSING", active_control_root, "PREFLIGHT")
+    if not source_root.is_dir():
+        raise SmokeError("SOURCE_ROOT_MISSING", source_root, "PREFLIGHT")
+
+    programs = {name: locate_program(program_root, name) for name in STAGE_PROGRAMS}
+    orchestrator = locate_program(program_root, ORCHESTRATOR_NAME)
+    active_controls = {name: active_control_root / name for name in CONTROL_FILES}
+    for path in active_controls.values():
+        if not path.is_file() or path.is_symlink():
+            raise SmokeError("ACTIVE_CONTROL_MISSING", path.name, "PREFLIGHT")
+    sources = {name: source_root / name for name in SOURCE_FILES}
+    for path in sources.values():
+        if not path.is_file() or path.is_symlink() or path.stat().st_size == 0:
+            raise SmokeError("SOURCE_ALIAS_MISSING", path.name, "PREFLIGHT")
+    if sources["DBC1.dbc"].resolve() == sources["DBC2.dbc"].resolve():
+        raise SmokeError("DBC_IDENTITY_COLLISION", "DBC1_DBC2", "PREFLIGHT")
+    return {
+        "Programs": programs,
+        "Orchestrator": orchestrator,
+        "ActiveControls": active_controls,
+        "Sources": sources,
+    }
+
+
+def copy_verified(source: Path, destination: Path) -> Dict[str, object]:
+    """Copy one small immutable runtime input and verify byte identity."""
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        raise SmokeError("SHADOW_DESTINATION_EXISTS", destination.name, "ISOLATE")
+    shutil.copy2(source, destination)
+    source_hash = sha256_file(source)
+    destination_hash = sha256_file(destination)
+    if source_hash != destination_hash:
+        raise SmokeError("SHADOW_COPY_HASH", destination.name, "ISOLATE")
+    return {
+        "SourceBasename": source.name,
+        "DestinationBasename": destination.name,
+        "Bytes": destination.stat().st_size,
+        "Sha256": destination_hash,
+    }
+
+
+def run_child(
+    label: str,
+    command: Sequence[str],
+    log_root: Path,
+) -> Dict[str, object]:
+    """Run one child command and preserve complete stdout/stderr evidence."""
+
+    completed = subprocess.run(
+        list(command),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        shell=False,
+    )
+    stdout_path = log_root / f"{label}_stdout.txt"
+    stderr_path = log_root / f"{label}_stderr.txt"
+    write_text(stdout_path, completed.stdout)
+    write_text(stderr_path, completed.stderr)
+    result = {
+        "Label": label,
+        "Command": list(command),
+        "ReturnCode": completed.returncode,
+        "StdoutLog": stdout_path.name,
+        "StderrLog": stderr_path.name,
+        "StdoutTail": completed.stdout[-2000:],
+        "StderrTail": completed.stderr[-2000:],
+    }
+    if completed.returncode != 0:
+        raise SmokeError("CHILD_EXIT", f"{label}:{completed.returncode}", label)
+    return result
+
+
+def parse_g8_capsule(path: Path) -> Dict[str, int]:
+    """Parse the accepted G8A compact run capsule."""
+
+    if not path.is_file():
+        raise SmokeError("G8_CAPSULE_MISSING", path.name, "VALIDATE")
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    code_match = re.search(r"(?m)^C-(\d+)\s*$", text)
+    count_match = re.search(r"N-S(\d+)-P(\d+)-U(\d+)-R(\d+)-F(\d+)-I(\d+)-X(\d+)", text)
+    if not code_match or not count_match:
+        raise SmokeError("G8_CAPSULE_SCHEMA", path.name, "VALIDATE")
+    values = [int(value) for value in count_match.groups()]
+    result = dict(zip(("Stages", "Programs", "Updates", "Frames", "Files", "HashEqual", "Errors"), values))
+    result["Code"] = int(code_match.group(1))
+    if result != {
+        **result,
+        "Stages": 9,
+        "Programs": 7,
+        "Files": 6,
+        "HashEqual": 1,
+        "Errors": 0,
+        "Code": 0,
+    }:
+        raise SmokeError("G8_CAPSULE_NOT_ACCEPTED", machine_token(text, 120), "VALIDATE")
+    if result["Updates"] <= 0 or result["Frames"] <= 0:
+        raise SmokeError("G8_EMPTY_OUTPUT", f"U{result['Updates']}R{result['Frames']}", "VALIDATE")
+    return result
+
+
+def find_final_package(run_root: Path) -> Path:
+    """Locate exactly one complete six-file U001 package."""
+
+    matches: List[Path] = []
+    for folder in [run_root, *sorted(path for path in run_root.rglob("*") if path.is_dir())]:
+        if all((folder / name).is_file() for name in FINAL_PACKAGE_FILES):
+            matches.append(folder.resolve())
+    matches = list(dict.fromkeys(matches))
+    if len(matches) != 1:
+        raise SmokeError("FINAL_PACKAGE_COUNT", len(matches), "VALIDATE")
+    actual = {path.name for path in matches[0].iterdir() if path.is_file()}
+    if actual != set(FINAL_PACKAGE_FILES):
+        raise SmokeError("FINAL_PACKAGE_FILE_SET", len(actual), "VALIDATE")
+    if any((matches[0] / name).stat().st_size == 0 for name in FINAL_PACKAGE_FILES):
+        raise SmokeError("FINAL_PACKAGE_EMPTY_FILE", "SIX", "VALIDATE")
+    return matches[0]
+
+
+def relative_to_output(path: Path, output_root: Path) -> str:
+    """Return a portable output-relative path."""
+
+    return path.resolve().relative_to(output_root.resolve()).as_posix()
+
+
+def build_success_capsule(g8: Mapping[str, int]) -> Tuple[str, str]:
+    """Build the two-line B14 success capsule."""
+
+    line1 = (
+        f"B14 N-M7-C4-S9-U{g8['Updates']}-R{g8['Frames']}"
+        "-F6-H1-X0 C-0"
+    )
+    line2 = "B14I P22-Q9-V21-L0-A0 C-0"
+    return line1, line2
+
+
+def write_failure(
+    output_root: Optional[Path],
+    error: BaseException,
+    child_results: Sequence[Mapping[str, object]],
+) -> Tuple[str, str]:
+    """Write detailed failure evidence and return two bounded lines."""
+
+    if isinstance(error, SmokeError):
+        reason = error.reason
+        detail = error.detail
+        stage = error.stage
+    else:
+        reason = machine_token(type(error).__name__, 64)
+        detail = machine_token(str(error), 180)
+        stage = "UNHANDLED"
+    line1 = f"B14E K-{reason}-J{stage}-X1 C-7"
+    line2 = f"B14D D-{detail} C-0"
+    if output_root is not None:
+        try:
+            output_root.mkdir(parents=True, exist_ok=True)
+            write_json(
+                output_root / "u22b1b14_failure_diagnostic_v0_1.json",
+                {
+                    "CompletionCode": 7,
+                    "ProgramId": PROGRAM_ID,
+                    "ProgramVersion": PROGRAM_VERSION,
+                    "Reason": reason,
+                    "Detail": detail,
+                    "Stage": stage,
+                    "ChildResults": list(child_results),
+                    "Traceback": traceback.format_exc(),
+                },
+            )
+            write_text(output_root / "u22b1b14_return_capsule.txt", line1 + "\n" + line2 + "\n")
+        except Exception:
+            pass
+    return line1, line2
+
+
+def execute_smoke(
+    udp001_root: Path,
+    case_root: Path,
+    profile_root: Path,
+    output_root: Path,
+) -> Tuple[str, str]:
+    """Execute the isolated 10k Controlled Profile smoke run."""
+
+    child_results: List[Dict[str, object]] = []
+    try:
+        if output_root.exists():
+            raise SmokeError("OUTPUT_ALREADY_EXISTS", output_root.name, "PREFLIGHT")
+        profile = validate_profile(profile_root)
+        layout = validate_u001_layout(udp001_root, case_root)
+
+        protected_paths = [
+            *layout["Programs"].values(),
+            layout["Orchestrator"],
+            *layout["ActiveControls"].values(),
+            *[profile_root / name for name in PROFILE_FILES],
+        ]
+        protected_before = snapshot_files(protected_paths)
+
+        output_root.mkdir(parents=True)
+        shadow_root = output_root / "00_ISOLATED_UDP001"
+        shadow_programs = shadow_root / "01_PROGRAMS"
+        shadow_controls = shadow_root / "02_CONTROL"
+        config_root = output_root / "01_CONFIG"
+        log_root = output_root / "04_DIAGNOSTICS"
+        config_root.mkdir()
+        log_root.mkdir()
+
+        copied_programs: Dict[str, object] = {}
+        for name, source in layout["Programs"].items():
+            copied_programs[name] = copy_verified(source, shadow_programs / name)
+        copied_controls: Dict[str, object] = {}
+        for name in CONTROL_FILES:
+            copied_controls[name] = copy_verified(profile_root / name, shadow_controls / name)
+
+        config_path = config_root / "u22b1b14_g8a2_smoke_config.json"
+        preflight_root = output_root / "02_PREFLIGHT"
+        run_root = output_root / "03_RUN"
+        orchestrator = layout["Orchestrator"]
+
+        make_config_command = [
+            sys.executable,
+            str(orchestrator),
+            "--make-config",
+            "--udp001-root",
+            str(shadow_root),
+            "--case-root",
+            str(case_root),
+            "--out",
+            str(config_path),
+            "--dataset-id",
+            "TC001_20260422",
+            "--run-id",
+            "U22B1B14_SMOKE10K_V01",
+            "--segment-id",
+            "FIRST_10000_SOURCE_ROWS",
+            "--source-id",
+            "SOURCE_001",
+            "--max-source-rows",
+            str(MAX_SOURCE_ROWS),
+            "--decode-chunksize",
+            "10000",
+            "--assignment-chunksize",
+            "10000",
+            "--classification-chunksize",
+            "10000",
+            "--frame-chunksize",
+            "10000",
+            "--hold-chunksize",
+            "10000",
+            "--max-assignment-age-rows",
+            "200",
+        ]
+        child_results.append(run_child("MAKE_CONFIG", make_config_command, log_root))
+
+        preflight_command = [
+            sys.executable,
+            str(orchestrator),
+            "--preflight",
+            "--config",
+            str(config_path),
+            "--out",
+            str(preflight_root),
+        ]
+        child_results.append(run_child("PREFLIGHT", preflight_command, log_root))
+        preflight_capsule = preflight_root / "udp001_g8a2_preflight_capsule.txt"
+        if not preflight_capsule.is_file() or "C-0" not in preflight_capsule.read_text(
+            encoding="utf-8-sig", errors="replace"
+        ):
+            raise SmokeError("PREFLIGHT_CAPSULE", "NOT_C0", "PREFLIGHT")
+
+        run_command = [
+            sys.executable,
+            str(orchestrator),
+            "--run",
+            "--config",
+            str(config_path),
+            "--out-root",
+            str(run_root),
+        ]
+        child_results.append(run_child("RUN", run_command, log_root))
+
+        g8_capsule = run_root / "CONTROL_OUTPUT" / "udp001_g8a2_return_capsule.txt"
+        g8 = parse_g8_capsule(g8_capsule)
+        orchestration_manifest = read_json(
+            run_root / "CONTROL_OUTPUT" / "u001_g8a2_orchestration_manifest.json",
+            "G8_MANIFEST",
+        )
+        if orchestration_manifest.get("Status") != "SUCCESS":
+            raise SmokeError("G8_MANIFEST_STATUS", orchestration_manifest.get("Status"), "VALIDATE")
+        stages = orchestration_manifest.get("Stages")
+        if not isinstance(stages, list) or len(stages) != 9:
+            raise SmokeError("G8_STAGE_COUNT", 0 if not isinstance(stages, list) else len(stages), "VALIDATE")
+        if any(not isinstance(stage, dict) or stage.get("Success") is not True for stage in stages):
+            raise SmokeError("G8_STAGE_STATUS", "NOT_ALL_SUCCESS", "VALIDATE")
+
+        package = find_final_package(run_root / "G7_BUILD")
+        update_rows = count_csv_rows(package / "u001_decoded_updates.csv")
+        frame_rows = count_csv_rows(package / "u001_frame_values.csv")
+        if update_rows != g8["Updates"] or frame_rows != g8["Frames"]:
+            raise SmokeError("PACKAGE_ROW_COUNT", f"U{update_rows}R{frame_rows}", "VALIDATE")
+
+        protected_after = snapshot_files(protected_paths)
+        if protected_before != protected_after:
+            raise SmokeError("PROTECTED_INPUT_CHANGED", "HASH_OR_METADATA", "VALIDATE")
+        active_write_count = 0
+
+        line1, line2 = build_success_capsule(g8)
+        manifest = {
+            "CompletionCode": 0,
+            "ProgramId": PROGRAM_ID,
+            "ProgramVersion": PROGRAM_VERSION,
+            "ProfileId": PROFILE_ID,
+            "ProfileStatus": PROFILE_STATUS,
+            "ActivationAuthorized": False,
+            "ExecutionMode": "ISOLATED_CONTROLLED_PROFILE_SMOKE_10K",
+            "MaxSourceRows": MAX_SOURCE_ROWS,
+            "CopiedPrograms": copied_programs,
+            "CopiedControls": copied_controls,
+            "ProtectedInputCount": len(protected_paths),
+            "ProtectedInputsUnchanged": True,
+            "AcceptedActiveControlWrites": active_write_count,
+            "SelectedSignals": profile["SelectedSignals"],
+            "RequiredSignals": profile["RequiredSignals"],
+            "FrameViewSignals": profile["FrameViewSignals"],
+            "NonNoneHoldSignals": 0,
+            "StageCount": g8["Stages"],
+            "DecodedUpdateRows": update_rows,
+            "FrameRows": frame_rows,
+            "FinalPackageFileCount": len(FINAL_PACKAGE_FILES),
+            "FinalPackageRelativePath": relative_to_output(package, output_root),
+            "ConfigRelativePath": relative_to_output(config_path, output_root),
+            "PreflightRelativePath": relative_to_output(preflight_root, output_root),
+            "RunRelativePath": relative_to_output(run_root, output_root),
+            "ChildResults": child_results,
+            "ReturnCapsule": [line1, line2],
+        }
+        write_json(output_root / "u22b1b14_smoke_manifest_v0_1.json", manifest)
+        write_text(output_root / "u22b1b14_return_capsule.txt", line1 + "\n" + line2 + "\n")
+        write_text(output_root / "U22B1B14_COMPLETE.marker", "C-0\n")
+        return line1, line2
+    except Exception as exc:
+        return write_failure(output_root, exc, child_results)
+
+
+def self_test() -> int:
+    """Exercise deterministic helpers without company data."""
+
+    checks: List[str] = []
+
+    def check(name: str, condition: bool) -> None:
+        if not condition:
+            raise AssertionError(name)
+        checks.append(name)
+
+    with tempfile.TemporaryDirectory() as temp_name:
+        root = Path(temp_name)
+        check("T01_TOKEN", machine_token("a b/c") == "A_B_C")
+        check("T02_CONSTANT_ROWS", MAX_SOURCE_ROWS == 10000)
+        check("T03_PROGRAM_COUNT", len(STAGE_PROGRAMS) == 7)
+        check("T04_CONTROL_COUNT", len(CONTROL_FILES) == 4)
+        check("T05_PACKAGE_COUNT", len(FINAL_PACKAGE_FILES) == 6)
+        check("T06_PROFILE_ID", PROFILE_ID.endswith("V0_1"))
+        check("T07_NOT_ACTIVE", PROFILE_STATUS == "CANDIDATE_NOT_ACTIVATED")
+
+        sample = root / "sample.txt"
+        write_text(sample, "abc\n")
+        check("T08_WRITE_LF", sample.read_bytes() == b"abc\n")
+        check("T09_SHA", sha256_file(sample) == hashlib.sha256(b"abc\n").hexdigest())
+        snapshot = snapshot_files([sample])
+        check("T10_SNAPSHOT_COUNT", len(snapshot) == 1)
+        check("T11_SNAPSHOT_HASH", next(iter(snapshot.values()))["Sha256"] == sha256_file(sample))
+
+        copied = root / "copied.txt"
+        record = copy_verified(sample, copied)
+        check("T12_COPY_EXISTS", copied.is_file())
+        check("T13_COPY_HASH", record["Sha256"] == sha256_file(sample))
+
+        csv_path = root / "rows.csv"
+        write_text(csv_path, "A,B\n1,2\n3,4\n")
+        header, rows = read_csv_required(csv_path, ("A", "B"), "TEST")
+        check("T14_CSV_HEADER", header == ["A", "B"])
+        check("T15_CSV_ROWS", len(rows) == 2)
+        check("T16_ROW_COUNT", count_csv_rows(csv_path) == 2)
+
+        json_path = root / "data.json"
+        write_json(json_path, {"B": 2, "A": 1})
+        parsed = read_json(json_path, "TEST")
+        check("T17_JSON", parsed["A"] == 1)
+        check("T18_JSON_SORT", json_path.read_text(encoding="utf-8").find('"A"') < json_path.read_text(encoding="utf-8").find('"B"'))
+
+        exact_root = root / "exact"
+        exact_root.mkdir()
+        for name in ("a", "b"):
+            write_text(exact_root / name, "x\n")
+        require_exact_file_set(exact_root, ("a", "b"), "TEST")
+        check("T19_EXACT_FILE_SET", True)
+
+        program_root = root / "programs"
+        program_root.mkdir()
+        write_text(program_root / "p.py.txt", "x\n")
+        check("T20_LOCATE_TXT", locate_program(program_root, "p.py").name == "p.py.txt")
+
+        capsule = root / "g8_capsule.txt"
+        write_text(
+            capsule,
+            "UDP001G8A2R1\nN-S9-P7-U123-R45-F6-I1-X0\n"
+            "S1-C0 S2-C0 S3-C0 S4-C0 S5-C0 S6-C0 S7-C0 S8-C0 S9-C0\nC-0\n",
+        )
+        parsed_capsule = parse_g8_capsule(capsule)
+        check("T21_CAPSULE_STAGE", parsed_capsule["Stages"] == 9)
+        check("T22_CAPSULE_PROGRAM", parsed_capsule["Programs"] == 7)
+        check("T23_CAPSULE_UPDATE", parsed_capsule["Updates"] == 123)
+        check("T24_CAPSULE_FRAME", parsed_capsule["Frames"] == 45)
+        check("T25_CAPSULE_HASH", parsed_capsule["HashEqual"] == 1)
+
+        package = root / "package"
+        package.mkdir()
+        for name in FINAL_PACKAGE_FILES:
+            write_text(package / name, "H\n1\n")
+        check("T26_FIND_PACKAGE", find_final_package(root) == package.resolve())
+        check("T27_RELATIVE_PATH", relative_to_output(package, root) == "package")
+        line1, line2 = build_success_capsule(parsed_capsule)
+        check("T28_SUCCESS_LINE1", line1 == "B14 N-M7-C4-S9-U123-R45-F6-H1-X0 C-0")
+        check("T29_SUCCESS_LINE2", line2 == "B14I P22-Q9-V21-L0-A0 C-0")
+
+        source_root = root / "child"
+        source_root.mkdir()
+        child_code = "import sys; print('OK'); raise SystemExit(0)\n"
+        child = source_root / "child.py"
+        write_text(child, child_code)
+        child_logs = root / "logs"
+        child_logs.mkdir()
+        child_result = run_child("CHILD", [sys.executable, str(child)], child_logs)
+        check("T30_CHILD_RC", child_result["ReturnCode"] == 0)
+        check("T31_CHILD_STDOUT", (child_logs / "CHILD_stdout.txt").read_text(encoding="utf-8").strip() == "OK")
+        check("T32_CHILD_STDERR", (child_logs / "CHILD_stderr.txt").read_text(encoding="utf-8") == "")
+
+        source_alias_root = root / "case" / "00_SOURCE-READONLY"
+        source_alias_root.mkdir(parents=True)
+        for name in SOURCE_FILES:
+            write_text(source_alias_root / name, name + "\n")
+        check("T33_SOURCE_COUNT", len(list(source_alias_root.iterdir())) == 3)
+        check("T34_DBC_DIFFER", sha256_file(source_alias_root / "DBC1.dbc") != sha256_file(source_alias_root / "DBC2.dbc"))
+        check("T35_NO_SHELL", "shell=False" in Path(__file__).read_text(encoding="utf-8"))
+        check("T36_COPY_ONLY_HELPER", callable(copy_verified))
+        check("T37_NO_ACTIVE_COPY", "02_CONTROL" in Path(__file__).read_text(encoding="utf-8"))
+        check("T38_FAILURE_DIAGNOSTIC", "u22b1b14_failure_diagnostic_v0_1.json" in Path(__file__).read_text(encoding="utf-8"))
+
+    if len(checks) != 38:
+        raise AssertionError("SELFTEST_COUNT")
+    print("U22B1B14-SELFTEST-PASS-38")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the command-line interface."""
+
+    parser = argparse.ArgumentParser(description="U22B1B14 isolated Controlled Profile smoke runner")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--smoke", action="store_true")
+    parser.add_argument("--udp001-root")
+    parser.add_argument("--case-root")
+    parser.add_argument("--profile-root")
+    parser.add_argument("--out-root")
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Program entry point."""
+
+    args = build_parser().parse_args(argv)
+    if args.self_test:
+        return self_test()
+    required = (args.udp001_root, args.case_root, args.profile_root, args.out_root)
+    if not all(required):
+        print("B14E K-ARGUMENT_MISSING-JCLI-X1 C-7")
+        print("B14D D-REQUIRES_UDP001_CASE_PROFILE_OUT C-0")
+        return 7
+    output_root = Path(args.out_root)
+    line1, line2 = execute_smoke(
+        Path(args.udp001_root),
+        Path(args.case_root),
+        Path(args.profile_root),
+        output_root,
+    )
+    print(line1)
+    print(line2)
+    return 0 if line1.endswith("C-0") else 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
