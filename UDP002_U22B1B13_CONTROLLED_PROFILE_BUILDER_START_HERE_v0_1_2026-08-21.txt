@@ -1,0 +1,114 @@
+UDP002 U22B1B13 / U001 Controlled Profile Builder
+版本：v0.1
+日期：2026-08-21
+
+一、本步骤做什么
+
+B12已确认22个信号全部exact存在。B13把B12请求转换成一个新的、版本化的U001
+候选Controlled Profile：
+
+CAM13_RADAR_EVIDENCE_V0_1
+
+B13只生成并验证配置，不读取Raw CAN，不覆盖U-UDP001\02_CONTROL，不运行S1。
+
+二、为什么不直接使用705个变量
+
+当前Golden Run只需要验证：
+
+- Camera 1 / Camera 3目标重建；
+- Radar measurement availability；
+- 后续Camera-Radar候选生成。
+
+22个信号只位于3个Discovery Batch。建立受控Profile可以让后续U001重跑更窄、
+更快、语义更明确，同时保留来源hash和可追溯性。
+
+三、B13明确写入的工程规则
+
+1. Camera 0x221/0x251 Distance：327.66为无效默认值。
+2. Radar 0x380 DistanceToObject：0和327.66为无效默认值。
+3. 其他信号不猜失效默认值，ValidityRule=NONE。
+4. 21个Frame View信号全部HoldPolicy=NONE。
+5. FrameCount不进入Frame View。
+6. SwitchingFlag按一帧内ANY_TRUE聚合；其他状态使用LAST_UPDATE。
+7. Radar不是ground truth。
+8. 输出Profile状态是CANDIDATE_NOT_ACTIVATED。
+
+四、Required Working Set
+
+把以下两个新文件直接放在：
+
+U-UDP001\04_TEMP
+
+1. u001_u22b1b13_controlled_profile_builder_v0_1.py.txt
+2. UDP002_U22B1B13_CONTROLLED_PROFILE_BUILDER_START_HERE_v0_1_2026-08-21.txt
+
+必须保留B12输出目录：
+
+U-UDP002\03_CASES\TC001_20260422\U22B1B12_CAMERA_EVIDENCE_AUDIT_V01
+
+五、CMD自测
+
+从C-CODE根目录运行：
+
+python U-UDP001\04_TEMP\u001_u22b1b13_controlled_profile_builder_v0_1.py.txt --self-test
+
+成功：
+
+B13-ST N-T36-X0 C-0
+
+自测通过不需要回传。
+
+六、正式构建
+
+从C-CODE根目录运行以下一条命令：
+
+python U-UDP001\04_TEMP\u001_u22b1b13_controlled_profile_builder_v0_1.py.txt --build --b12-root U-UDP002\03_CASES\TC001_20260422\U22B1B12_CAMERA_EVIDENCE_AUDIT_V01 --u001-case-root U-UDP001\03_CASES\TC001_20260422 --out U-UDP001\03_CASES\TC001_20260422\01_CONFIG\CONTROLLED_PROFILES\CAM13_RADAR_EVIDENCE_V0_1
+
+构建过程自动做独立输出验证，不需要再运行第二条validate命令。
+
+七、只回传两行
+
+B13 ...
+B13I ...
+
+主行含义：
+
+- S：selected signal数；
+- R：required signal数；
+- F：Frame View signal数；
+- E：EXACT_VALUES validity规则数；
+- N：HoldPolicy=NONE的signal数；
+- P：U001 control CSV数量；
+- H：hash failure数；
+- X：其他blocking error数。
+
+B13I：
+
+- C32766：Camera Distance sentinel为327.66；
+- R0.32766：Radar Distance sentinel为0和327.66；
+- HNONE：不做跨帧hold；
+- A0：Profile尚未激活。
+
+理想结果：
+
+B13 N-S22-R9-F21-E3-N21-P4-H0-X0 C-0
+B13I C32766-R0.32766-HNONE-A0 C-0
+
+八、失败处理
+
+若返回：
+
+B13E ... C-7
+
+只回传该行。完整诊断自动写入：
+
+U-UDP001\04_TEMP\u22b1b13_failure_diagnostic_v0_1.json
+
+不要让Office 365 Copilot修改程序。
+
+九、下一步自动衔接
+
+B13成功后，B14会创建隔离的Controlled Profile运行入口，先做10k smoke。
+不会覆盖现有U001正式Profile，也不会一开始直接跑完整800MB数据。
+
+END
