@@ -1,0 +1,75 @@
+@echo off
+setlocal EnableExtensions
+
+rem U22 B1-B3 temporary-file archival helper.
+rem This script moves matching top-level temporary files into one dated archive.
+rem It never deletes files and never touches 01_PROGRAMS, 02_CONFIG, 03_CASES or 07_OUTPUT.
+
+set "WORKSPACE=%~1"
+if "%WORKSPACE%"=="" set "WORKSPACE=U-UDP002"
+
+set "TEMP_ROOT=%WORKSPACE%\04_TEMP"
+set "ARCHIVE_ROOT=%TEMP_ROOT%\A-Archive\U22B3_CLOSE_20260821"
+set "MANIFEST=%ARCHIVE_ROOT%\MOVED_ITEMS.txt"
+set "MOVED_COUNT=0"
+
+if not exist "%WORKSPACE%\01_PROGRAMS" goto :workspace_error
+if not exist "%WORKSPACE%\02_CONFIG" goto :workspace_error
+if not exist "%WORKSPACE%\07_OUTPUT" goto :workspace_error
+if not exist "%TEMP_ROOT%" goto :temp_error
+
+if not exist "%ARCHIVE_ROOT%" mkdir "%ARCHIVE_ROOT%"
+if errorlevel 1 goto :archive_error
+
+> "%MANIFEST%" echo U22B3 node-close temporary archive
+>> "%MANIFEST%" echo Workspace=%WORKSPACE%
+>> "%MANIFEST%" echo Archive=%ARCHIVE_ROOT%
+>> "%MANIFEST%" echo.
+
+call :move_pattern "*U22B1*"
+call :move_pattern "*U22B2*"
+call :move_pattern "*U22B3*"
+
+>> "%MANIFEST%" echo.
+>> "%MANIFEST%" echo MovedCount=%MOVED_COUNT%
+
+echo U22B3CL N-M%MOVED_COUNT%-A1-K3-X0 C-0
+exit /b 0
+
+:move_pattern
+set "PATTERN=%~1"
+
+for %%F in ("%TEMP_ROOT%\%PATTERN%") do (
+    if exist "%%~fF" (
+        if not exist "%%~fF\" call :move_one "%%~fF"
+    )
+)
+
+for /d %%D in ("%TEMP_ROOT%\%PATTERN%") do (
+    if exist "%%~fD\" call :move_one "%%~fD"
+)
+exit /b 0
+
+:move_one
+set "SOURCE_ITEM=%~1"
+>> "%MANIFEST%" echo %SOURCE_ITEM%
+move /Y "%SOURCE_ITEM%" "%ARCHIVE_ROOT%\" >nul
+if errorlevel 1 goto :move_error
+set /a MOVED_COUNT+=1
+exit /b 0
+
+:workspace_error
+echo U22B3CL N-M0-A0-K0-X1 C-7 K-WORKSPACE_STRUCTURE
+exit /b 7
+
+:temp_error
+echo U22B3CL N-M0-A0-K0-X1 C-7 K-TEMP_ROOT
+exit /b 7
+
+:archive_error
+echo U22B3CL N-M0-A0-K0-X1 C-7 K-ARCHIVE_CREATE
+exit /b 7
+
+:move_error
+echo U22B3CL N-M%MOVED_COUNT%-A0-K0-X1 C-7 K-MOVE_FAILED
+exit /b 7
