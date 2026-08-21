@@ -1,0 +1,52 @@
+UDP002 U22B2F 正式执行指南 v0.1
+日期：2026-08-21
+
+当前状态
+--------
+B2FP已通过：
+B2FP N-M5-Q0-R0-D2-C7400-E41480.41750-X0 C-0
+
+这表示五个Module的Context-Aware Plan已经成功建立。
+
+
+第一步：检查执行程序存在
+--------------------------
+在C-CODE目录使用CMD：
+
+if not exist U-UDP002\04_TEMP\u002_u22b2f_context_aware_run_and_audit_v0_1.py.txt echo MISSING-B2F-RUNNER
+
+正常情况下不应输出MISSING。
+
+
+第二步：执行正式五Module Run并自动验收
+--------------------------------------
+在C-CODE目录使用CMD：
+
+python U-UDP002\04_TEMP\u002_u22b2f_context_aware_run_and_audit_v0_1.py.txt --execute-and-audit --workspace-root U-UDP002
+
+本次会使用FrameCount 7400开始的Context恢复Camera内部状态，但只输出
+FrameCount 41480到41750的271帧Evaluation结果。
+
+
+成功格式
+--------
+B2F N-M5-A5-R271-CV数字-W数字-V数字-L数字-F数字-I数字-N数字-O数字-P数字-X0 C-0
+
+最低验收要求：
+- M=5；
+- A=5；
+- R=271；
+- CV大于0；
+- W大于0；
+- F大于0；
+- O等于F；
+- 最终为X0 C-0。
+
+
+只需回传
+--------
+成功时：完整B2F一行。
+
+失败时：完整B2FE一行；如果同时出现B2FD，也一并回传。
+
+不要修改Module、Plan、resolved_run_plan.json或任何数学参数。
