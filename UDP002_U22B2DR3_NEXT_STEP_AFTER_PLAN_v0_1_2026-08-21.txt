@@ -1,0 +1,34 @@
+UDP002 U22B2DR3 NEXT STEP AFTER PLAN
+Date: 2026-08-21
+Environment: Windows CMD
+
+Confirmed prerequisite:
+
+    B2DR3P N-Q0-M5-N3-KINTEGER_RADAR_DISTANCE_MAX_AGE-R0-X0 C-0
+
+1. Enter C-CODE root
+
+    cd /d C:\Users\%USERNAME%\C-CODE
+
+2. Check the accepted new Plan and executor
+
+    if exist U-UDP002\07_OUTPUT\U22B2DR3_TC001_F41480_41750_V01\00_CONFIG\resolved_run_plan.json (echo B2DR3-PLAN-OK) else (echo B2DR3-PLAN-MISSING)
+    if exist U-UDP002\04_TEMP\u002_u22b2dr3_global_no_hold_run_and_audit_v0_1.py.txt (echo B2DR3-EXECUTOR-OK) else (echo B2DR3-EXECUTOR-MISSING)
+
+If either line reports MISSING, stop.
+
+3. Execute and audit the five-Module Run
+
+    python U-UDP002\04_TEMP\u002_u22b2dr3_global_no_hold_run_and_audit_v0_1.py.txt --execute-and-audit --workspace-root U-UDP002
+
+4. Return
+
+Success: return the complete B2DR3 ... C-0 line.
+
+Failure: return both lines:
+
+    B2DR3E ... C-7
+    B2DR3D ... C-0
+
+Do not edit JSON, rerun an old failed Run, or clean 04_TEMP before acceptance.
+
