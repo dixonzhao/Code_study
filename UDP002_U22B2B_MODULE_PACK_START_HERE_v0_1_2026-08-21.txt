@@ -1,0 +1,73 @@
+UDP002 U22B2B — S1/S2/S3 Module Pack
+版本：0.1
+日期：2026-08-21
+
+目的
+====
+
+B2A 已验证纯计算内核。B2B 只把相同逻辑安装为三个解耦 Module：
+
+S1  CameraRadar.S1.RadarMeasurementValidity
+    读取 U001 Radar Distance / DetectionFlag，输出 RADAR_VALIDITY。
+
+S2  CameraRadar.S2.ComparisonPopulation
+    合并 CAMERA_TARGET_RECONSTRUCTION 与 RADAR_VALIDITY，输出三类总体：
+    FORMAL_ELIGIBLE / INVESTIGATION_ONLY / INELIGIBLE。
+
+S3  CameraRadar.S3.SignedDiscrepancy
+    仅在 FORMAL_ELIGIBLE 计算：RadarDistance - CanonicalCameraDistance。
+
+本节点不运行 TC001，不修改 U001，不做 baseline，也不把 Radar 称为真值。
+
+所需文件
+========
+
+把下面文件下载到：
+
+C-CODE\U-UDP002\04_TEMP
+
+u002_u22b2b_s1_s2_s3_module_pack_installer_v0_1.py.txt
+
+Step 1 — Self-test
+==================
+
+在 C-CODE 使用 CMD：
+
+python U-UDP002\04_TEMP\u002_u22b2b_s1_s2_s3_module_pack_installer_v0_1.py.txt --self-test
+
+成功：
+
+B2B-ST N-M3-F15-T36-X0 C-0
+
+通过时不用回传。
+
+Step 2 — 安装三个 Module
+=========================
+
+python U-UDP002\04_TEMP\u002_u22b2b_s1_s2_s3_module_pack_installer_v0_1.py.txt --install-module-pack --workspace-root U-UDP002
+
+首次成功预期：
+
+B2B N-M3-F15-N3-R0-X0 C-0
+
+如果完全相同的包已经存在，则 N/R 数量可以不同，但必须：
+
+M3-F15
+N + R = 3
+X0 C-0
+
+只回传这一行 B2B 结果。
+
+下一步
+======
+
+B2B 通过后，B2C 会刷新 Module Registry / Qualification，并构建短范围 TC001
+Module Plan：
+
+S0 Intake
+-> S1 Camera reconstruction
+-> S1 Radar validity
+-> S2 comparison population
+-> S3 signed discrepancy
+
+先跑短范围联动，不直接全量执行。
