@@ -1,0 +1,67 @@
+UDP002 04_TEMP Cleanup after B2C
+版本：0.1
+日期：2026-08-21
+
+目的
+====
+
+B2C 已完成。现在把已经关闭的 U20/U21/U22A/U22B1 与 B2A/B2B/B2C/B2CR1
+临时传输文件、START_HERE 和测试目录移出 04_TEMP，避免下一步误用旧版本。
+
+安全边界
+========
+
+- 只移动，不删除；
+- 只处理名称属于已关闭节点的项目；
+- 未识别文件原地保留；
+- 不接触 01_PROGRAMS、02_CONFIG、03_CASES、07_OUTPUT；
+- 不移动本清理程序和本说明；
+- 目标存在时 fail-close，不覆盖；
+- 输出 cleanup_manifest.csv，普通文件记录 SHA-256。
+
+归档位置
+========
+
+U-UDP002\A-Archive\04_TEMP_CLOSED_NODES\U22B2C_20260821
+
+Step 1 — 下载
+===============
+
+把下面两个文件下载到：
+
+C-CODE\U-UDP002\04_TEMP
+
+udp002_temp_cleanup_after_b2c_v0_1.py.txt
+UDP002_TEMP_CLEANUP_AFTER_B2C_START_HERE_v0_1_2026-08-21.txt
+
+Step 2 — Self-test
+==================
+
+在 C-CODE 使用 CMD：
+
+python U-UDP002\04_TEMP\udp002_temp_cleanup_after_b2c_v0_1.py.txt --self-test
+
+成功：
+
+TCLB2C-ST N-T15-X0 C-0
+
+通过时不用回传。
+
+Step 3 — 执行归档
+=================
+
+python U-UDP002\04_TEMP\udp002_temp_cleanup_after_b2c_v0_1.py.txt --apply --workspace-root U-UDP002
+
+成功时只回传：
+
+TCLB2C N-M?-F?-D?-K?-B?-X0 C-0
+
+其中：
+
+M = 移动项目总数
+F = 文件数
+D = 目录数
+K = 清单记录数
+B = 总字节数
+
+清理程序和本 START_HERE 会暂时留在 04_TEMP；下一个节点完成时再一并收入归档。

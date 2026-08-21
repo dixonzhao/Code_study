@@ -1,0 +1,244 @@
+#!/usr/bin/env python3
+"""Archive only recognized closed-node material from UDP002 04_TEMP."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import os
+from pathlib import Path
+import re
+import shutil
+import sys
+import tempfile
+from typing import Dict, Iterable, List, Optional, Sequence
+
+
+PROGRAM_ID = "UDP002-TEMP-CLEANUP-AFTER-B2C"
+PROGRAM_VERSION = "0.1"
+ARCHIVE_NAME = "U22B2C_20260821"
+SELF_NAMES = {
+    "udp002_temp_cleanup_after_b2c_v0_1.py.txt",
+    "UDP002_TEMP_CLEANUP_AFTER_B2C_START_HERE_v0_1_2026-08-21.txt",
+}
+
+# These prefixes belong only to completed U002 build or B1/B2 transfer nodes.
+# Unknown material is deliberately left in 04_TEMP.
+CLOSED_PREFIXES = (
+    "u20",
+    "u21",
+    "u22a",
+    "u22b1",
+    "u22b2a",
+    "u22b2b",
+    "u22b2c",
+    "u22b2cr1",
+    "udp002_u20",
+    "udp002_u21",
+    "udp002_u22a",
+    "udp002_u22b1",
+    "udp002_u22b2a",
+    "udp002_u22b2b",
+    "udp002_u22b2c",
+    "udp002_u22b2cr1",
+    "u002_u20",
+    "u002_u21",
+    "u002_u22a",
+    "u002_u22b1",
+    "u002_u22b2a",
+    "u002_u22b2b",
+    "u002_u22b2c",
+    "u002_u22b2cr1",
+    "u001_u22b1",
+    "b1",
+    "b2a",
+    "b2b",
+    "b2c",
+    "b2cr1",
+)
+
+
+class CleanupError(RuntimeError):
+    """Represent one fail-closed cleanup error."""
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def require_workspace(path: Path) -> Path:
+    root = path.resolve()
+    if not root.is_dir() or root.name != "U-UDP002":
+        raise CleanupError("WORKSPACE_ROOT")
+    temporary = root / "04_TEMP"
+    if not temporary.is_dir() or temporary.is_symlink():
+        raise CleanupError("TEMP_ROOT")
+    return root
+
+
+def is_closed_node_item(path: Path) -> bool:
+    name = path.name
+    lowered = name.casefold()
+    if name in SELF_NAMES or lowered in {value.casefold() for value in SELF_NAMES}:
+        return False
+    if lowered in {"a-archive", "archive", "__pycache__"}:
+        return False
+    return lowered.startswith(CLOSED_PREFIXES)
+
+
+def selected_items(temp_root: Path) -> List[Path]:
+    return sorted(
+        [path for path in temp_root.iterdir() if is_closed_node_item(path)],
+        key=lambda path: path.name.casefold(),
+    )
+
+
+def directory_size(path: Path) -> int:
+    total = 0
+    for member in path.rglob("*"):
+        if member.is_symlink():
+            raise CleanupError("SYMLINK_" + member.name)
+        if member.is_file():
+            total += member.stat().st_size
+    return total
+
+
+def item_record(path: Path, destination: Path) -> Dict[str, object]:
+    if path.is_symlink():
+        raise CleanupError("SYMLINK_" + path.name)
+    if path.is_file():
+        return {
+            "SourceName": path.name,
+            "ItemType": "FILE",
+            "ByteSize": path.stat().st_size,
+            "Sha256": sha256_file(path),
+            "ArchiveRelativePath": destination.name,
+        }
+    if path.is_dir():
+        return {
+            "SourceName": path.name,
+            "ItemType": "DIRECTORY",
+            "ByteSize": directory_size(path),
+            "Sha256": "NA",
+            "ArchiveRelativePath": destination.name,
+        }
+    raise CleanupError("ITEM_TYPE_" + path.name)
+
+
+def write_manifest(path: Path, records: Iterable[Dict[str, object]]) -> None:
+    fields = ["SourceName", "ItemType", "ByteSize", "Sha256", "ArchiveRelativePath"]
+    temporary = path.with_name(path.name + ".writing")
+    with temporary.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(records)
+    os.replace(temporary, path)
+
+
+def apply_cleanup(workspace: Path) -> str:
+    temp_root = workspace / "04_TEMP"
+    archive_root = (
+        workspace / "A-Archive" / "04_TEMP_CLOSED_NODES" / ARCHIVE_NAME
+    )
+    archive_root.mkdir(parents=True, exist_ok=True)
+    manifest_path = archive_root / "cleanup_manifest.csv"
+    if manifest_path.exists():
+        raise CleanupError("ARCHIVE_ALREADY_COMPLETED")
+    items = selected_items(temp_root)
+    if not items:
+        raise CleanupError("NO_MATCHED_ITEMS")
+    records: List[Dict[str, object]] = []
+    file_count = directory_count = 0
+    total_bytes = 0
+    for source in items:
+        destination = archive_root / source.name
+        if destination.exists():
+            raise CleanupError("DESTINATION_EXISTS_" + source.name)
+        record = item_record(source, destination)
+        records.append(record)
+        file_count += record["ItemType"] == "FILE"
+        directory_count += record["ItemType"] == "DIRECTORY"
+        total_bytes += int(record["ByteSize"])
+    for source in items:
+        shutil.move(str(source), str(archive_root / source.name))
+    write_manifest(manifest_path, records)
+    remaining_matches = selected_items(temp_root)
+    if remaining_matches:
+        raise CleanupError("MATCHED_ITEMS_REMAIN")
+    return (
+        f"TCLB2C N-M{len(items)}-F{file_count}-D{directory_count}"
+        f"-K{len(records)}-B{total_bytes}-X0 C-0"
+    )
+
+
+def self_test() -> str:
+    checks = []
+
+    def ck(value: bool) -> None:
+        if not value:
+            raise AssertionError("SELFTEST")
+        checks.append(True)
+
+    ck(PROGRAM_ID.startswith("UDP002"))
+    ck(PROGRAM_VERSION == "0.1")
+    ck(ARCHIVE_NAME.startswith("U22B2C"))
+    with tempfile.TemporaryDirectory() as temporary:
+        workspace = Path(temporary) / "U-UDP002"
+        temp_root = workspace / "04_TEMP"
+        temp_root.mkdir(parents=True)
+        closed_file = temp_root / "U22B1_old.txt"
+        closed_file.write_text("old", encoding="utf-8")
+        closed_dir = temp_root / "B2A_DEMO"
+        closed_dir.mkdir()
+        (closed_dir / "result.csv").write_text("a\n1\n", encoding="utf-8")
+        unknown = temp_root / "USER_NOTE.txt"
+        unknown.write_text("keep", encoding="utf-8")
+        self_file = temp_root / "udp002_temp_cleanup_after_b2c_v0_1.py.txt"
+        self_file.write_text("keep", encoding="utf-8")
+        ck(is_closed_node_item(closed_file))
+        ck(is_closed_node_item(closed_dir))
+        ck(not is_closed_node_item(unknown))
+        ck(not is_closed_node_item(self_file))
+        ck(len(selected_items(temp_root)) == 2)
+        capsule = apply_cleanup(workspace)
+        ck(capsule.startswith("TCLB2C N-M2-F1-D1-K2-B"))
+        archive = workspace / "A-Archive/04_TEMP_CLOSED_NODES" / ARCHIVE_NAME
+        ck((archive / closed_file.name).is_file())
+        ck((archive / closed_dir.name / "result.csv").is_file())
+        ck((archive / "cleanup_manifest.csv").is_file())
+        ck(unknown.is_file())
+        ck(self_file.is_file())
+        ck(not selected_items(temp_root))
+    if len(checks) != 15:
+        raise AssertionError("SELFTEST_COUNT")
+    return "TCLB2C-ST N-T15-X0 C-0"
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--apply", action="store_true")
+    parser.add_argument("--workspace-root")
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        if args.self_test:
+            print(self_test())
+            return 0
+        if not args.workspace_root:
+            raise CleanupError("WORKSPACE_ROOT_REQUIRED")
+        print(apply_cleanup(require_workspace(Path(args.workspace_root))))
+        return 0
+    except Exception as exc:
+        reason = re.sub(r"[^A-Z0-9_]+", "_", str(exc).upper()).strip("_")[:100]
+        print("TCLB2CE K-" + (reason or exc.__class__.__name__.upper()) + "-X1 C-7")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
