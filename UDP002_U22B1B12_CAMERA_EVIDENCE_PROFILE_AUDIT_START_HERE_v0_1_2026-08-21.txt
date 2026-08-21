@@ -1,0 +1,136 @@
+UDP002 U22B1B12 Camera Evidence Profile Audit
+版本：v0.1
+日期：2026-08-21
+
+一、为什么现在做B12
+
+B11已经证明：
+
+- 数值非空、非327.66且fresh，只能说明“有可用数值”；
+- 它不能证明Camera当前跟踪的是正确物理目标；
+- timeout只能调节恢复时机，不能修复错误目标重捕获。
+
+因此B12不再继续调timeout。它先从U001完整AUTO_DISCOVERY metadata中，自动核对
+CAM1（0x221）与CAM3（0x251）是否具备成对的几何、运动、状态和完整性证据。
+
+B12只读metadata，不读Raw CAN payload，不修改U001，不修改正式S1。
+
+二、本次审计的22个信号身份
+
+Camera 1 / Camera 3，各检查以下9类：
+
+D = Distance
+L = LateralPosition
+R = RelativeSpeed
+O = ObjectDetectionType
+T = ObjectType
+S = SwitchingFlag
+M = MessageCounter
+Y = LateralSpeed
+W = Width
+
+另检查：
+
+- Radar 0x380：DistanceToObject、PrecedingVehicleDetectionFlag、RelativeSpeed；
+- Frame key：CH2 / 0x620 / FrameCount。
+
+其中Distance、LateralPosition、RelativeSpeed是下一步目标语义判定的核心候选。
+Object/Flag用于辅助；MessageCounter只用于完整性，不直接判断目标；Radar不是ground truth。
+
+三、Required Working Set
+
+把以下两个文件直接放在：
+
+U-UDP002\04_TEMP
+
+1. u002_u22b1b12_camera_evidence_profile_audit_v0_1.py.txt
+2. UDP002_U22B1B12_CAMERA_EVIDENCE_PROFILE_AUDIT_START_HERE_v0_1_2026-08-21.txt
+
+U001 Case中必须保留完整AUTO_DISCOVERY生成的：
+
+- u001_discovery_signal_inventory.csv
+- u001_discovery_batch_map.csv
+- u001_discovery_profile_manifest.json
+
+程序会递归查找，不需要手工找这三个文件。
+
+四、CMD自测
+
+从C-CODE根目录运行：
+
+python U-UDP002\04_TEMP\u002_u22b1b12_camera_evidence_profile_audit_v0_1.py.txt --self-test
+
+成功：
+
+B12-ST N-T32-X0 C-0
+
+Self-test通过不需要回传。
+
+五、正式运行
+
+从C-CODE根目录运行：
+
+python U-UDP002\04_TEMP\u002_u22b1b12_camera_evidence_profile_audit_v0_1.py.txt --audit --u001-case-root U-UDP001\03_CASES\TC001_20260422 --out U-UDP002\03_CASES\TC001_20260422\U22B1B12_CAMERA_EVIDENCE_AUDIT_V01
+
+本步骤只扫描CSV/JSON metadata，正常情况下不应像全量decode一样运行几十分钟。
+
+六、只回传两行
+
+B12 ...
+B12P ...
+
+不要手敲CSV内容。
+
+B12主行：
+
+- P：找到的物理Profile副本数；
+- D：内容相同的Profile副本数；
+- C：Discovery catalog行数；
+- E：eligible signal数；
+- M：22个请求身份中的exact match数；
+- B：这些匹配分布在多少个Discovery Batch；
+- F：只有模糊候选的数量；
+- A：exact identity歧义数量；
+- X：完全缺失数量。
+
+B12P：
+
+- C后9位依次代表 D/L/R/O/T/S/M/Y/W；
+- 每位2表示CAM1与CAM3都exact，1表示只有一边exact，0表示两边缺失，3表示歧义；
+- R后三位依次代表Radar Distance/DetectionFlag/RelativeSpeed，1表示exact；
+- F1表示FrameCount exact。
+
+理想结果：
+
+B12P C-222222222-R111-F1 C-0
+
+七、生成文件
+
+输出目录中生成：
+
+1. u22b1b12_camera_evidence_profile_audit_v0_1.csv
+2. u22b1b12_controlled_profile_request_v0_1.csv
+3. u22b1b12_audit_manifest_v0_1.json
+4. u22b1b12_return_capsule.txt
+
+第二个CSV只是下一节点B13的Profile请求，不是已批准的U001 control文件。
+
+八、失败处理
+
+若返回：
+
+B12E ... C-7
+
+只回传这一行。详细诊断自动写入：
+
+U-UDP002\04_TEMP\u22b1b12_failure_diagnostic_v0_1.json
+
+不要让Office 365 Copilot修改程序。
+
+九、下一步自动衔接
+
+- 若核心Camera pair均exact：B13生成并验证新的versioned Controlled Profile；
+- 若只有命名差异：根据audit CSV中的Suggestions做一次明确映射；
+- 若真实缺失：保留S1 v0.1，不靠猜测补字段，重新设计最低证据集。
+
+END
