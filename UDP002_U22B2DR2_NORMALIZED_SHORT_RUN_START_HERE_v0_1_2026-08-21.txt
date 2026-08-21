@@ -1,0 +1,106 @@
+UDP002 U22B2DR2 规范化配置新 Run：CMD 操作说明
+版本：v0.1
+日期：2026-08-21
+
+一、目的
+
+B2DR1 已确认：旧 B2C Run 的 Camera S1 在读取配置时失败，因为
+CAMERA_1_DISTANCE.MaxAgeFrames 为空，而运行模块要求非负整数。
+
+B1B4 已经批准以下唯一规范化规则：
+
+    HoldPolicy = NONE 且 MaxAgeFrames 为空
+    -> MaxAgeFrames = 0
+
+工程含义：不允许跨 FrameCount 保持旧值；只有当前帧更新的值可参与选择。
+
+本节点不修改任何 Module 代码或数学逻辑。它只使用 B1B4 已验收配置，创建全新
+RunId，并依次完成 Plan、五模块执行和独立审计。旧 FAILED Run 保持只读。
+
+二、下载位置
+
+把以下两个文件直接放入：
+
+    C-CODE\U-UDP002\04_TEMP
+
+文件：
+
+    u002_u22b2dr2_normalized_short_plan_v0_1.py.txt
+    u002_u22b2dr2_normalized_run_execution_and_audit_v0_1.py.txt
+
+不要改文件名，不要移动到 04_TEMP 的子文件夹。
+
+三、打开 CMD 并进入根目录
+
+    cd /d C:\Users\%USERNAME%\C-CODE
+
+如果实际 C-CODE 不在这里，只修改上面路径；后续命令保持不变。
+
+四、输入与证据目录检查
+
+先确认 U-UDP002：
+
+    if exist U-UDP002\01_PROGRAMS\core (echo CORE-OK) else (echo CORE-MISSING)
+    if exist U-UDP002\02_CONFIG\module_configs\u22b1b4_camera_target_reconstruction_tc001_v0_2.json (echo B1B4-CONFIG-OK) else (echo B1B4-CONFIG-MISSING)
+    if exist U-UDP002\02_CONFIG\binding_profiles\TC001_camera_radar_base_provisional_v0_2.json (echo B1B4-PROFILE-OK) else (echo B1B4-PROFILE-MISSING)
+    if exist U-UDP002\07_OUTPUT\U22B2C_TC001_F41480_41750_V01 (echo OLD-FAILED-EVIDENCE-OK) else (echo OLD-FAILED-EVIDENCE-MISSING)
+    if exist U-UDP002\07_OUTPUT (echo OUTPUT-ROOT-OK) else (echo OUTPUT-ROOT-MISSING)
+
+五、Self-test
+
+    python U-UDP002\04_TEMP\u002_u22b2dr2_normalized_short_plan_v0_1.py.txt --self-test
+    python U-UDP002\04_TEMP\u002_u22b2dr2_normalized_run_execution_and_audit_v0_1.py.txt --self-test
+
+应分别看到：
+
+    B2DR2PST N-T29-X0 C-0
+    B2DR2ST N-T29-X0 C-0
+
+六、创建新 Run Plan
+
+    python U-UDP002\04_TEMP\u002_u22b2dr2_normalized_short_plan_v0_1.py.txt --qualify-and-prepare --workspace-root U-UDP002
+
+成功时回传完整一行：
+
+    B2DR2P ... C-0
+
+失败时回传：
+
+    B2DR2PE ... C-7
+
+出现 C-7 立即停止，不运行下一步。
+
+七、确认新输出目录
+
+    if exist U-UDP002\07_OUTPUT\U22B2DR2_TC001_F41480_41750_V01\00_CONFIG\resolved_run_plan.json (echo NEW-PLAN-OK) else (echo NEW-PLAN-MISSING)
+
+八、执行五模块并审计
+
+只有第六、七步成功后才运行：
+
+    python U-UDP002\04_TEMP\u002_u22b2dr2_normalized_run_execution_and_audit_v0_1.py.txt --execute-and-audit --workspace-root U-UDP002
+
+成功时只回传：
+
+    B2DR2 ... C-0
+
+失败时回传两行：
+
+    B2DR2E ... C-7
+    B2DR2D ... C-0
+
+九、成功标准
+
+1. Plan capsule 为 C-0。
+2. 新 RunId 为 U22B2DR2_TC001_F41480_41750_V01。
+3. Executor 完成 S0、Camera S1、Radar S1、S2、S3 共五个 Module。
+4. 五类 Artifact 全部存在并通过 hash、FrameCount、lineage 审计。
+5. 正式结果严格满足 RadarDistance - CanonicalCameraDistance。
+6. 旧 U22B2C FAILED Run 的控制证据 hash 前后完全一致。
+
+十、停止条件
+
+- 任意 C-7：立即停止，不人工改 JSON，不复活旧 Run。
+- 不删除旧 B2C 输出。
+- 不修改 Camera/Radar/S2/S3 Module。
+- B2DR2 通过前不清理 04_TEMP；通过后由项目端发布节点清理器。
