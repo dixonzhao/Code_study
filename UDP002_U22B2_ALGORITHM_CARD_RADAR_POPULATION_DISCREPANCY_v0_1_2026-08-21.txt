@@ -1,0 +1,215 @@
+UDP002 ALGORITHM CARD
+
+AlgorithmId:
+CameraRadar.B2.RadarPopulationAndSignedDiscrepancy
+
+AlgorithmVersion:
+0.1
+
+Status:
+PROVISIONAL GOLDEN-RUN BASELINE
+
+Owner:
+Zhao Zhili
+
+Date:
+2026-08-21
+
+1. Purpose
+
+Convert governed U001 Radar observations and the accepted S1 canonical Camera
+distance into:
+
+- an explicit Radar measurement-validity state;
+- a three-lane Camera-Radar comparison population;
+- one signed Camera-Radar discrepancy for formally eligible Frames.
+
+This Algorithm does not decide which sensor is correct and does not use Radar as
+verified ground truth.
+
+2. Position in U002
+
+S1 Radar semantic preprocessing:
+
+  U001 Radar Distance/Detection Flag
+    -> RADAR_VALIDITY_STATE
+
+S2 population construction:
+
+  RADAR_VALIDITY_STATE + CAMERA_TARGET_RECONSTRUCTION
+    -> CAMERA_RADAR_COMPARISON_POPULATION
+
+S3 Primary Outcome:
+
+  CAMERA_RADAR_COMPARISON_POPULATION
+    -> CAMERA_RADAR_SIGNED_DISCREPANCY
+
+Baseline, residual, anomaly score and candidate synthesis occur later and are
+forbidden inside this Algorithm.
+
+3. Required inputs per FrameCount
+
+Radar:
+
+- RadarDistance;
+- RadarDistanceValid from U001;
+- RadarDistanceMissingReason from U001;
+- RadarDetectionFlag;
+- RadarDetectionFlagValid from U001.
+
+Camera:
+
+- CanonicalCameraDistance from accepted S1;
+- CanonicalCameraValid;
+- CameraSelectionStatus;
+- CameraSelectionReason.
+
+4. Radar validity rule
+
+RadarMeasurementValid(k) is true only when:
+
+- U001 Radar Distance validity is true;
+- Radar Distance is finite;
+- U001 Detection Flag validity is true;
+- Detection Flag is parseable and true.
+
+The Module does not globally declare numeric zero or 327.66 invalid.  The
+current TC001 U001 Profile already owns those signal-specific invalid-value
+rules.  If U001 marks a value invalid, B2 preserves that result and reason.
+
+5. Three-lane comparison population
+
+FORMAL_ELIGIBLE
+
+- CanonicalCameraValid is true;
+- Camera status is SEEDED or CONFIDENT;
+- RadarMeasurementValid is true.
+
+Only this lane may produce the formal signed discrepancy.
+
+INVESTIGATION_ONLY
+
+Examples:
+
+- Camera remains valid while Radar reports target not detected;
+- Camera is AMBIGUOUS while Radar is otherwise valid;
+- one source contains potentially useful target-loss evidence but the pair is
+  not valid for quantitative discrepancy.
+
+This lane is retained for typed S5 evidence and U003 review.  It is excluded
+from baseline fitting and formal discrepancy statistics by default.
+
+INELIGIBLE
+
+Examples:
+
+- neither source contains usable evidence;
+- Camera declares a contradictory valid/status combination;
+- Radar numeric content is nonfinite despite an upstream valid flag;
+- required validity metadata is absent or unparseable.
+
+6. Primary Outcome definition
+
+For FORMAL_ELIGIBLE Frame k only:
+
+  CameraRadarDiscrepancy(k)
+    = RadarDistance(k) - CanonicalCameraDistance(k)
+
+Direction:
+
+  RADAR_MINUS_CAMERA
+
+Unit:
+
+  m
+
+Meaning:
+
+  signed difference between two provisionally associated sensor estimates.
+
+It must be called Camera-Radar discrepancy, not Camera error or Radar error.
+
+7. Missing behavior
+
+When a Frame is not FORMAL_ELIGIBLE:
+
+- CameraRadarDiscrepancy is blank/null;
+- OutcomeValid is false;
+- no zero-fill, forward fill, interpolation or previous-value substitution is
+  allowed;
+- the eligibility and reason fields remain visible.
+
+8. Output fields
+
+- FrameCount
+- RadarDistance
+- RadarDetectionFlag
+- RadarMeasurementValid
+- RadarValidityReason
+- CanonicalCameraDistance
+- CanonicalCameraValid
+- CameraSelectionStatus
+- ComparisonEligibility
+- EligibilityReason
+- CameraRadarDiscrepancy
+- OutcomeValid
+- OutcomeDirection
+- OutcomeUnit
+
+9. Assumptions
+
+- U001 validity and missing-reason semantics are authoritative;
+- the B15 five signal-role bindings are exact;
+- S1 Camera reconstruction has not used Radar information;
+- Camera and Radar values use meters;
+- FrameCount is the authoritative common key.
+
+10. Failure conditions
+
+- duplicate or decreasing FrameCount;
+- missing required validity fields;
+- unparseable controlled booleans;
+- nonfinite Camera/Radar value while the same measurement is marked valid;
+- Camera valid flag contradicts a nonconfident status;
+- attempted discrepancy computation outside FORMAL_ELIGIBLE;
+- attempted use of Radar as ground truth.
+
+11. Limitations
+
+- Radar target-not-detected is not automatically a Radar fault;
+- Camera and Radar may refer to different physical targets;
+- Frame synchronization or display latency can still affect observed mismatch;
+- the first Golden Run does not model field-of-view angle explicitly;
+- no baseline, causality, gain, delay or SysID claim is made.
+
+12. Alternatives rejected for the first Golden Run
+
+- use Radar Distance whenever it is nonzero: rejects U001 validity provenance;
+- fill Radar loss with zero: manufactures a physical measurement;
+- compute discrepancy on ambiguous Camera selection: contaminates formal data;
+- use Camera-Radar similarity to select Camera target: leaks the comparison
+  outcome into S1 preprocessing;
+- hard-code lateral-angle loss threshold now: observation is not yet a validated
+  transferable Radar model.
+
+13. Evaluation plan
+
+1. deterministic pure-kernel fixtures;
+2. controlled S1/S2/S3 Module envelope tests;
+3. short FrameCount C1 Golden Run containing valid and target-loss behavior;
+4. full valid road-test interval;
+5. U003 video/CAN confirmation of Radar target-loss candidates;
+6. only after review, evaluate lateral position or target bearing as S5 evidence.
+
+14. Keep/Reject rule
+
+Keep for the first Golden Run only if:
+
+- invalid/ambiguous Frames never produce discrepancy;
+- Radar loss remains visible as investigation evidence;
+- sign, unit and formula are explicit in every Artifact;
+- U001/S1 inputs remain immutable;
+- the U003 review path can reproduce selected candidate Frames.
+
+Reject or Modify if any rule silently fills, suppresses, reverses or relabels the
+signed discrepancy.

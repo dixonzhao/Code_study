@@ -1,0 +1,72 @@
+UDP002 U22B2C — Module Qualification + Short Run Plan
+版本：0.1
+日期：2026-08-21
+
+这一节点做什么
+==============
+
+1. 刷新 U002 Module Registry；
+2. 对 B2B 安装的三个 Module 分别执行正式 Qualification；
+3. 已通过的相同 Module 再运行时只 Audit，不重复修改；
+4. 自动复用已验收的 S0 identity、Camera S1 configuration 和 binding profile；
+5. 建立 FrameCount 41480–41750 的五模块 Run Configuration；
+6. 调用 Engine Preflight，冻结 resolved_run_plan；
+7. 检查顺序必须为 S0, S1, S1, S2, S3。
+
+这一步只准备计划，不运行真实 Module，也不会生成分析结论。
+
+为什么选 41480–41750
+=====================
+
+这一小段覆盖以前人工观察过的 Radar 目标丢失区间，同时保留前后正常帧。
+271 Frame 约为 13.5 秒，适合第一次快速级联测试，不需要全量运行。
+
+需要下载
+========
+
+把下面文件下载到：
+
+C-CODE\U-UDP002\04_TEMP
+
+u002_u22b2c_module_qualification_and_short_plan_v0_1.py.txt
+
+Step 1 — Self-test
+==================
+
+在 C-CODE 使用 CMD：
+
+python U-UDP002\04_TEMP\u002_u22b2c_module_qualification_and_short_plan_v0_1.py.txt --self-test
+
+成功：
+
+B2C-ST N-T24-X0 C-0
+
+通过时不用回传。
+
+Step 2 — Qualification + Preflight
+==================================
+
+python U-UDP002\04_TEMP\u002_u22b2c_module_qualification_and_short_plan_v0_1.py.txt --qualify-and-prepare --workspace-root U-UDP002
+
+首次成功预期：
+
+B2C N-Q3-A3-M5-S4-F41480.41750-R0-X0 C-0
+
+说明：
+
+Q3 = 三个新 Module 完成 Qualification
+A3 = 三个新 Module 当前均 AVAILABLE
+M5 = S0 + Camera S1 + Radar S1 + S2 + S3
+S4 = 使用四个不同 Stage：S0/S1/S2/S3
+R0 = 新建 Preflight；若完全一致地重跑可能为 R1
+
+只回传 B2C 这一行。
+
+成功后下一步
+============
+
+B2D 将直接执行这个已经冻结的短 Run，并验收三个新 Artifact：
+
+RADAR_VALIDITY
+COMPARISON_POPULATION
+PRIMARY_OUTCOME
