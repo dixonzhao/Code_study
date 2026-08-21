@@ -22,7 +22,7 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 
 PROGRAM_ID = "UDP002-U22B2DR3-GLOBAL-NO-HOLD-COMPILATION-PLAN"
-PROGRAM_VERSION = "0.1"
+PROGRAM_VERSION = "0.2"
 CONTRACT_VERSION = "U22.0.1"
 RUN_ID = "U22B2DR3_TC001_F41480_41750_V01"
 FAILED_RUN_ID = "U22B2DR2_TC001_F41480_41750_V01"
@@ -292,6 +292,60 @@ def discover_b1b4_normalization(root: Path) -> Dict[str, object]:
     return max(candidates, key=lambda item: (item[0], str(item[1])))[2]
 
 
+def runtime_failure_reason(blobs: Sequence[str]) -> Optional[str]:
+    """Extract an approved Radar MaxAge token from heterogeneous diagnostics."""
+
+    allowed = {
+        "INTEGER_RADAR_DISTANCE_MAX_AGE",
+        "INTEGER_RADAR_DETECTION_FLAG_MAX_AGE",
+    }
+    patterns = (
+        r"(?:^|\s)R[-_:]([A-Z0-9_.:+-]+)(?:\s|$)",
+        r"(INTEGER_RADAR_(?:DISTANCE|DETECTION_FLAG)_MAX_AGE)",
+    )
+    for blob in blobs:
+        upper = blob.upper()
+        for pattern in patterns:
+            for match in re.finditer(pattern, upper, flags=re.MULTILINE):
+                candidate = match.group(1).strip("_.:+-")
+                if candidate in allowed:
+                    return candidate
+    return None
+
+
+def static_radar_contract_evidence(root: Path) -> List[str]:
+    """Prove that accepted Radar bindings still contain non-executable blanks."""
+
+    configuration = load_json(root / NORMALIZED_CONFIG, "STATIC_CONFIGURATION")
+    profile_relative = Path(str(configuration.get("BindingProfilePath", "")))
+    profile_path = root / profile_relative
+    if sha256_file(profile_path) != configuration.get("BindingProfileSha256"):
+        raise PlanError("STATIC_PROFILE_HASH")
+    profile = load_json(profile_path, "STATIC_PROFILE")
+    bindings = profile.get("Bindings")
+    if not isinstance(bindings, dict):
+        raise PlanError("STATIC_BINDINGS")
+    blank_roles: List[str] = []
+    for role in ("RADAR_DISTANCE", "RADAR_DETECTION_FLAG"):
+        selected = bindings.get(role)
+        if not isinstance(selected, list) or len(selected) != 1:
+            raise PlanError("STATIC_BINDING_COUNT", role)
+        binding = selected[0]
+        if not isinstance(binding, dict):
+            raise PlanError("STATIC_BINDING_TYPE", role)
+        policy = str(binding.get("HoldPolicy", "")).strip().upper()
+        age = str(
+            binding.get("MaxAgeFrames")
+            if binding.get("MaxAgeFrames") is not None
+            else ""
+        ).strip()
+        if policy == "NONE" and age == "":
+            blank_roles.append(role)
+    if not blank_roles:
+        raise PlanError("STATIC_RADAR_BLANK_NOT_FOUND")
+    return blank_roles
+
+
 def failed_radar_evidence(root: Path) -> Dict[str, object]:
     """Confirm that the protected source Run reached and failed Radar S1."""
 
@@ -316,30 +370,37 @@ def failed_radar_evidence(root: Path) -> Dict[str, object]:
     if module_id != "CameraRadar.S1.RadarMeasurementValidity":
         raise PlanError("SOURCE_FAILED_MODULE", module_id)
     diagnostic_root = run_root / str(record.get("DiagnosticRoot", ""))
-    stdout_path = diagnostic_root / "stdout.txt"
-    if not stdout_path.is_file() or stdout_path.is_symlink():
-        raise PlanError("SOURCE_STDOUT_MISSING")
-    lines = [
-        line.strip()
-        for line in stdout_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
-        if line.strip()
-    ]
-    last = lines[-1] if lines else "MISSING"
-    match = re.search(r"(?:^|\s)R-([A-Z0-9_.:+-]+)(?:\s|$)", last.upper())
-    reason = match.group(1) if match is not None else "UNPARSED"
-    allowed = {
-        "INTEGER_RADAR_DISTANCE_MAX_AGE",
-        "INTEGER_RADAR_DETECTION_FLAG_MAX_AGE",
-    }
-    if reason not in allowed:
-        raise PlanError("SOURCE_FAILURE_REASON", reason)
+    evidence_paths = (
+        diagnostic_root / "stdout.txt",
+        diagnostic_root / "stderr.txt",
+        diagnostic_root / "module_result.json",
+        record_path,
+    )
+    blobs: List[str] = []
+    hashes: Dict[str, Optional[str]] = {}
+    for path in evidence_paths:
+        if path.is_file() and not path.is_symlink():
+            blobs.append(path.read_text(encoding="utf-8-sig", errors="replace"))
+            hashes[path.name] = sha256_file(path)
+        else:
+            hashes[path.name] = None
+    reason = runtime_failure_reason(blobs)
+    if reason is None:
+        blank_roles = static_radar_contract_evidence(root)
+        reason = "STATIC_PROFILE_BLANK_RADAR_MAX_AGE"
+        evidence_mode = "FAILED_RADAR_MODULE_PLUS_STATIC_CONTRACT"
+    else:
+        blank_roles = static_radar_contract_evidence(root)
+        evidence_mode = "RUNTIME_TOKEN_PLUS_STATIC_CONTRACT"
     return {
         "RunId": FAILED_RUN_ID,
         "Sequence": 3,
         "ModuleId": module_id,
         "Reason": reason,
+        "EvidenceMode": evidence_mode,
+        "BlankRadarRoles": blank_roles,
         "ExecutionRecordSha256": sha256_file(record_path),
-        "StdoutSha256": sha256_file(stdout_path),
+        "DiagnosticHashes": hashes,
     }
 
 
@@ -561,10 +622,10 @@ def self_test() -> str:
     checks = []
     def ck(value: bool) -> None:
         if not value:
-            raise AssertionError("SELFTEST")
+            raise AssertionError("SELFTEST_" + str(len(checks) + 1))
         checks.append(True)
     ck(PROGRAM_ID.startswith("UDP002"))
-    ck(PROGRAM_VERSION == "0.1")
+    ck(PROGRAM_VERSION == "0.2")
     ck(CONTRACT_VERSION == "U22.0.1")
     ck(FRAME_START < FRAME_END)
     ck(FRAME_END - FRAME_START + 1 == 271)
@@ -673,20 +734,27 @@ def self_test() -> str:
         )
         diagnostic_root.mkdir(parents=True, exist_ok=True)
         (diagnostic_root / "stdout.txt").write_text(
-            "RADAR N-X1 C-7 R-INTEGER_RADAR_DISTANCE_MAX_AGE\n",
+            "RADAR CHILD EXIT WITHOUT A STRUCTURED REASON TOKEN\n",
             encoding="utf-8",
         )
         failure = failed_radar_evidence(workspace)
         ck(failure["Sequence"] == 3)
-        ck(failure["Reason"] == "INTEGER_RADAR_DISTANCE_MAX_AGE")
-        ck(len(str(failure["StdoutSha256"])) == 64)
+        ck(failure["Reason"] == "STATIC_PROFILE_BLANK_RADAR_MAX_AGE")
+        ck(failure["EvidenceMode"] == "FAILED_RADAR_MODULE_PLUS_STATIC_CONTRACT")
+        ck(len(str(failure["DiagnosticHashes"]["stdout.txt"])) == 64)
+        ck(
+            runtime_failure_reason(
+                ["X C-7 R-INTEGER_RADAR_DISTANCE_MAX_AGE"]
+            )
+            == "INTEGER_RADAR_DISTANCE_MAX_AGE"
+        )
     ck(CAMERA_RECEIPT.name.endswith(".json"))
     ck(AVAILABILITY.name.endswith(".json"))
     ck(QUALIFICATION.suffix == ".py")
     ck(PREFLIGHT.suffix == ".py")
-    if len(checks) != 35:
+    if len(checks) != 37:
         raise AssertionError("SELFTEST_COUNT")
-    return "B2DR3PST N-T35-X0 C-0"
+    return "B2DR3PST N-T37-X0 C-0"
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

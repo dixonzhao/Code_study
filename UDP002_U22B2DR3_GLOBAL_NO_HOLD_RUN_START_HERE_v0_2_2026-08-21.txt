@@ -1,5 +1,5 @@
 UDP002 U22B2DR3 全角色 No-Hold 配置编译与新 Run
-版本：v0.1
+版本：v0.2
 日期：2026-08-21
 
 一、当前结论
@@ -29,9 +29,9 @@ B2DR3 将规则提升为通用配置编译规则：
 
 文件：
 
-    u002_u22b2dr3_global_no_hold_compilation_plan_v0_1.py.txt
+    u002_u22b2dr3_global_no_hold_compilation_plan_v0_2.py.txt
     u002_u22b2dr3_global_no_hold_run_and_audit_v0_1.py.txt
-    UDP002_U22B2DR3_GLOBAL_NO_HOLD_RUN_START_HERE_v0_1_2026-08-21.txt
+    UDP002_U22B2DR3_GLOBAL_NO_HOLD_RUN_START_HERE_v0_2_2026-08-21.txt
 
 不要改文件名，不要放入 04_TEMP 子文件夹。
 
@@ -48,22 +48,24 @@ B2DR3 将规则提升为通用配置编译规则：
 
 五、Self-test
 
-    python U-UDP002\04_TEMP\u002_u22b2dr3_global_no_hold_compilation_plan_v0_1.py.txt --self-test
+    python U-UDP002\04_TEMP\u002_u22b2dr3_global_no_hold_compilation_plan_v0_2.py.txt --self-test
     python U-UDP002\04_TEMP\u002_u22b2dr3_global_no_hold_run_and_audit_v0_1.py.txt --self-test
 
 应看到：
 
-    B2DR3PST N-T35-X0 C-0
+    B2DR3PST N-T37-X0 C-0
     B2DR3ST N-T30-X0 C-0
 
 六、诊断旧失败并创建新 Plan
 
-    python U-UDP002\04_TEMP\u002_u22b2dr3_global_no_hold_compilation_plan_v0_1.py.txt --qualify-and-prepare --workspace-root U-UDP002
+    python U-UDP002\04_TEMP\u002_u22b2dr3_global_no_hold_compilation_plan_v0_2.py.txt --qualify-and-prepare --workspace-root U-UDP002
 
 程序会自动：
 
 1. 从 B2DR2 日志确认失败序列为 3、Module 为 RadarMeasurementValidity；
-2. 读取具体失败 token；
+2. 从 stdout、stderr、module_result 与 execution record 读取失败 token；
+   若旧记录没有结构化 token，则使用“Radar S1 失败 + 两个 Radar Binding
+   空白 + Module 强制整数”三项静态/运行证据继续；
 3. 编译完整 Binding Profile v0.3；
 4. 创建新 RunId U22B2DR3_TC001_F41480_41750_V01；
 5. 生成并预检五模块计划。
