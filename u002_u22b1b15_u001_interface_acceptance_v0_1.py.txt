@@ -1,0 +1,779 @@
+#!/usr/bin/env python3
+"""Read-only B15 acceptance for the corrected U001-to-U002 interface.
+
+The program validates one explicit six-file U001 package, binds five exact
+TC001 signal identities, and exports a small human-readable table.  It does
+not modify U001, execute S1 reconstruction, infer target truth, or calculate
+Camera-Radar discrepancy.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import sys
+import tempfile
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+
+PROGRAM_ID = "UDP002-U22B1B15-U001-INTERFACE-ACCEPTANCE"
+PROGRAM_VERSION = "0.1"
+
+PACKAGE_FILES = (
+    "u001_decoded_updates.csv",
+    "u001_frame_values.csv",
+    "u001_signal_catalog.csv",
+    "u001_quality_report.csv",
+    "u001_run_manifest.json",
+    "u001_review_view.csv",
+)
+
+D1_REQUIRED = (
+    "SourceRowIndex", "SourceId", "SourceType", "ClockDomain",
+    "NativeTimestamp", "NativeSequence", "FrameCount", "SyncKey",
+    "SyncQuality", "FrameAssignmentStatus", "FrameAssignmentAgeRows",
+    "CAN_ID", "Channel", "MessageName", "CanonicalName", "RawCode",
+    "PhysicalValue", "ValueLabel", "ValueKind", "SignalRole", "Valid",
+    "MissingReason", "MessageCounter", "SourceDateTime", "SourceTimeUs",
+)
+
+D2_LEADING = ("FrameCount", "SourceRowFirst", "SourceRowLast", "SourceUpdateCount")
+D2_SUFFIXES = (
+    "__value", "__label", "__updated", "__update_count", "__age",
+    "__valid", "__missing_reason",
+)
+
+D3_REQUIRED = (
+    "CanonicalName", "CAN_ID", "Channel", "MessageName", "SignalName",
+    "Unit", "ValueKind", "SignalRole", "UpdateMode", "StorageDtype",
+    "StartBit", "BitLength", "ByteOrder", "Signed", "Scale", "Offset",
+    "DBCMinimum", "DBCMaximum", "EnumerationMap", "ValidityRule",
+    "ValiditySourceSignal", "ValidityExpression", "WithinFramePolicy",
+    "HoldPolicy", "MaxAgeFrames", "NominalRateHz", "RequiredForAnalysis",
+    "IncludeInFrameView", "IncludeInReviewView", "Notes",
+)
+
+D4_REQUIRED = (
+    "Scope", "CanonicalName", "Metric", "Value", "Unit", "SourceGate",
+    "Status", "Notes",
+)
+
+ROLE_SPECS = (
+    ("FRAME_COUNT", 2, "0x620", "FrameCount", False, "FRAME"),
+    ("CAMERA_1_DISTANCE", 2, "0x221", "Distance", True, "DISTANCE"),
+    ("CAMERA_3_DISTANCE", 2, "0x251", "Distance", True, "DISTANCE"),
+    ("RADAR_DISTANCE", 1, "0x380", "DistanceToObject", True, "DISTANCE"),
+    (
+        "RADAR_DETECTION_FLAG",
+        1,
+        "0x380",
+        "PrecedingVehicleDetectionFlag",
+        True,
+        "FLAG",
+    ),
+)
+
+
+class AcceptanceError(RuntimeError):
+    """Fail-closed interface error with a short reason and detail."""
+
+    def __init__(self, reason: str, detail: object = "NA"):
+        self.reason = token(reason, 64)
+        self.detail = token(detail, 160)
+        super().__init__(self.reason)
+
+
+def token(value: object, limit: int = 100) -> str:
+    """Return a compact low-bandwidth token."""
+
+    text = re.sub(r"[^A-Z0-9_.:+-]+", "_", str(value).upper())
+    return text.strip("_")[:limit] or "NA"
+
+
+def sha256_file(path: Path) -> str:
+    """Hash one file without loading it into memory."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while True:
+            block = stream.read(1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def canonical_json(value: object) -> bytes:
+    """Serialize deterministic portable JSON."""
+
+    return (
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+
+
+def write_json(path: Path, value: object) -> None:
+    """Write JSON atomically."""
+
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_bytes(canonical_json(value))
+    os.replace(temporary, path)
+
+
+def write_csv(path: Path, header: Sequence[str], rows: Iterable[Sequence[object]]) -> None:
+    """Write deterministic UTF-8 CSV atomically."""
+
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream, lineterminator="\n")
+        writer.writerow(header)
+        writer.writerows(rows)
+    os.replace(temporary, path)
+
+
+def read_json(path: Path, label: str) -> Mapping[str, object]:
+    """Read one JSON object."""
+
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        raise AcceptanceError(label + "_JSON", path.name) from exc
+    if not isinstance(value, dict):
+        raise AcceptanceError(label + "_OBJECT", path.name)
+    return value
+
+
+def read_header(path: Path) -> List[str]:
+    """Read one CSV header and reject duplicates."""
+
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        header = next(csv.reader(stream), None)
+    if not header:
+        raise AcceptanceError("CSV_HEADER", path.name)
+    if len(header) != len(set(header)):
+        raise AcceptanceError("CSV_DUPLICATE_COLUMN", path.name)
+    return header
+
+
+def require_columns(header: Sequence[str], required: Sequence[str], label: str) -> None:
+    """Require exact column names without fuzzy matching."""
+
+    missing = [name for name in required if name not in header]
+    if missing:
+        raise AcceptanceError(label + "_COLUMN", missing[0])
+
+
+def package_paths(root: Path) -> Dict[str, Path]:
+    """Require the exact six public package files."""
+
+    if not root.is_dir() or root.is_symlink():
+        raise AcceptanceError("PACKAGE_DIRECTORY", root.name)
+    actual = {path.name for path in root.iterdir() if path.is_file()}
+    if actual != set(PACKAGE_FILES):
+        raise AcceptanceError("PACKAGE_FILE_SET", f"A{len(actual)}E6")
+    result = {name: root / name for name in PACKAGE_FILES}
+    if any(path.is_symlink() or path.stat().st_size == 0 for path in result.values()):
+        raise AcceptanceError("PACKAGE_FILE_INVALID", 1)
+    return result
+
+
+def snapshot(paths: Mapping[str, Path]) -> Dict[str, Tuple[int, str]]:
+    """Capture package identity to prove read-only behavior."""
+
+    return {
+        name: (path.stat().st_size, sha256_file(path))
+        for name, path in paths.items()
+    }
+
+
+def normalize_can_id(value: object) -> str:
+    """Normalize a numeric CAN identifier to lower-case hexadecimal."""
+
+    text = str(value).strip()
+    try:
+        number = int(text, 16) if text.lower().startswith("0x") else int(text)
+    except Exception as exc:
+        raise AcceptanceError("CAN_ID_FORMAT", text) from exc
+    return f"0x{number:x}"
+
+
+def truthy(value: object) -> bool:
+    """Parse explicit table booleans."""
+
+    return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def parse_int(value: object, label: str) -> int:
+    """Parse an integer or integer-valued decimal string."""
+
+    try:
+        number = float(str(value).strip())
+        integer = int(number)
+    except Exception as exc:
+        raise AcceptanceError(label, value) from exc
+    if number != integer:
+        raise AcceptanceError(label, value)
+    return integer
+
+
+def validate_manifest(paths: Mapping[str, Path]) -> Mapping[str, object]:
+    """Validate successful v0.5 package identity and recorded file hashes."""
+
+    manifest = read_json(paths["u001_run_manifest.json"], "D5")
+    if manifest.get("Status") != "SUCCESS":
+        raise AcceptanceError("D5_STATUS", manifest.get("Status"))
+    if str(manifest.get("ProgramVersion")) != "0.5":
+        raise AcceptanceError("D5_PROGRAM_VERSION", manifest.get("ProgramVersion"))
+    if manifest.get("IdentityStatus") != "CONTROLLED_REPLAY":
+        raise AcceptanceError("D5_IDENTITY_STATUS", manifest.get("IdentityStatus"))
+    if manifest.get("IdentityWarningConsistency") != 1:
+        raise AcceptanceError("D5_IDENTITY_WARNING", manifest.get("IdentityWarningConsistency"))
+    completion = manifest.get("UpdateSchemaCompletion")
+    if not isinstance(completion, dict):
+        raise AcceptanceError("D5_SCHEMA_COMPLETION", "MISSING")
+    if completion.get("ClockDomain") != "FRAMECOUNT_VIDEO":
+        raise AcceptanceError("D5_CLOCK_DOMAIN", completion.get("ClockDomain"))
+    if completion.get("MeasurementFillApplied") is not False:
+        raise AcceptanceError("D5_MEASUREMENT_FILL", completion.get("MeasurementFillApplied"))
+    if completion.get("SortingApplied") is not False:
+        raise AcceptanceError("D5_SORTING", completion.get("SortingApplied"))
+
+    outputs = manifest.get("OutputFiles")
+    if not isinstance(outputs, list):
+        raise AcceptanceError("D5_OUTPUT_FILES", "TYPE")
+    records = {
+        str(item.get("Basename")): item
+        for item in outputs
+        if isinstance(item, dict)
+    }
+    for name in PACKAGE_FILES:
+        if name == "u001_run_manifest.json":
+            continue
+        record = records.get(name)
+        if not isinstance(record, dict):
+            raise AcceptanceError("D5_OUTPUT_RECORD", name)
+        path = paths[name]
+        if record.get("Bytes") != path.stat().st_size:
+            raise AcceptanceError("D5_OUTPUT_SIZE", name)
+        if record.get("Sha256") != sha256_file(path):
+            raise AcceptanceError("D5_OUTPUT_HASH", name)
+    return manifest
+
+
+def validate_d1(path: Path) -> Dict[str, int]:
+    """Stream final Update rows and validate the schema-completion contract."""
+
+    header = read_header(path)
+    if header[: len(D1_REQUIRED)] != list(D1_REQUIRED):
+        raise AcceptanceError("D1_LEADING_SCHEMA", header[0])
+    positions = {name: header.index(name) for name in D1_REQUIRED}
+    rows = 0
+    previous: Optional[int] = None
+    bad_clock = 0
+    native_nonblank = 0
+    counter_nonblank = 0
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.reader(stream)
+        next(reader, None)
+        for row in reader:
+            if len(row) != len(header):
+                raise AcceptanceError("D1_ROW_WIDTH", rows)
+            current = parse_int(row[positions["SourceRowIndex"]], "D1_SOURCE_ROW")
+            if previous is not None and current < previous:
+                raise AcceptanceError("D1_SOURCE_ORDER", current)
+            previous = current
+            bad_clock += row[positions["ClockDomain"]].strip() != "FRAMECOUNT_VIDEO"
+            native_nonblank += bool(row[positions["NativeTimestamp"]].strip())
+            counter_nonblank += bool(row[positions["MessageCounter"]].strip())
+            rows += 1
+    if rows == 0:
+        raise AcceptanceError("D1_EMPTY")
+    if bad_clock or native_nonblank or counter_nonblank:
+        raise AcceptanceError("D1_COMPLETION_VALUES", f"C{bad_clock}N{native_nonblank}G{counter_nonblank}")
+    return {"Rows": rows, "BadClock": bad_clock, "NativeNonblank": native_nonblank, "CounterNonblank": counter_nonblank}
+
+
+def frame_groups(header: Sequence[str]) -> List[str]:
+    """Return exact seven-column D2 signal groups."""
+
+    if list(header[:4]) != list(D2_LEADING):
+        raise AcceptanceError("D2_LEADING_SCHEMA", ".".join(header[:4]))
+    tail = list(header[4:])
+    if not tail or len(tail) % len(D2_SUFFIXES):
+        raise AcceptanceError("D2_GROUP_WIDTH", len(tail))
+    groups: List[str] = []
+    for start in range(0, len(tail), len(D2_SUFFIXES)):
+        block = tail[start : start + len(D2_SUFFIXES)]
+        if not block[0].endswith("__value"):
+            raise AcceptanceError("D2_GROUP_VALUE", block[0])
+        canonical = block[0][: -len("__value")]
+        if block != [canonical + suffix for suffix in D2_SUFFIXES]:
+            raise AcceptanceError("D2_GROUP_ORDER", canonical)
+        groups.append(canonical)
+    if len(groups) != len(set(groups)):
+        raise AcceptanceError("D2_GROUP_DUPLICATE", len(groups))
+    return groups
+
+
+def validate_d2(path: Path) -> Dict[str, object]:
+    """Validate FrameCount order and dynamic signal groups."""
+
+    header = read_header(path)
+    groups = frame_groups(header)
+    rows = 0
+    previous: Optional[int] = None
+    frame_min: Optional[int] = None
+    frame_max: Optional[int] = None
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        for row in reader:
+            current = parse_int(row.get("FrameCount", ""), "D2_FRAME")
+            if previous is not None and current <= previous:
+                raise AcceptanceError("D2_FRAME_ORDER", current)
+            frame_min = current if frame_min is None else frame_min
+            frame_max = current
+            previous = current
+            rows += 1
+    if rows == 0:
+        raise AcceptanceError("D2_EMPTY")
+    return {"Rows": rows, "Groups": groups, "FrameMin": frame_min, "FrameMax": frame_max, "Header": header}
+
+
+def load_catalog(path: Path) -> List[Dict[str, str]]:
+    """Load the small signal catalog with exact schema and identities."""
+
+    header = read_header(path)
+    require_columns(header, D3_REQUIRED, "D3")
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    if not rows:
+        raise AcceptanceError("D3_EMPTY")
+    canonicals = [row["CanonicalName"] for row in rows]
+    if any(not value for value in canonicals) or len(canonicals) != len(set(canonicals)):
+        raise AcceptanceError("D3_CANONICAL_IDENTITY", len(canonicals))
+    return rows
+
+
+def bind_roles(catalog: Sequence[Mapping[str, str]], groups: Sequence[str]) -> Dict[str, str]:
+    """Bind five exact signal identities without fuzzy name matching."""
+
+    bindings: Dict[str, str] = {}
+    group_set = set(groups)
+    for role, channel, can_id, signal_name, in_frame, kind in ROLE_SPECS:
+        matches = [
+            row
+            for row in catalog
+            if str(row.get("Channel", "")).strip() == str(channel)
+            and normalize_can_id(row.get("CAN_ID", "")) == can_id.lower()
+            and str(row.get("SignalName", "")).strip().casefold() == signal_name.casefold()
+        ]
+        if len(matches) != 1:
+            raise AcceptanceError("ROLE_BINDING_" + role, len(matches))
+        row = matches[0]
+        canonical = str(row["CanonicalName"])
+        if truthy(row.get("IncludeInFrameView")) != in_frame:
+            raise AcceptanceError("ROLE_FRAME_POLICY_" + role, row.get("IncludeInFrameView"))
+        if in_frame and canonical not in group_set:
+            raise AcceptanceError("ROLE_FRAME_GROUP_" + role, canonical)
+        if kind == "DISTANCE":
+            if str(row.get("Unit", "")).strip().casefold() != "m":
+                raise AcceptanceError("ROLE_UNIT_" + role, row.get("Unit"))
+            if str(row.get("ValueKind", "")).strip().upper() not in {"FLOAT", "INTEGER"}:
+                raise AcceptanceError("ROLE_KIND_" + role, row.get("ValueKind"))
+        bindings[role] = canonical
+    return bindings
+
+
+def validate_quality(path: Path, update_rows: int, frame_rows: int, catalog_count: int, frame_count: int) -> None:
+    """Validate package-level and schema-completion quality evidence."""
+
+    header = read_header(path)
+    require_columns(header, D4_REQUIRED, "D4")
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    metrics = {
+        row["Metric"]: row["Value"]
+        for row in rows
+        if row.get("Scope") == "GLOBAL"
+    }
+    expected = {
+        "decoded_update_count": update_rows,
+        "frame_row_count": frame_rows,
+        "package_file_count": 6,
+        "catalog_signal_count": catalog_count,
+        "frame_view_signal_count": frame_count,
+        "update_required_column_missing_count": 0,
+        "clock_domain_bad_value_count": 0,
+        "native_timestamp_nonblank_count": 0,
+        "message_counter_nonblank_count": 0,
+        "update_row_count_before_schema_completion": update_rows,
+        "update_row_count_after_schema_completion": update_rows,
+    }
+    for metric, value in expected.items():
+        if metric not in metrics:
+            raise AcceptanceError("D4_METRIC", metric)
+        if parse_int(metrics[metric], "D4_VALUE_" + metric) != value:
+            raise AcceptanceError("D4_VALUE_" + metric, metrics[metric])
+
+
+def validate_review(path: Path, frame_header: Sequence[str], frame_rows: int) -> None:
+    """Require the deterministic FrameCount-led D6 subset produced by G7."""
+
+    header = read_header(path)
+    expected = ["FrameCount"] + [name for name in frame_header if name.endswith("__value")]
+    if header != expected:
+        raise AcceptanceError("D6_HEADER", f"A{len(header)}E{len(expected)}")
+    rows = 0
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.reader(stream)
+        next(reader, None)
+        for row in reader:
+            if len(row) != len(header):
+                raise AcceptanceError("D6_ROW_WIDTH", rows)
+            rows += 1
+    if rows != frame_rows:
+        raise AcceptanceError("D6_ROW_COUNT", f"A{rows}E{frame_rows}")
+
+
+def export_subgraph(frame_path: Path, out: Path, bindings: Mapping[str, str]) -> int:
+    """Export five columns suitable for fast human inspection."""
+
+    output_header = (
+        "FrameCount",
+        "Camera1Distance",
+        "Camera3Distance",
+        "RadarDistance",
+        "RadarDetectionFlag",
+    )
+    source_columns = (
+        "FrameCount",
+        bindings["CAMERA_1_DISTANCE"] + "__value",
+        bindings["CAMERA_3_DISTANCE"] + "__value",
+        bindings["RADAR_DISTANCE"] + "__value",
+        bindings["RADAR_DETECTION_FLAG"] + "__value",
+    )
+    rows = 0
+    temporary = out.with_name(out.name + ".tmp")
+    with frame_path.open("r", encoding="utf-8-sig", newline="") as source, temporary.open(
+        "w", encoding="utf-8", newline=""
+    ) as destination:
+        reader = csv.DictReader(source)
+        missing = [name for name in source_columns if name not in (reader.fieldnames or [])]
+        if missing:
+            raise AcceptanceError("SUBGRAPH_COLUMN", missing[0])
+        writer = csv.writer(destination, lineterminator="\n")
+        writer.writerow(output_header)
+        for row in reader:
+            writer.writerow([row.get(name, "") for name in source_columns])
+            rows += 1
+    os.replace(temporary, out)
+    return rows
+
+
+def accept(package: Path, out_root: Path) -> Tuple[str, str]:
+    """Execute one complete read-only B15 acceptance."""
+
+    if out_root.exists():
+        raise AcceptanceError("OUTPUT_EXISTS", out_root.name)
+    paths = package_paths(package.resolve())
+    before = snapshot(paths)
+    manifest = validate_manifest(paths)
+    d1 = validate_d1(paths["u001_decoded_updates.csv"])
+    d2 = validate_d2(paths["u001_frame_values.csv"])
+    catalog = load_catalog(paths["u001_signal_catalog.csv"])
+    bindings = bind_roles(catalog, d2["Groups"])
+
+    if len(catalog) != 22 or len(d2["Groups"]) != 21:
+        raise AcceptanceError("PROFILE_CARDINALITY", f"C{len(catalog)}V{len(d2['Groups'])}")
+    validate_quality(
+        paths["u001_quality_report.csv"],
+        int(d1["Rows"]),
+        int(d2["Rows"]),
+        len(catalog),
+        len(d2["Groups"]),
+    )
+    validate_review(paths["u001_review_view.csv"], d2["Header"], int(d2["Rows"]))
+
+    temporary = out_root.with_name("." + out_root.name + ".INCOMPLETE")
+    if temporary.exists():
+        raise AcceptanceError("INCOMPLETE_OUTPUT_EXISTS", temporary.name)
+    temporary.mkdir(parents=True)
+    try:
+        subgraph_rows = export_subgraph(
+            paths["u001_frame_values.csv"],
+            temporary / "u22b1b15_minimal_subgraph.csv",
+            bindings,
+        )
+        if subgraph_rows != d2["Rows"]:
+            raise AcceptanceError("SUBGRAPH_ROW_COUNT", subgraph_rows)
+        receipt = {
+            "ProgramId": PROGRAM_ID,
+            "ProgramVersion": PROGRAM_VERSION,
+            "Status": "B1_U001_U002_INTERFACE_ACCEPTED",
+            "InputPackageFingerprint": hashlib.sha256(canonical_json(before)).hexdigest(),
+            "InputPackage": package.resolve().name,
+            "DatasetId": manifest.get("DatasetId"),
+            "RunId": manifest.get("RunId"),
+            "FrameDomain": {
+                "ClockDomain": "FRAMECOUNT_VIDEO",
+                "FrameMin": d2["FrameMin"],
+                "FrameMax": d2["FrameMax"],
+                "FrameRows": d2["Rows"],
+            },
+            "UpdateRows": d1["Rows"],
+            "CatalogSignals": len(catalog),
+            "FrameSignals": len(d2["Groups"]),
+            "RoleBindings": dict(bindings),
+            "S0Status": "PACKAGE_CONTRACT_ACCEPTED",
+            "S1Status": "EXACT_SIGNAL_BINDINGS_READY",
+            "SubgraphColumns": 5,
+            "SubgraphRows": subgraph_rows,
+            "SemanticBoundary": [
+                "No ground-truth claim",
+                "No Camera target correctness claim",
+                "No Radar error claim",
+                "No S1 reconstruction executed by B15",
+            ],
+        }
+        write_json(temporary / "u22b1b15_interface_acceptance_receipt.json", receipt)
+        line1 = (
+            f"B15 N-U{d1['Rows']}-F{d2['Rows']}-C{len(catalog)}"
+            f"-V{len(d2['Groups'])}-B5-H1-X0 C-0"
+        )
+        line2 = "B15I N-S01-S11-D10-D21-D31-D41-D51-D61-X0 C-0"
+        (temporary / "u22b1b15_return_capsule.txt").write_text(
+            line1 + "\n" + line2 + "\n",
+            encoding="utf-8",
+        )
+        if snapshot(paths) != before:
+            raise AcceptanceError("INPUT_PACKAGE_CHANGED", 1)
+        os.replace(temporary, out_root)
+    except Exception:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+    return line1, line2
+
+
+def make_synthetic_package(root: Path) -> None:
+    """Create one contract-shaped 22/21 package for self-test."""
+
+    root.mkdir()
+    special = [
+        ("FRAME_CANONICAL", 2, "0x620", "FrameCount", "", "INTEGER", False),
+        ("CAM1_DISTANCE", 2, "0x221", "Distance", "m", "FLOAT", True),
+        ("CAM3_DISTANCE", 2, "0x251", "Distance", "m", "FLOAT", True),
+        ("RADAR_DISTANCE", 1, "0x380", "DistanceToObject", "m", "FLOAT", True),
+        ("RADAR_FLAG", 1, "0x380", "PrecedingVehicleDetectionFlag", "", "BOOLEAN", True),
+    ]
+    signals = special + [
+        (f"EXTRA_{index:02d}", 2, f"0x{300 + index:x}", f"Extra{index:02d}", "", "FLOAT", True)
+        for index in range(1, 18)
+    ]
+    frame_signals = [item for item in signals if item[6]]
+
+    d1_rows = []
+    for index, item in enumerate(frame_signals, start=1):
+        row = {name: "" for name in D1_REQUIRED}
+        row.update(
+            {
+                "SourceRowIndex": index,
+                "SourceId": "SOURCE_001",
+                "SourceType": "CAN",
+                "ClockDomain": "FRAMECOUNT_VIDEO",
+                "NativeSequence": index,
+                "FrameCount": 7400,
+                "SyncKey": 7400,
+                "SyncQuality": "VALID",
+                "FrameAssignmentStatus": "ASSIGNED",
+                "FrameAssignmentAgeRows": 0,
+                "CAN_ID": item[2],
+                "Channel": item[1],
+                "MessageName": item[3],
+                "CanonicalName": item[0],
+                "RawCode": index,
+                "PhysicalValue": index,
+                "ValueKind": item[5],
+                "SignalRole": "MEASUREMENT",
+                "Valid": 1,
+                "MissingReason": "VALID_UPDATE",
+            }
+        )
+        d1_rows.append([row[name] for name in D1_REQUIRED])
+    write_csv(root / PACKAGE_FILES[0], D1_REQUIRED, d1_rows)
+
+    d2_header = list(D2_LEADING)
+    for item in frame_signals:
+        d2_header.extend(item[0] + suffix for suffix in D2_SUFFIXES)
+    d2_rows = []
+    for frame in (7400, 7401, 7402):
+        row: List[object] = [frame, frame, frame, len(frame_signals)]
+        for index, _ in enumerate(frame_signals):
+            row.extend([frame + index, "", 1, 1, 0, 1, "VALID_UPDATE"])
+        d2_rows.append(row)
+    write_csv(root / PACKAGE_FILES[1], d2_header, d2_rows)
+
+    catalog_rows = []
+    for item in signals:
+        row = {name: "" for name in D3_REQUIRED}
+        row.update(
+            {
+                "CanonicalName": item[0],
+                "CAN_ID": item[2],
+                "Channel": item[1],
+                "MessageName": item[3],
+                "SignalName": item[3],
+                "Unit": item[4],
+                "ValueKind": item[5],
+                "SignalRole": "FRAME_KEY" if not item[6] else "MEASUREMENT",
+                "UpdateMode": "PERIODIC",
+                "StorageDtype": "Float64",
+                "ValidityRule": "NONE",
+                "WithinFramePolicy": "KEEP_STREAM_ONLY" if not item[6] else "LAST_UPDATE",
+                "HoldPolicy": "NONE",
+                "RequiredForAnalysis": 1,
+                "IncludeInFrameView": 1 if item[6] else 0,
+                "IncludeInReviewView": 1 if item[6] else 0,
+            }
+        )
+        catalog_rows.append([row[name] for name in D3_REQUIRED])
+    write_csv(root / PACKAGE_FILES[2], D3_REQUIRED, catalog_rows)
+
+    quality_values = {
+        "decoded_update_count": len(d1_rows),
+        "frame_row_count": len(d2_rows),
+        "package_file_count": 6,
+        "catalog_signal_count": 22,
+        "frame_view_signal_count": 21,
+        "update_required_column_missing_count": 0,
+        "clock_domain_bad_value_count": 0,
+        "native_timestamp_nonblank_count": 0,
+        "message_counter_nonblank_count": 0,
+        "update_row_count_before_schema_completion": len(d1_rows),
+        "update_row_count_after_schema_completion": len(d1_rows),
+    }
+    write_csv(
+        root / PACKAGE_FILES[3],
+        D4_REQUIRED,
+        (["GLOBAL", "", metric, value, "", "G7", "PASS", ""] for metric, value in quality_values.items()),
+    )
+    review_header = ["FrameCount"] + [item[0] + "__value" for item in frame_signals]
+    write_csv(
+        root / PACKAGE_FILES[5],
+        review_header,
+        ([row[0]] + [row[4 + index * 7] for index in range(len(frame_signals))] for row in d2_rows),
+    )
+    output_records = []
+    for name in (PACKAGE_FILES[0], PACKAGE_FILES[1], PACKAGE_FILES[2], PACKAGE_FILES[3], PACKAGE_FILES[5]):
+        path = root / name
+        output_records.append({"Basename": name, "Bytes": path.stat().st_size, "Sha256": sha256_file(path)})
+    write_json(
+        root / PACKAGE_FILES[4],
+        {
+            "Status": "SUCCESS",
+            "ProgramVersion": "0.5",
+            "IdentityStatus": "CONTROLLED_REPLAY",
+            "IdentityWarningConsistency": 1,
+            "DatasetId": "SELFTEST",
+            "RunId": "SELFTEST",
+            "UpdateSchemaCompletion": {
+                "ClockDomain": "FRAMECOUNT_VIDEO",
+                "MeasurementFillApplied": False,
+                "SortingApplied": False,
+            },
+            "OutputFiles": output_records,
+        },
+    )
+
+
+def self_test() -> int:
+    """Execute a complete 22/21 six-file acceptance."""
+
+    checks: List[str] = []
+
+    def check(name: str, condition: bool) -> None:
+        if not condition:
+            raise AssertionError(name)
+        checks.append(name)
+
+    with tempfile.TemporaryDirectory() as temp_name:
+        root = Path(temp_name)
+        package = root / "package"
+        make_synthetic_package(package)
+        paths = package_paths(package)
+        check("T01_SIX", len(paths) == 6)
+        check("T02_MANIFEST", validate_manifest(paths)["Status"] == "SUCCESS")
+        check("T03_D1", validate_d1(paths[PACKAGE_FILES[0]])["Rows"] == 21)
+        d2 = validate_d2(paths[PACKAGE_FILES[1]])
+        check("T04_D2_ROWS", d2["Rows"] == 3)
+        check("T05_D2_GROUPS", len(d2["Groups"]) == 21)
+        catalog = load_catalog(paths[PACKAGE_FILES[2]])
+        check("T06_D3", len(catalog) == 22)
+        bindings = bind_roles(catalog, d2["Groups"])
+        check("T07_BINDINGS", len(bindings) == 5)
+        validate_quality(paths[PACKAGE_FILES[3]], 21, 3, 22, 21)
+        checks.append("T08_D4")
+        validate_review(paths[PACKAGE_FILES[5]], d2["Header"], 3)
+        checks.append("T09_D6")
+        before = snapshot(paths)
+        line1, line2 = accept(package, root / "acceptance")
+        check("T10_ACCEPT", line1.endswith("C-0"))
+        check("T11_INTERFACE", line2.endswith("C-0"))
+        check("T12_IMMUTABLE", snapshot(paths) == before)
+        receipt = read_json(root / "acceptance/u22b1b15_interface_acceptance_receipt.json", "RECEIPT")
+        check("T13_RECEIPT", receipt["Status"] == "B1_U001_U002_INTERFACE_ACCEPTED")
+        check("T14_S0", receipt["S0Status"] == "PACKAGE_CONTRACT_ACCEPTED")
+        check("T15_S1", receipt["S1Status"] == "EXACT_SIGNAL_BINDINGS_READY")
+        subgraph = root / "acceptance/u22b1b15_minimal_subgraph.csv"
+        check("T16_SUBGRAPH_HEADER", len(read_header(subgraph)) == 5)
+        with subgraph.open("r", encoding="utf-8", newline="") as stream:
+            check("T17_SUBGRAPH_ROWS", sum(1 for _ in csv.reader(stream)) - 1 == 3)
+        check("T18_CAPSULE_FILE", (root / "acceptance/u22b1b15_return_capsule.txt").is_file())
+    if len(checks) != 18:
+        raise AssertionError("SELFTEST_COUNT")
+    print("U22B1B15-SELFTEST-PASS-18")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Create explicit self-test and acceptance modes."""
+
+    parser = argparse.ArgumentParser(description="U22 B15 U001/U002 interface acceptance")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--accept", action="store_true")
+    parser.add_argument("--package")
+    parser.add_argument("--out-root")
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Run acceptance with integrated two-line failure evidence."""
+
+    args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        if args.self_test:
+            return self_test()
+        if not args.package or not args.out_root:
+            raise AcceptanceError("ARGUMENT_MISSING", "PACKAGE_OR_OUT_ROOT")
+        lines = accept(Path(args.package), Path(args.out_root))
+        print(lines[0])
+        print(lines[1])
+        return 0
+    except Exception as exc:
+        if isinstance(exc, AcceptanceError):
+            reason, detail = exc.reason, exc.detail
+        else:
+            reason, detail = token(type(exc).__name__), token(str(exc), 160)
+        print(f"B15E K-{reason}-X1 C-7")
+        print(f"B15D D-{detail} C-0")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
