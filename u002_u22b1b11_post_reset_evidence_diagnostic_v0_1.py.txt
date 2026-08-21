@@ -1,0 +1,635 @@
+#!/usr/bin/env python3
+"""Diagnose whether reviewed wrong outputs originate in mask or timeout logic."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import importlib.machinery
+import importlib.util
+import io
+import json
+from pathlib import Path
+import re
+import sys
+from types import ModuleType
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+
+
+PROGRAM_ID = "U002-U22B1B11-POST-RESET-EVIDENCE-DIAGNOSTIC"
+VERSION = "0.1"
+B1B10_FILENAME = "u002_u22b1b10_minimal_layered_review_package_v0_1.py.txt"
+B1B10_SHA256 = "927addd9dcae4f611ee9664c8eff266ecf3bf478f17b4523b742038a171c9c4e"
+TARGET_EVENTS = ("B1B10_Q002", "B1B10_Q003")
+SUMMARY_NAME = "u22b1b11_post_reset_evidence_summary_v0_1.json"
+TRACE_NAME = "u22b1b11_post_reset_evidence_trace_v0_1.csv"
+DIAGNOSTIC_RELATIVE = Path(
+    "04_TEMP/u22b1b11_post_reset_evidence_diagnostic_v0_1.json"
+)
+TIMEOUT_LAYERS = ("T3", "T5", "T10", "T20")
+TRACE_FIELDS = (
+    "EventID",
+    "FrameCount",
+    "FocusKinds",
+    "EligibilityCount",
+    "EligibleRoles",
+    "Camera1Distance",
+    "Camera3Distance",
+    "A_Distance",
+    "A_Valid",
+    "A_Role",
+    "B_Distance",
+    "B_Valid",
+    "B_Role",
+    "MaskRelation",
+) + tuple(
+    f"{layer}_{suffix}"
+    for layer in TIMEOUT_LAYERS
+    for suffix in ("Distance", "Valid", "Role", "Relation")
+)
+
+
+class EvidenceError(RuntimeError):
+    """Represent one deterministic fail-closed diagnostic failure."""
+
+    def __init__(self, reason: str, detail: object = "NA"):
+        self.reason = stable(reason, 56)
+        self.detail = stable(detail, 96)
+        super().__init__(self.reason)
+
+
+def stable(value: object, limit: int = 80) -> str:
+    """Convert arbitrary diagnostic text to one bounded token."""
+
+    normalized = re.sub(r"[^A-Z0-9_]+", "_", str(value).upper())
+    return normalized.strip("_")[:limit] or "NA"
+
+
+def sha256_file(path: Path) -> str:
+    """Hash one file in bounded blocks."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def load_program(name: str, path: Path) -> ModuleType:
+    """Load a Python text file as one verified module."""
+
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None:
+        raise EvidenceError("IMPORT_SPEC", path.name)
+    module = importlib.util.module_from_spec(spec)
+    try:
+        loader.exec_module(module)
+    except Exception as exc:
+        raise EvidenceError("IMPORT_EXEC", type(exc).__name__) from exc
+    return module
+
+
+def load_b1b10(program_directory: Path) -> ModuleType:
+    """Load the exact accepted B1B10 package builder."""
+
+    path = program_directory / B1B10_FILENAME
+    if not path.is_file() or path.is_symlink():
+        raise EvidenceError("B1B10_V01_MISSING", path.name)
+    observed = sha256_file(path)
+    if observed != B1B10_SHA256:
+        raise EvidenceError("B1B10_V01_HASH", observed[:12])
+    return load_program("u22b1b11_b1b10", path)
+
+
+def load_json(path: Path, reason: str) -> Dict[str, object]:
+    """Load one required JSON object."""
+
+    if not path.is_file() or path.is_symlink():
+        raise EvidenceError(reason + "_MISSING", path.name)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        raise EvidenceError(reason + "_JSON", path.name) from exc
+    if not isinstance(value, dict):
+        raise EvidenceError(reason + "_TYPE", path.name)
+    return value
+
+
+def read_csv(path: Path, required: Sequence[str], reason: str) -> List[Dict[str, str]]:
+    """Read one CSV and enforce its minimum schema."""
+
+    if not path.is_file() or path.is_symlink():
+        raise EvidenceError(reason + "_MISSING", path.name)
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as stream:
+            reader = csv.DictReader(stream)
+            header = reader.fieldnames or []
+            missing = [name for name in required if name not in header]
+            if missing:
+                raise EvidenceError(reason + "_COLUMN", missing[0])
+            rows = [dict(row) for row in reader]
+    except EvidenceError:
+        raise
+    except Exception as exc:
+        raise EvidenceError(reason + "_READ", type(exc).__name__) from exc
+    if not rows:
+        raise EvidenceError(reason + "_EMPTY")
+    return rows
+
+
+def flag(value: object) -> bool:
+    """Interpret a controlled zero-or-one field."""
+
+    text = str(value).strip()
+    if text == "1":
+        return True
+    if text == "0":
+        return False
+    raise EvidenceError("FLAG_VALUE", text)
+
+
+def optional_float(value: object) -> Optional[float]:
+    """Parse a blank-or-finite numeric value."""
+
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        result = float(text)
+    except ValueError as exc:
+        raise EvidenceError("FLOAT_VALUE", text) from exc
+    if result != result or result in (float("inf"), float("-inf")):
+        return None
+    return result
+
+
+def numeric_equal(left: object, right: object) -> bool:
+    """Compare optional distances with an explicit small tolerance."""
+
+    a = optional_float(left)
+    b = optional_float(right)
+    if a is None or b is None:
+        return a is None and b is None
+    return abs(a - b) <= 1e-9 + 1e-10 * max(abs(a), abs(b))
+
+
+def relation(row: Mapping[str, object], before: str, after: str) -> str:
+    """Classify one public canonical-decision transition."""
+
+    before_valid = flag(row[f"{before}_Valid"])
+    after_valid = flag(row[f"{after}_Valid"])
+    if before_valid and not after_valid:
+        return "LOST"
+    if not before_valid and after_valid:
+        return "GAINED"
+    if not before_valid and not after_valid:
+        return "SAME"
+    if (
+        str(row[f"{before}_Role"]) == str(row[f"{after}_Role"])
+        and numeric_equal(row[f"{before}_Distance"], row[f"{after}_Distance"])
+    ):
+        return "SAME"
+    return "CHANGED"
+
+
+def eligible_state(row: Mapping[str, object]) -> Tuple[int, str]:
+    """Return eligible-source count and compact role set."""
+
+    roles: List[str] = []
+    if flag(row["Camera1Eligible"]):
+        roles.append("1")
+    if flag(row["Camera3Eligible"]):
+        roles.append("3")
+    return len(roles), "".join(roles) or "0"
+
+
+def role_code(value: object) -> str:
+    """Encode a selected Camera role for a short return capsule."""
+
+    text = str(value)
+    if text == "CAMERA_1_DISTANCE":
+        return "1"
+    if text == "CAMERA_3_DISTANCE":
+        return "3"
+    return "0"
+
+
+def event_origin(mask_differences: int, timeout_differences: int) -> str:
+    """Classify which software layer changes decisions in an event."""
+
+    if mask_differences and timeout_differences:
+        return "B"
+    if mask_differences:
+        return "M"
+    if timeout_differences:
+        return "T"
+    return "N"
+
+
+def summarize_event(event_id: str, rows: Sequence[Mapping[str, object]]) -> Dict[str, object]:
+    """Summarize mask and timeout decision evidence for one review event."""
+
+    if not rows:
+        raise EvidenceError("EVENT_ROWS_EMPTY", event_id)
+    ordered = sorted(rows, key=lambda item: int(item["FrameCount"]))
+    focus_rows = [row for row in ordered if str(row.get("FocusKinds", "")).strip()]
+    evaluated = focus_rows or ordered
+
+    mask_counts = {name: 0 for name in ("SAME", "LOST", "GAINED", "CHANGED")}
+    timeout_counts: Dict[str, Dict[str, int]] = {
+        layer: {name: 0 for name in ("SAME", "LOST", "GAINED", "CHANGED")}
+        for layer in TIMEOUT_LAYERS
+    }
+    first_gains: Dict[str, Optional[Dict[str, object]]] = {}
+    reset_frames: Dict[str, List[int]] = {}
+
+    for row in ordered:
+        mask_counts[relation(row, "A", "B")] += 1
+        for layer in TIMEOUT_LAYERS:
+            current_relation = relation(row, "B", layer)
+            timeout_counts[layer][current_relation] += 1
+            if current_relation == "GAINED" and layer not in first_gains:
+                count, roles = eligible_state(row)
+                first_gains[layer] = {
+                    "FrameCount": int(row["FrameCount"]),
+                    "EligibilityCount": count,
+                    "EligibleRoles": roles,
+                    "SelectedRole": role_code(row[f"{layer}_Role"]),
+                    "Camera1Distance": optional_float(row["Camera1Distance"]),
+                    "Camera3Distance": optional_float(row["Camera3Distance"]),
+                    "CanonicalDistance": optional_float(row[f"{layer}_Distance"]),
+                }
+            reason = str(row.get(f"{layer}_Reason", ""))
+            if reason == "CONTINUITY_REJECTION_TIMEOUT_RESET":
+                reset_frames.setdefault(layer, []).append(int(row["FrameCount"]))
+        
+    mask_differences = sum(mask_counts[name] for name in ("LOST", "GAINED", "CHANGED"))
+    timeout_differences = sum(
+        counts[name]
+        for counts in timeout_counts.values()
+        for name in ("LOST", "GAINED", "CHANGED")
+    )
+    gain_states = [
+        int(value["EligibilityCount"])
+        for value in first_gains.values()
+        if value is not None
+    ]
+    if not gain_states:
+        first_gain_state = "X"
+    elif len(set(gain_states)) == 1:
+        first_gain_state = str(gain_states[0])
+    else:
+        first_gain_state = "M"
+    gain_roles = [
+        str(value["SelectedRole"])
+        for value in first_gains.values()
+        if value is not None
+    ]
+    if not gain_roles:
+        first_gain_role = "0"
+    elif len(set(gain_roles)) == 1:
+        first_gain_role = gain_roles[0]
+    else:
+        first_gain_role = "M"
+
+    eligibility_distribution = {"0": 0, "1": 0, "2": 0}
+    for row in evaluated:
+        count, _ = eligible_state(row)
+        eligibility_distribution[str(count)] += 1
+
+    return {
+        "EventID": event_id,
+        "FrameStart": int(ordered[0]["FrameCount"]),
+        "FrameEnd": int(ordered[-1]["FrameCount"]),
+        "RowCount": len(ordered),
+        "FocusRowCount": len(focus_rows),
+        "MaskRelationCounts": mask_counts,
+        "TimeoutRelationCounts": timeout_counts,
+        "MaskDifferenceCount": mask_differences,
+        "TimeoutDifferenceCount": timeout_differences,
+        "OriginClass": event_origin(mask_differences, timeout_differences),
+        "FirstTimeoutGainEligibility": first_gain_state,
+        "FirstTimeoutGainSelectedRole": first_gain_role,
+        "FirstTimeoutGains": first_gains,
+        "TimeoutResetFrames": reset_frames,
+        "FocusEligibilityDistribution": eligibility_distribution,
+        "ExactOneGateWouldBlockFirstGain": (
+            None if first_gain_state in ("X", "M") else first_gain_state != "1"
+        ),
+    }
+
+
+def trace_rows(
+    target_rows: Mapping[str, Sequence[Mapping[str, object]]],
+    target_events: Sequence[str],
+) -> List[Dict[str, object]]:
+    """Create a compact derived trace for the two reviewed problem events."""
+
+    output: List[Dict[str, object]] = []
+    for event_id in target_events:
+        for source in sorted(target_rows[event_id], key=lambda row: int(row["FrameCount"])):
+            count, roles = eligible_state(source)
+            row: Dict[str, object] = {
+                "EventID": event_id,
+                "FrameCount": source["FrameCount"],
+                "FocusKinds": source.get("FocusKinds", ""),
+                "EligibilityCount": count,
+                "EligibleRoles": roles,
+                "Camera1Distance": source["Camera1Distance"],
+                "Camera3Distance": source["Camera3Distance"],
+                "A_Distance": source["A_Distance"],
+                "A_Valid": source["A_Valid"],
+                "A_Role": source["A_Role"],
+                "B_Distance": source["B_Distance"],
+                "B_Valid": source["B_Valid"],
+                "B_Role": source["B_Role"],
+                "MaskRelation": relation(source, "A", "B"),
+            }
+            for layer in TIMEOUT_LAYERS:
+                row[f"{layer}_Distance"] = source[f"{layer}_Distance"]
+                row[f"{layer}_Valid"] = source[f"{layer}_Valid"]
+                row[f"{layer}_Role"] = source[f"{layer}_Role"]
+                row[f"{layer}_Relation"] = relation(source, "B", layer)
+            output.append(row)
+    return output
+
+
+def csv_bytes(rows: Sequence[Mapping[str, object]]) -> bytes:
+    """Serialize deterministic diagnostic CSV bytes."""
+
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=TRACE_FIELDS, lineterminator="\n")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({name: row.get(name, "") for name in TRACE_FIELDS})
+    return buffer.getvalue().encode("utf-8")
+
+
+def event_token(label: str, summary: Mapping[str, object]) -> str:
+    """Encode only the evidence needed for the next design decision."""
+
+    return (
+        label
+        + "-O"
+        + str(summary["OriginClass"])
+        + "-K"
+        + str(summary["FirstTimeoutGainEligibility"])
+        + "-R"
+        + str(summary["FirstTimeoutGainSelectedRole"])
+        + "-M"
+        + str(summary["MaskDifferenceCount"])
+        + "-T"
+        + str(summary["TimeoutDifferenceCount"])
+    )
+
+
+def run(
+    root: Path,
+    program_directory: Path,
+    target_events: Sequence[str],
+) -> Tuple[str, str, str]:
+    """Verify B1B10 evidence and diagnose Q2/Q3 without changing algorithms."""
+
+    b1b10 = load_b1b10(program_directory)
+    b1b9 = b1b10.load_b1b9(program_directory)
+    b1b8 = b1b9.load_b1b8(program_directory)
+    base = b1b8.load_base(program_directory)
+    workspace = base.require_workspace(root)
+
+    # B1B10 adds a second U003-compatible queue to the selected Run. Re-running
+    # older B1B8/B1B9 discovery after that point would make their intentionally
+    # strict single-queue lookup ambiguous. B11 therefore verifies the frozen
+    # B1B10 evidence in place instead of re-executing the historical chain.
+    run_root, receipt = base.discover_b1b4(workspace)
+    table = base.locate_s1_table(run_root)
+    table_hash = base.sha256_file(table)
+    export_root = run_root / "05_EXPORTS"
+    review_root = run_root / "04_REVIEW_PACKAGE"
+    prior_summary = load_json(export_root / b1b10.SUMMARY_NAME, "B1B10_SUMMARY")
+    if prior_summary.get("RunId") != receipt.get("RunId"):
+        raise EvidenceError("B1B10_RUN_ID")
+    if prior_summary.get("SourceTableSha256") != table_hash:
+        raise EvidenceError("B1B10_SOURCE_HASH")
+    if prior_summary.get("InputMutationCount") != 0:
+        raise EvidenceError("B1B10_INPUT_MUTATION")
+
+    queue_rows = read_csv(
+        review_root / b1b10.QUEUE_NAME,
+        ("EventID", "StartFrameCount", "EndFrameCount", "FocusKinds"),
+        "B1B10_QUEUE",
+    )
+    matrix_rows = read_csv(
+        export_root / b1b10.MATRIX_NAME,
+        b1b10.MATRIX_FIELDS,
+        "B1B10_MATRIX",
+    )
+    queue_by_id = {row["EventID"]: row for row in queue_rows}
+    if len(queue_by_id) != len(queue_rows):
+        raise EvidenceError("QUEUE_EVENT_DUPLICATE")
+    if len(target_events) != 2 or len(set(target_events)) != 2:
+        raise EvidenceError("TARGET_EVENT_ARGUMENT")
+    missing = [event_id for event_id in target_events if event_id not in queue_by_id]
+    if missing:
+        raise EvidenceError("TARGET_EVENT_MISSING", missing[0])
+
+    target_rows: Dict[str, List[Mapping[str, object]]] = {
+        event_id: [] for event_id in target_events
+    }
+    for event_id in target_events:
+        start = int(queue_by_id[event_id]["StartFrameCount"])
+        end = int(queue_by_id[event_id]["EndFrameCount"])
+        target_rows[event_id] = [
+            row
+            for row in matrix_rows
+            if start <= int(row["FrameCount"]) <= end
+        ]
+        if not target_rows[event_id]:
+            raise EvidenceError("TARGET_MATRIX_EMPTY", event_id)
+
+    event_summaries = {
+        event_id: summarize_event(event_id, rows)
+        for event_id, rows in target_rows.items()
+    }
+    derived_trace = trace_rows(target_rows, target_events)
+    summary = {
+        "Contract": "UDP002_U22B1B11_POST_RESET_EVIDENCE_DIAGNOSTIC_V0_1",
+        "ProgramId": PROGRAM_ID,
+        "ProgramVersion": VERSION,
+        "RunId": receipt.get("RunId"),
+        "SourceTableSha256": table_hash,
+        "B1B10DependencySha256": B1B10_SHA256,
+        "TargetEvents": list(target_events),
+        "EventSummaries": event_summaries,
+        "InterpretationRules": {
+            "OriginM": "Mask layer changes decisions; timeout adds no event decision change.",
+            "OriginT": "Timeout layer changes decisions; mask does not.",
+            "OriginB": "Both mask and timeout layers change event decisions.",
+            "OriginN": "No layer decision difference in the event range.",
+            "FirstGainK1": "Exactly-one-source gate would not block the first gain.",
+            "FirstGainK2": "Exactly-one-source gate would block the first gain.",
+            "FirstGainKX": "No timeout gain exists in this event.",
+        },
+        "DecisionStatus": "DIAGNOSTIC_ONLY_NO_ALGORITHM_CHANGE",
+        "InputMutationCount": 0,
+    }
+    base.write_exact(export_root / TRACE_NAME, csv_bytes(derived_trace))
+    base.write_exact(export_root / SUMMARY_NAME, base.canonical_bytes(summary))
+    if base.sha256_file(table) != table_hash:
+        raise EvidenceError("SOURCE_TABLE_CHANGED")
+
+    total_focus = sum(
+        int(item["FocusRowCount"]) for item in event_summaries.values()
+    )
+    main = (
+        "B11 N-E2-F"
+        + str(total_focus)
+        + "-R"
+        + str(len(derived_trace))
+        + "-X0 C-0"
+    )
+    detail_a = "B11A " + event_token("Q2", event_summaries[target_events[0]]) + " C-0"
+    detail_b = "B11B " + event_token("Q3", event_summaries[target_events[1]]) + " C-0"
+    return main, detail_a, detail_b
+
+
+def self_test(program_directory: Path) -> str:
+    """Exercise dependency identity and all diagnostic classifications."""
+
+    checks: List[bool] = []
+
+    def check(value: bool) -> None:
+        if not value:
+            raise EvidenceError("SELFTEST")
+        checks.append(True)
+
+    b1b10 = load_b1b10(program_directory)
+    check(b1b10.VERSION == "0.1")
+    check(role_code("CAMERA_1_DISTANCE") == "1")
+    check(role_code("CAMERA_3_DISTANCE") == "3")
+    check(role_code("") == "0")
+    row = {
+        "FrameCount": "10",
+        "FocusKinds": "TIMEOUT_GAINED_VALID_T3",
+        "Camera1Distance": "10.0",
+        "Camera1Eligible": "1",
+        "Camera3Distance": "20.0",
+        "Camera3Eligible": "1",
+        "A_Distance": "",
+        "A_Valid": "0",
+        "A_Role": "",
+        "B_Distance": "",
+        "B_Valid": "0",
+        "B_Role": "",
+    }
+    for layer in TIMEOUT_LAYERS:
+        row[f"{layer}_Distance"] = "10.0" if layer == "T3" else ""
+        row[f"{layer}_Valid"] = "1" if layer == "T3" else "0"
+        row[f"{layer}_Role"] = "CAMERA_1_DISTANCE" if layer == "T3" else ""
+        row[f"{layer}_Status"] = "CONFIDENT" if layer == "T3" else "AMBIGUOUS"
+        row[f"{layer}_Reason"] = "SINGLE_SOURCE_ACQUIRED" if layer == "T3" else ""
+    check(flag("1"))
+    check(not flag("0"))
+    check(optional_float("") is None)
+    check(optional_float("10.0") == 10.0)
+    check(numeric_equal("10", "10.0"))
+    check(relation(row, "A", "B") == "SAME")
+    check(relation(row, "B", "T3") == "GAINED")
+    check(relation(row, "B", "T5") == "SAME")
+    count, roles = eligible_state(row)
+    check(count == 2)
+    check(roles == "13")
+    check(event_origin(0, 0) == "N")
+    check(event_origin(1, 0) == "M")
+    check(event_origin(0, 1) == "T")
+    check(event_origin(1, 1) == "B")
+    summary = summarize_event("B1B10_Q002", [row])
+    check(summary["OriginClass"] == "T")
+    check(summary["FirstTimeoutGainEligibility"] == "2")
+    check(summary["FirstTimeoutGainSelectedRole"] == "1")
+    check(summary["ExactOneGateWouldBlockFirstGain"] is True)
+    trace = trace_rows({
+        "B1B10_Q002": [row],
+        "B1B10_Q003": [row],
+    }, TARGET_EVENTS)
+    check(len(trace) == 2)
+    check(trace[0]["EligibilityCount"] == 2)
+    check(trace[0]["T3_Relation"] == "GAINED")
+    check(len(csv_bytes(trace)) > 100)
+    check(len(TRACE_FIELDS) == 30)
+    check(stable("a/b c") == "A_B_C")
+    check(len(checks) == 28)
+    return "B11-ST N-T29-X0 C-0"
+
+
+def write_failure(root: Optional[Path], error: EvidenceError) -> None:
+    """Persist a bounded diagnostic JSON while returning one short code."""
+
+    if root is None or not root.is_dir():
+        return
+    payload = {
+        "Contract": "UDP002_U22B1B11_FAILURE_DIAGNOSTIC_V0_1",
+        "ProgramId": PROGRAM_ID,
+        "ProgramVersion": VERSION,
+        "Reason": error.reason,
+        "Detail": error.detail,
+        "NextAction": "Return only the B11E capsule.",
+    }
+    try:
+        path = root / DIAGNOSTIC_RELATIVE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)
+            + "\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def parser() -> argparse.ArgumentParser:
+    """Build the small command-line interface."""
+
+    result = argparse.ArgumentParser(description=PROGRAM_ID)
+    result.add_argument("--workspace-root", type=Path)
+    result.add_argument("--self-test", action="store_true")
+    result.add_argument(
+        "--target-events",
+        nargs=2,
+        default=list(TARGET_EVENTS),
+        metavar=("EVENT_A", "EVENT_B"),
+        help=argparse.SUPPRESS,
+    )
+    return result
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Execute one controlled mode and print at most three short lines."""
+
+    arguments = parser().parse_args(argv)
+    program_directory = Path(__file__).resolve().parent
+    root: Optional[Path] = None
+    try:
+        if arguments.self_test:
+            print(self_test(program_directory))
+            return 0
+        if arguments.workspace_root is None:
+            raise EvidenceError("WORKSPACE_ARGUMENT")
+        root = arguments.workspace_root.resolve()
+        for capsule in run(root, program_directory, arguments.target_events):
+            print(capsule)
+        return 0
+    except EvidenceError as exc:
+        write_failure(root, exc)
+        print("B11E K-" + exc.reason + " D-" + exc.detail + " C-7")
+        return 7
+    except Exception as exc:
+        wrapped = EvidenceError("INTERNAL", type(exc).__name__)
+        write_failure(root, wrapped)
+        print("B11E K-INTERNAL D-" + stable(type(exc).__name__) + " C-7")
+        return 7
+
+
+if __name__ == "__main__":
+    sys.exit(main())
