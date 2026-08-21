@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Prepare a new five-Module Run from the accepted B1B4 normalized profile.
+"""Compile global NONE-hold semantics and prepare the B2DR3 five-Module Run.
 
-The former B2C Run is immutable failure evidence.  This correction creates a
-new Run identity and changes configuration provenance only; no Module code or
-analysis mathematics is modified.
+The former B2DR2 Run proved S0 and Camera S1, then failed at Radar S1 because
+the source profile still contained non-executable blank MaxAgeFrames values.
+This compiler applies one contract rule to every selected binding and creates
+a new Run identity.  No Module code or analysis mathematics is modified.
 """
 
 from __future__ import annotations
@@ -20,11 +21,11 @@ import tempfile
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 
-PROGRAM_ID = "UDP002-U22B2DR2-NORMALIZED-SHORT-PLAN"
+PROGRAM_ID = "UDP002-U22B2DR3-GLOBAL-NO-HOLD-COMPILATION-PLAN"
 PROGRAM_VERSION = "0.1"
 CONTRACT_VERSION = "U22.0.1"
-RUN_ID = "U22B2DR2_TC001_F41480_41750_V01"
-FAILED_RUN_ID = "U22B2C_TC001_F41480_41750_V01"
+RUN_ID = "U22B2DR3_TC001_F41480_41750_V01"
+FAILED_RUN_ID = "U22B2DR2_TC001_F41480_41750_V01"
 FRAME_START = 41480
 FRAME_END = 41750
 
@@ -43,6 +44,14 @@ NORMALIZED_CONFIG = Path(
     "02_CONFIG/module_configs/"
     "u22b1b4_camera_target_reconstruction_tc001_v0_2.json"
 )
+COMPILED_PROFILE = Path(
+    "02_CONFIG/binding_profiles/TC001_camera_radar_base_provisional_v0_3.json"
+)
+COMPILED_CONFIG = Path(
+    "02_CONFIG/module_configs/"
+    "u22b2dr3_camera_target_reconstruction_tc001_v0_3.json"
+)
+COMPILATION_RECEIPT = "u22b2dr3_global_no_hold_compilation_receipt_v0_1.json"
 
 NEW_MODULES = (
     ("CameraRadar.S1.RadarMeasurementValidity", "0.1.0"),
@@ -283,8 +292,108 @@ def discover_b1b4_normalization(root: Path) -> Dict[str, object]:
     return max(candidates, key=lambda item: (item[0], str(item[1])))[2]
 
 
-def accepted_camera(root: Path) -> Tuple[str, str, Dict[str, object]]:
-    """Load the qualified Camera Module with B1B4's accepted no-hold config."""
+def failed_radar_evidence(root: Path) -> Dict[str, object]:
+    """Confirm that the protected source Run reached and failed Radar S1."""
+
+    run_root = root / "07_OUTPUT" / FAILED_RUN_ID
+    status = load_json(run_root / "run_status.json", "FAILED_RUN_STATUS")
+    if status.get("Status") != "FAILED":
+        raise PlanError("SOURCE_RUN_NOT_FAILED", status.get("Status"))
+    records: List[Tuple[Path, Dict[str, object]]] = []
+    for path in sorted((run_root / "01_LOGS").glob("*.json")):
+        try:
+            record = load_json(path, "SOURCE_EXECUTION_RECORD")
+            if record.get("Status") == "FAILED":
+                records.append((path, record))
+        except Exception:
+            continue
+    if len(records) != 1:
+        raise PlanError("SOURCE_FAILED_RECORD_COUNT", len(records))
+    record_path, record = records[0]
+    if int(record.get("Sequence", 0)) != 3:
+        raise PlanError("SOURCE_FAILED_SEQUENCE", record.get("Sequence"))
+    module_id = str(record.get("ModuleId", ""))
+    if module_id != "CameraRadar.S1.RadarMeasurementValidity":
+        raise PlanError("SOURCE_FAILED_MODULE", module_id)
+    diagnostic_root = run_root / str(record.get("DiagnosticRoot", ""))
+    stdout_path = diagnostic_root / "stdout.txt"
+    if not stdout_path.is_file() or stdout_path.is_symlink():
+        raise PlanError("SOURCE_STDOUT_MISSING")
+    lines = [
+        line.strip()
+        for line in stdout_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+        if line.strip()
+    ]
+    last = lines[-1] if lines else "MISSING"
+    match = re.search(r"(?:^|\s)R-([A-Z0-9_.:+-]+)(?:\s|$)", last.upper())
+    reason = match.group(1) if match is not None else "UNPARSED"
+    allowed = {
+        "INTEGER_RADAR_DISTANCE_MAX_AGE",
+        "INTEGER_RADAR_DETECTION_FLAG_MAX_AGE",
+    }
+    if reason not in allowed:
+        raise PlanError("SOURCE_FAILURE_REASON", reason)
+    return {
+        "RunId": FAILED_RUN_ID,
+        "Sequence": 3,
+        "ModuleId": module_id,
+        "Reason": reason,
+        "ExecutionRecordSha256": sha256_file(record_path),
+        "StdoutSha256": sha256_file(stdout_path),
+    }
+
+
+def compile_global_no_hold_profile(
+    source: Mapping[str, object],
+) -> Tuple[Dict[str, object], List[Dict[str, object]]]:
+    """Compile every NONE plus blank MaxAgeFrames binding to integer zero."""
+
+    compiled = json.loads(json.dumps(source, ensure_ascii=False))
+    bindings = compiled.get("Bindings")
+    if not isinstance(bindings, dict):
+        raise PlanError("COMPILED_BINDINGS")
+    changes: List[Dict[str, object]] = []
+    for role in sorted(bindings):
+        selected = bindings[role]
+        if not isinstance(selected, list) or not selected:
+            raise PlanError("COMPILED_BINDING_COUNT", role)
+        for index, binding in enumerate(selected):
+            if not isinstance(binding, dict):
+                raise PlanError("COMPILED_BINDING_TYPE", role)
+            policy = str(binding.get("HoldPolicy", "")).strip().upper()
+            observed = binding.get("MaxAgeFrames")
+            observed_text = str(observed if observed is not None else "").strip()
+            if policy == "NONE" and observed_text == "":
+                binding["MaxAgeFrames"] = 0
+                changes.append(
+                    {
+                        "Role": role,
+                        "BindingIndex": index,
+                        "HoldPolicy": "NONE",
+                        "ObservedMaxAgeFrames": "BLANK",
+                        "CompiledMaxAgeFrames": 0,
+                    }
+                )
+                continue
+            if isinstance(observed, bool):
+                raise PlanError("COMPILED_MAX_AGE", role)
+            try:
+                parsed = int(observed)
+            except (TypeError, ValueError) as exc:
+                raise PlanError("COMPILED_MAX_AGE", role) from exc
+            if parsed < 0 or parsed != observed:
+                raise PlanError("COMPILED_MAX_AGE", role)
+            if policy == "NONE" and parsed != 0:
+                raise PlanError("NONE_NONZERO_MAX_AGE", role)
+            binding["MaxAgeFrames"] = parsed
+    compiled["BindingProfileVersion"] = "0.3"
+    return compiled, changes
+
+
+def accepted_camera(
+    root: Path,
+) -> Tuple[str, str, Dict[str, object], Dict[str, object]]:
+    """Compile the accepted B1B4 profile into one executable global profile."""
 
     module_receipt = load_json(root / CAMERA_RECEIPT, "CAMERA_RECEIPT")
     if module_receipt.get("Status") != "S1_MODULE_INSTALLED_AND_QUALIFIED":
@@ -299,26 +408,30 @@ def accepted_camera(root: Path) -> Tuple[str, str, Dict[str, object]]:
     profile_path = root / profile_relative
     if sha256_file(profile_path) != configuration.get("BindingProfileSha256"):
         raise PlanError("NORMALIZED_PROFILE_HASH")
-    profile = load_json(profile_path, "NORMALIZED_PROFILE")
-    bindings = profile.get("Bindings")
-    if not isinstance(bindings, dict):
-        raise PlanError("NORMALIZED_BINDINGS")
-    for role in ("CAMERA_1_DISTANCE", "CAMERA_3_DISTANCE"):
-        selected = bindings.get(role)
-        if not isinstance(selected, list) or len(selected) != 1:
-            raise PlanError("NORMALIZED_BINDING_COUNT", role)
-        binding = selected[0]
-        if not isinstance(binding, dict):
-            raise PlanError("NORMALIZED_BINDING_TYPE", role)
-        if binding.get("HoldPolicy") != "NONE":
-            raise PlanError("NORMALIZED_HOLD_POLICY", role)
-        value = binding.get("MaxAgeFrames")
-        if isinstance(value, bool) or not isinstance(value, int) or value != 0:
-            raise PlanError("NORMALIZED_MAX_AGE", role)
+    source_profile = load_json(profile_path, "NORMALIZED_PROFILE")
+    compiled_profile, changes = compile_global_no_hold_profile(source_profile)
+    write_exact(root / COMPILED_PROFILE, compiled_profile)
+    compiled_profile_sha = sha256_file(root / COMPILED_PROFILE)
+    configuration = dict(configuration)
+    configuration["BindingProfilePath"] = COMPILED_PROFILE.as_posix()
+    configuration["BindingProfileSha256"] = compiled_profile_sha
+    write_exact(root / COMPILED_CONFIG, configuration)
+    evidence = {
+        "Rule": "HOLD_POLICY_NONE_AND_BLANK_MAX_AGE_TO_INTEGER_ZERO",
+        "SourceProfile": profile_relative.as_posix(),
+        "SourceProfileSha256": sha256_file(profile_path),
+        "CompiledProfile": COMPILED_PROFILE.as_posix(),
+        "CompiledProfileSha256": compiled_profile_sha,
+        "CompiledConfiguration": COMPILED_CONFIG.as_posix(),
+        "CompiledConfigurationSha256": sha256_file(root / COMPILED_CONFIG),
+        "ChangedBindingCount": len(changes),
+        "Changes": changes,
+    }
     return (
         str(module_receipt["ModuleId"]),
         str(module_receipt["ModuleVersion"]),
         configuration,
+        evidence,
     )
 
 
@@ -350,7 +463,7 @@ def build_configuration(
         "FrameStart": FRAME_START,
         "FrameEnd": FRAME_END,
         "InputPackage": str(package.resolve()),
-        "SignalProfile": "TC001.CameraRadar.Base.PROVISIONAL@0.1",
+        "SignalProfile": "TC001.CameraRadar.Base.PROVISIONAL@0.3",
         "ModulePlan": [
             {
                 "Sequence": 1,
@@ -395,7 +508,7 @@ def build_configuration(
             "Unit": "m",
             "Purpose": "EXPLORATORY",
         },
-        "CandidatePolicy": "NotAppliedInU22B2DR2@0.1",
+        "CandidatePolicy": "NotAppliedInU22B2DR3@0.1",
         "OutputSelection": [
             "U001_INTAKE_ACCEPTED",
             "CAMERA_TARGET_RECONSTRUCTION",
@@ -406,13 +519,14 @@ def build_configuration(
     }
 
 
-def prepare_short_plan(root: Path) -> Tuple[int, int]:
+def prepare_short_plan(root: Path) -> Tuple[int, int, int, str]:
+    failure = failed_radar_evidence(root)
     receipt_path, receipt = discover_b1ar(root)
     validate_frame_range(receipt)
     package = Path(str(receipt["SelectedPackage"])).resolve()
     s0 = accepted_s0(receipt_path)
     camera = accepted_camera(root)
-    configuration = build_configuration(package, s0, camera)
+    configuration = build_configuration(package, s0, camera[:3])
     config_path = root / "02_CONFIG/run_configs" / (RUN_ID + ".json")
     write_exact(config_path, configuration)
     capsule = run_child(
@@ -431,7 +545,16 @@ def prepare_short_plan(root: Path) -> Tuple[int, int]:
         raise PlanError("RESOLVED_MODULE_COUNT")
     if [item.get("Stage") for item in modules] != ["S0", "S1", "S1", "S2", "S3"]:
         raise PlanError("RESOLVED_STAGE_ORDER")
-    return replay, len(modules)
+    receipt = {
+        "ReceiptContract": "UDP002_U22B2DR3_GLOBAL_NO_HOLD_COMPILATION_V0_1",
+        "RunId": RUN_ID,
+        "SourceFailure": failure,
+        "Compilation": camera[3],
+        "ModuleCodeModified": False,
+        "AnalysisMathematicsModified": False,
+    }
+    write_exact(root / "07_OUTPUT" / RUN_ID / COMPILATION_RECEIPT, receipt)
+    return replay, len(modules), int(camera[3]["ChangedBindingCount"]), str(failure["Reason"])
 
 
 def self_test() -> str:
@@ -447,8 +570,8 @@ def self_test() -> str:
     ck(FRAME_END - FRAME_START + 1 == 271)
     ck(len(NEW_MODULES) == 3)
     ck([item[0].split(".")[1] for item in NEW_MODULES] == ["S1", "S2", "S3"])
-    ck(RUN_ID.startswith("U22B2DR2_"))
-    ck(FAILED_RUN_ID.startswith("U22B2C_"))
+    ck(RUN_ID.startswith("U22B2DR3_"))
+    ck(FAILED_RUN_ID.startswith("U22B2DR2_"))
     ck(token("a b/c") == "A_B_C")
     ck(len(hashlib.sha256(b"x").hexdigest()) == 64)
     with tempfile.TemporaryDirectory() as temporary:
@@ -490,6 +613,12 @@ def self_test() -> str:
                 "CAMERA_3_DISTANCE": [
                     {"HoldPolicy": "NONE", "MaxAgeFrames": 0}
                 ],
+                "RADAR_DISTANCE": [
+                    {"HoldPolicy": "NONE", "MaxAgeFrames": ""}
+                ],
+                "RADAR_DETECTION_FLAG": [
+                    {"HoldPolicy": "NONE", "MaxAgeFrames": None}
+                ],
             }
         }
         write_exact(workspace / profile_relative, profile)
@@ -521,15 +650,43 @@ def self_test() -> str:
         camera = accepted_camera(workspace)
         ck(camera[0] == "CameraRadar.S1.CameraTargetContinuityArbitration")
         ck(camera[1] == "0.1.0")
-        ck(camera[2]["BindingProfilePath"] == profile_relative.as_posix())
-        ck(camera[2]["BindingProfileSha256"] == sha256_file(workspace / profile_relative))
+        ck(camera[2]["BindingProfilePath"] == COMPILED_PROFILE.as_posix())
+        ck(
+            camera[2]["BindingProfileSha256"]
+            == sha256_file(workspace / COMPILED_PROFILE)
+        )
+        ck(camera[3]["ChangedBindingCount"] == 2)
+        compiled = load_json(workspace / COMPILED_PROFILE, "TEST_COMPILED")
+        ck(compiled["Bindings"]["RADAR_DISTANCE"][0]["MaxAgeFrames"] == 0)
+        ck(compiled["Bindings"]["RADAR_DETECTION_FLAG"][0]["MaxAgeFrames"] == 0)
+        failed_root = workspace / "07_OUTPUT" / FAILED_RUN_ID
+        diagnostic_root = failed_root / "02_DIAGNOSTICS/modules/0003_Radar"
+        write_exact(failed_root / "run_status.json", {"Status": "FAILED"})
+        write_exact(
+            failed_root / "01_LOGS/0003_Radar.json",
+            {
+                "Sequence": 3,
+                "ModuleId": "CameraRadar.S1.RadarMeasurementValidity",
+                "Status": "FAILED",
+                "DiagnosticRoot": "02_DIAGNOSTICS/modules/0003_Radar",
+            },
+        )
+        diagnostic_root.mkdir(parents=True, exist_ok=True)
+        (diagnostic_root / "stdout.txt").write_text(
+            "RADAR N-X1 C-7 R-INTEGER_RADAR_DISTANCE_MAX_AGE\n",
+            encoding="utf-8",
+        )
+        failure = failed_radar_evidence(workspace)
+        ck(failure["Sequence"] == 3)
+        ck(failure["Reason"] == "INTEGER_RADAR_DISTANCE_MAX_AGE")
+        ck(len(str(failure["StdoutSha256"])) == 64)
     ck(CAMERA_RECEIPT.name.endswith(".json"))
     ck(AVAILABILITY.name.endswith(".json"))
     ck(QUALIFICATION.suffix == ".py")
     ck(PREFLIGHT.suffix == ".py")
-    if len(checks) != 29:
+    if len(checks) != 35:
         raise AssertionError("SELFTEST_COUNT")
-    return "B2DR2PST N-T29-X0 C-0"
+    return "B2DR3PST N-T35-X0 C-0"
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -548,20 +705,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         root = require_workspace(Path(args.workspace_root))
         freeze_before = freeze_audit(root)
         qualified = qualify_new_modules(root)
-        replay, module_count = prepare_short_plan(root)
+        replay, module_count, changed, reason = prepare_short_plan(root)
         freeze_after = freeze_audit(root)
         if freeze_before != freeze_after:
             raise PlanError("FOUNDATION_CHANGED")
         print(
-            f"B2DR2P N-Q{qualified}-A3-M{module_count}-S4"
-            f"-F{FRAME_START}.{FRAME_END}-R{replay}-X0 C-0"
+            f"B2DR3P N-Q{qualified}-M{module_count}-N{changed}"
+            f"-K{token(reason, 36)}-R{replay}-X0 C-0"
         )
         return 0
     except PlanError as exc:
-        print(f"B2DR2PE K-{exc.reason}-D-{exc.detail}-X1 C-7")
+        print(f"B2DR3PE K-{exc.reason}-D-{exc.detail}-X1 C-7")
         return 7
     except Exception as exc:
-        print(f"B2DR2PE K-{token(exc.__class__.__name__)}-D-{token(exc)}-X1 C-7")
+        print(f"B2DR3PE K-{token(exc.__class__.__name__)}-D-{token(exc)}-X1 C-7")
         return 7
 
 

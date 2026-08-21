@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Execute and audit the corrected B2DR2 short Camera-Radar Run.
+"""Execute and audit the globally compiled B2DR3 Camera-Radar short Run.
 
 This controller owns no analysis mathematics.  It invokes the already accepted
 U22 Stage Executor, then independently checks artifact identity, FrameCount
 alignment, three-lane population accounting and the signed discrepancy rule.
-The original B2C failed Run remains immutable diagnostic evidence.
+The source B2DR2 failed Run remains immutable diagnostic evidence.
 """
 
 from __future__ import annotations
@@ -23,11 +23,11 @@ import tempfile
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 
-PROGRAM_ID = "UDP002-U22B2DR2-NORMALIZED-RUN-EXECUTION-AND-AUDIT"
+PROGRAM_ID = "UDP002-U22B2DR3-GLOBAL-NO-HOLD-RUN-AND-AUDIT"
 PROGRAM_VERSION = "0.1"
 CONTRACT_VERSION = "U22.0.1"
-RUN_ID = "U22B2DR2_TC001_F41480_41750_V01"
-FAILED_RUN_ID = "U22B2C_TC001_F41480_41750_V01"
+RUN_ID = "U22B2DR3_TC001_F41480_41750_V01"
+FAILED_RUN_ID = "U22B2DR2_TC001_F41480_41750_V01"
 FRAME_START = 41480
 FRAME_END = 41750
 
@@ -39,8 +39,9 @@ FREEZE_AUDITOR = Path(
 RUN_PLAN = Path("00_CONFIG/resolved_run_plan.json")
 RUN_STATUS = Path("run_status.json")
 ARTIFACT_INDEX = Path("run_artifact_index_v0_1.json")
-ACCEPTANCE_REPORT = Path("02_DIAGNOSTICS/b2dr2_normalized_run_acceptance_v0_1.json")
-FAILURE_REPORT = Path("02_DIAGNOSTICS/b2dr2_normalized_run_failure_v0_1.json")
+COMPILATION_RECEIPT = Path("u22b2dr3_global_no_hold_compilation_receipt_v0_1.json")
+ACCEPTANCE_REPORT = Path("02_DIAGNOSTICS/b2dr3_global_no_hold_acceptance_v0_1.json")
+FAILURE_REPORT = Path("02_DIAGNOSTICS/b2dr3_global_no_hold_failure_v0_1.json")
 
 EXPECTED_TYPES = (
     "U001_INTAKE_ACCEPTED",
@@ -548,6 +549,19 @@ def execute_and_audit(root: Path, run_root: Path) -> str:
         raise B2DError("RUN_PLAN_ID", plan.get("RunId"))
     if plan.get("FrameStart") != FRAME_START or plan.get("FrameEnd") != FRAME_END:
         raise B2DError("RUN_PLAN_SCOPE")
+    compilation = load_json(run_root / COMPILATION_RECEIPT, "COMPILATION_RECEIPT")
+    if compilation.get("RunId") != RUN_ID:
+        raise B2DError("COMPILATION_RUN_ID")
+    if compilation.get("ModuleCodeModified") is not False:
+        raise B2DError("MODULE_CODE_CHANGE")
+    if compilation.get("AnalysisMathematicsModified") is not False:
+        raise B2DError("MATHEMATICS_CHANGE")
+    compiled = compilation.get("Compilation")
+    if not isinstance(compiled, dict):
+        raise B2DError("COMPILATION_EVIDENCE")
+    changed = parse_integer(compiled.get("ChangedBindingCount"), "CHANGED_BINDINGS")
+    if changed < 1:
+        raise B2DError("NO_GLOBAL_NORMALIZATION")
     freeze_before = freeze_audit(root)
     failed_evidence_before = failed_run_evidence_digest(root)
     modules, artifacts, replay = execute_frozen_run(root, run_root)
@@ -571,7 +585,7 @@ def execute_and_audit(root: Path, run_root: Path) -> str:
         raise B2DError("RUN_STATUS_COUNTS")
     metrics = inspect_artifacts(run_root)
     report = {
-        "AcceptanceContract": "UDP002_U22B2DR2_NORMALIZED_RUN_ACCEPTANCE_V0_1",
+        "AcceptanceContract": "UDP002_U22B2DR3_GLOBAL_NO_HOLD_ACCEPTANCE_V0_1",
         "ProgramId": PROGRAM_ID,
         "ProgramVersion": PROGRAM_VERSION,
         "ContractVersion": CONTRACT_VERSION,
@@ -584,6 +598,7 @@ def execute_and_audit(root: Path, run_root: Path) -> str:
         "FoundationAuditCapsule": freeze_after,
         "OriginalFailedRunId": FAILED_RUN_ID,
         "OriginalFailedRunEvidenceSha256": failed_evidence_after,
+        "CompiledBindingCount": changed,
         "Metrics": metrics,
         "Accepted": True,
     }
@@ -592,7 +607,7 @@ def execute_and_audit(root: Path, run_root: Path) -> str:
     if failure_path.exists():
         failure_path.unlink()
     return (
-        f"B2DR2 N-M{modules}-A{metrics['ArtifactCount']}-R{metrics['FrameRows']}"
+        f"B2DR3 N-M{modules}-A{metrics['ArtifactCount']}-R{metrics['FrameRows']}"
         f"-V{metrics['RadarValidRows']}-L{metrics['RadarTargetLossEvidenceRows']}"
         f"-F{metrics['FormalEligibleRows']}-I{metrics['InvestigationOnlyRows']}"
         f"-N{metrics['IneligibleRows']}-O{metrics['OutcomeValidRows']}"
@@ -613,8 +628,8 @@ def self_test() -> str:
     ck(PROGRAM_ID.startswith("UDP002"))
     ck(PROGRAM_VERSION == "0.1")
     ck(CONTRACT_VERSION == "U22.0.1")
-    ck(RUN_ID.startswith("U22B2DR2_"))
-    ck(FAILED_RUN_ID.startswith("U22B2C_"))
+    ck(RUN_ID.startswith("U22B2DR3_"))
+    ck(FAILED_RUN_ID.startswith("U22B2DR2_"))
     ck(FRAME_START < FRAME_END)
     ck(len(EXPECTED_TYPES) == 5)
     ck(len(TARGET_TYPES) == 3)
@@ -647,14 +662,15 @@ def self_test() -> str:
     ck(FREEZE_AUDITOR.suffix == ".py")
     ck(ACCEPTANCE_REPORT.suffix == ".json")
     ck(FAILURE_REPORT.suffix == ".json")
+    ck(COMPILATION_RECEIPT.suffix == ".json")
     ck("RADAR_VALIDITY" in EXPECTED_TYPES)
     ck("COMPARISON_POPULATION" in EXPECTED_TYPES)
     ck("PRIMARY_OUTCOME" in EXPECTED_TYPES)
     ck(math.isclose(12.0 - 10.0, 2.0, abs_tol=1e-9))
     ck(len(hashlib.sha256(b"x").hexdigest()) == 64)
-    if len(checks) != 29:
+    if len(checks) != 30:
         raise AssertionError("SELFTEST_COUNT")
-    return "B2DR2ST N-T29-X0 C-0"
+    return "B2DR3ST N-T30-X0 C-0"
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -677,11 +693,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except Exception as exc:
         reason = getattr(exc, "reason", token(exc.__class__.__name__))
         detail = getattr(exc, "detail", token(exc))
-        print(f"B2DR2E K-{reason}-D-{detail}-X1 C-7")
+        print(f"B2DR3E K-{reason}-D-{detail}-X1 C-7")
         if run_root is not None:
             snapshot = diagnostic_snapshot(run_root)
             failure = {
-                "FailureContract": "UDP002_U22B2DR2_FAILURE_V0_1",
+                "FailureContract": "UDP002_U22B2DR3_FAILURE_V0_1",
                 "ProgramId": PROGRAM_ID,
                 "RunId": RUN_ID,
                 "Reason": reason,
@@ -692,7 +708,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             latest = snapshot.get("LatestExecutionRecord")
             latest_reason = latest.get("Reason") if isinstance(latest, dict) else "NA"
             print(
-                f"B2DR2D N-S{token(snapshot.get('RunStatus'), 20)}"
+                f"B2DR3D N-S{token(snapshot.get('RunStatus'), 20)}"
                 f"-M{snapshot.get('CompletedModuleCount', 0)}"
                 f"-A{snapshot.get('ArtifactCount', 0)}"
                 f"-R{token(latest_reason, 40)}-X0 C-0"
