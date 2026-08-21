@@ -1,0 +1,458 @@
+#!/usr/bin/env python3
+"""Qualify the B2 Module pack and prepare one short non-executing Run plan."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+
+
+PROGRAM_ID = "UDP002-U22B2C-MODULE-QUALIFICATION-AND-SHORT-PLAN"
+PROGRAM_VERSION = "0.1"
+CONTRACT_VERSION = "U22.0.1"
+RUN_ID = "U22B2C_TC001_F41480_41750_V01"
+FRAME_START = 41480
+FRAME_END = 41750
+
+REGISTRY = Path("01_PROGRAMS/core/u002_u22_module_registry_v0_1.py")
+QUALIFICATION = Path("01_PROGRAMS/core/u002_u22_module_qualification_v0_1.py")
+PREFLIGHT = Path("01_PROGRAMS/core/u002_u22_engine_preflight_v0_1.py")
+FREEZE_AUDITOR = Path("05_TESTS/integration/u002_u22_synthetic_vertical_acceptance_v0_1.py")
+AVAILABILITY = Path("00_CONTROL/registry/u002_module_availability_snapshot_v0_1.json")
+CAMERA_RECEIPT = Path(
+    "00_CONTROL/registry/"
+    "u22b1b2_camera_target_reconstruction_acceptance_receipt_v0_1.json"
+)
+B1AR_RECEIPT_NAME = "u22b1ar_real_handoff_receipt.json"
+
+NEW_MODULES = (
+    ("CameraRadar.S1.RadarMeasurementValidity", "0.1.0"),
+    ("CameraRadar.S2.ComparisonPopulation", "0.1.0"),
+    ("CameraRadar.S3.SignedDiscrepancy", "0.1.0"),
+)
+
+
+class PlanError(RuntimeError):
+    """Represent one deterministic B2C failure."""
+
+    def __init__(self, reason: str, detail: object = "NA"):
+        self.reason = token(reason, 60)
+        self.detail = token(detail, 90)
+        super().__init__(self.reason)
+
+
+def token(value: object, limit: int = 80) -> str:
+    text = re.sub(r"[^A-Z0-9_.:+-]+", "_", str(value).upper())
+    return text.strip("_")[:limit] or "NA"
+
+
+def canonical_bytes(value: object) -> bytes:
+    text = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+        allow_nan=False,
+    )
+    return (text + "\n").encode("utf-8")
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def load_json(path: Path, reason: str) -> Dict[str, object]:
+    if not path.is_file() or path.is_symlink():
+        raise PlanError(reason + "_MISSING", path.name)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        raise PlanError(reason + "_JSON", path.name) from exc
+    if not isinstance(value, dict):
+        raise PlanError(reason + "_TYPE", path.name)
+    return value
+
+
+def write_exact(path: Path, value: object) -> None:
+    payload = canonical_bytes(value)
+    if path.exists():
+        if not path.is_file() or path.is_symlink() or path.read_bytes() != payload:
+            raise PlanError("EXISTING_FILE_CONFLICT", path.name)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".writing")
+    temporary.write_bytes(payload)
+    os.replace(temporary, path)
+
+
+def require_workspace(path: Path) -> Path:
+    root = path.resolve()
+    if not root.is_dir() or root.name != "U-UDP002":
+        raise PlanError("WORKSPACE_ROOT")
+    required = (REGISTRY, QUALIFICATION, PREFLIGHT, FREEZE_AUDITOR, CAMERA_RECEIPT)
+    missing = [item.as_posix() for item in required if not (root / item).is_file()]
+    if missing:
+        raise PlanError("WORKSPACE_DEPENDENCY", missing[0])
+    return root
+
+
+def run_child(
+    root: Path,
+    relative_program: Path,
+    arguments: Sequence[str],
+    expected_prefix: str,
+    timeout: int = 120,
+) -> str:
+    completed = subprocess.run(
+        [sys.executable, str(root / relative_program), *arguments],
+        cwd=root.parent,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+    lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    capsule = lines[-1] if lines else "MISSING"
+    if completed.returncode != 0 or not capsule.startswith(expected_prefix) or not capsule.endswith("C-0"):
+        detail = capsule if capsule != "MISSING" else completed.stderr[-160:]
+        raise PlanError("CHILD_" + relative_program.stem, detail)
+    return capsule
+
+
+def freeze_audit(root: Path) -> str:
+    return run_child(
+        root,
+        FREEZE_AUDITOR,
+        ["--audit-freeze", "--workspace-root", str(root)],
+        "U22A7F",
+        timeout=90,
+    )
+
+
+def refresh_availability(root: Path) -> Dict[str, object]:
+    run_child(
+        root,
+        QUALIFICATION,
+        ["--refresh-availability", "--workspace-root", str(root)],
+        "U22A4Q",
+    )
+    return load_json(root / AVAILABILITY, "AVAILABILITY")
+
+
+def availability_entry(
+    availability: Mapping[str, object],
+    module_id: str,
+    module_version: str,
+) -> Mapping[str, object]:
+    entries = availability.get("Entries")
+    if not isinstance(entries, list):
+        raise PlanError("AVAILABILITY_ENTRIES")
+    matches = [
+        item for item in entries
+        if item.get("ModuleId") == module_id
+        and item.get("ModuleVersion") == module_version
+    ]
+    if len(matches) != 1:
+        raise PlanError("AVAILABILITY_COUNT", module_id)
+    return matches[0]
+
+
+def qualify_new_modules(root: Path) -> int:
+    """Qualify once or audit an already qualified identical Module."""
+
+    newly_qualified = 0
+    for module_id, module_version in NEW_MODULES:
+        availability = refresh_availability(root)
+        entry = availability_entry(availability, module_id, module_version)
+        identity = module_id + "@" + module_version
+        if entry.get("RegistryStatus") == "AVAILABLE":
+            run_child(
+                root,
+                QUALIFICATION,
+                ["--audit-module", identity, "--workspace-root", str(root)],
+                "U22A4Q",
+            )
+        else:
+            run_child(
+                root,
+                QUALIFICATION,
+                [
+                    "--qualify-module", identity,
+                    "--workspace-root", str(root),
+                    "--timeout-seconds", "120",
+                ],
+                "U22A4Q",
+            )
+            newly_qualified += 1
+    final = refresh_availability(root)
+    for module_id, module_version in NEW_MODULES:
+        entry = availability_entry(final, module_id, module_version)
+        if entry.get("RegistryStatus") != "AVAILABLE":
+            raise PlanError("MODULE_NOT_AVAILABLE", module_id)
+    return newly_qualified
+
+
+def discover_b1ar(root: Path) -> Tuple[Path, Dict[str, object]]:
+    candidates: List[Tuple[int, int, Path, Dict[str, object]]] = []
+    for path in (root / "07_OUTPUT").glob("*/" + B1AR_RECEIPT_NAME):
+        try:
+            receipt = load_json(path, "B1AR")
+            if receipt.get("Status") != "REAL_U001_HANDOFF_ACCEPTED":
+                continue
+            frame = receipt.get("FrameDomain")
+            if not isinstance(frame, dict):
+                continue
+            package = Path(str(receipt.get("SelectedPackage", ""))).resolve()
+            if not package.is_dir() or package.is_symlink():
+                continue
+            rows = int(frame.get("FrameRows", 0))
+            candidates.append((rows, path.stat().st_mtime_ns, path, receipt))
+        except Exception:
+            continue
+    if not candidates:
+        raise PlanError("B1AR_RECEIPT_NOT_FOUND")
+    _, _, path, receipt = max(candidates, key=lambda item: (item[0], item[1], str(item[2])))
+    return path, receipt
+
+
+def accepted_s0(receipt_path: Path) -> Tuple[str, str]:
+    plan = load_json(receipt_path.parent / "00_CONFIG/resolved_run_plan.json", "B1AR_PLAN")
+    modules = plan.get("ModulePlan")
+    if not isinstance(modules, list):
+        raise PlanError("B1AR_MODULE_PLAN")
+    matches = [
+        item for item in modules
+        if isinstance(item, dict)
+        and item.get("Stage") == "S0"
+        and "U001_INTAKE_ACCEPTED" in item.get("ProvidesArtifacts", [])
+    ]
+    if len(matches) != 1:
+        raise PlanError("S0_IDENTITY_COUNT")
+    return str(matches[0]["ModuleId"]), str(matches[0]["ModuleVersion"])
+
+
+def accepted_camera(root: Path) -> Tuple[str, str, Dict[str, object]]:
+    receipt = load_json(root / CAMERA_RECEIPT, "CAMERA_RECEIPT")
+    if receipt.get("Status") != "S1_MODULE_INSTALLED_AND_QUALIFIED":
+        raise PlanError("CAMERA_RECEIPT_STATUS")
+    relative = Path(str(receipt.get("ConfigurationRelativePath", "")))
+    configuration_path = root / relative
+    if sha256_file(configuration_path) != receipt.get("ConfigurationSha256"):
+        raise PlanError("CAMERA_CONFIGURATION_HASH")
+    configuration = load_json(configuration_path, "CAMERA_CONFIGURATION")
+    return str(receipt["ModuleId"]), str(receipt["ModuleVersion"]), configuration
+
+
+def validate_frame_range(receipt: Mapping[str, object]) -> None:
+    frame = receipt.get("FrameDomain")
+    if not isinstance(frame, dict):
+        raise PlanError("FRAME_DOMAIN")
+    minimum = int(frame.get("FrameMin"))
+    maximum = int(frame.get("FrameMax"))
+    if FRAME_START < minimum or FRAME_END > maximum:
+        raise PlanError("FRAME_RANGE_OUTSIDE_SOURCE", f"{minimum}.{maximum}")
+
+
+def build_configuration(
+    package: Path,
+    s0: Tuple[str, str],
+    camera: Tuple[str, str, Mapping[str, object]],
+) -> Dict[str, object]:
+    camera_configuration = dict(camera[2])
+    radar_configuration = {
+        "BindingProfilePath": camera_configuration["BindingProfilePath"],
+        "BindingProfileSha256": camera_configuration["BindingProfileSha256"],
+    }
+    return {
+        "ContractVersion": CONTRACT_VERSION,
+        "RunId": RUN_ID,
+        "RunPurpose": "EVALUATION",
+        "RunScope": "FRAME_RANGE",
+        "FrameStart": FRAME_START,
+        "FrameEnd": FRAME_END,
+        "InputPackage": str(package.resolve()),
+        "SignalProfile": "TC001.CameraRadar.Base.PROVISIONAL@0.1",
+        "ModulePlan": [
+            {
+                "Sequence": 1,
+                "Stage": "S0",
+                "ModuleId": s0[0],
+                "ModuleVersion": s0[1],
+                "Configuration": {},
+            },
+            {
+                "Sequence": 2,
+                "Stage": "S1",
+                "ModuleId": camera[0],
+                "ModuleVersion": camera[1],
+                "Configuration": camera_configuration,
+            },
+            {
+                "Sequence": 3,
+                "Stage": "S1",
+                "ModuleId": NEW_MODULES[0][0],
+                "ModuleVersion": NEW_MODULES[0][1],
+                "Configuration": radar_configuration,
+            },
+            {
+                "Sequence": 4,
+                "Stage": "S2",
+                "ModuleId": NEW_MODULES[1][0],
+                "ModuleVersion": NEW_MODULES[1][1],
+                "Configuration": {},
+            },
+            {
+                "Sequence": 5,
+                "Stage": "S3",
+                "ModuleId": NEW_MODULES[2][0],
+                "ModuleVersion": NEW_MODULES[2][1],
+                "Configuration": {},
+            },
+        ],
+        "PrimaryOutcome": {
+            "Name": "CameraRadarDiscrepancy",
+            "Formula": "RadarDistance-CanonicalCameraDistance",
+            "Sign": "REFERENCE-TARGET",
+            "Unit": "m",
+            "Purpose": "EXPLORATORY",
+        },
+        "CandidatePolicy": "NotAppliedInU22B2C@0.1",
+        "OutputSelection": [
+            "U001_INTAKE_ACCEPTED",
+            "CAMERA_TARGET_RECONSTRUCTION",
+            "RADAR_VALIDITY",
+            "COMPARISON_POPULATION",
+            "PRIMARY_OUTCOME",
+        ],
+    }
+
+
+def prepare_short_plan(root: Path) -> Tuple[int, int]:
+    receipt_path, receipt = discover_b1ar(root)
+    validate_frame_range(receipt)
+    package = Path(str(receipt["SelectedPackage"])).resolve()
+    s0 = accepted_s0(receipt_path)
+    camera = accepted_camera(root)
+    configuration = build_configuration(package, s0, camera)
+    config_path = root / "02_CONFIG/run_configs" / (RUN_ID + ".json")
+    write_exact(config_path, configuration)
+    capsule = run_child(
+        root,
+        PREFLIGHT,
+        ["--prepare-run", str(config_path), "--workspace-root", str(root)],
+        "U22A5E",
+    )
+    match = re.search(r"-R([01])-P1-X0 C-0$", capsule)
+    if match is None:
+        raise PlanError("PREFLIGHT_CAPSULE", capsule)
+    replay = int(match.group(1))
+    plan = load_json(root / "07_OUTPUT" / RUN_ID / "00_CONFIG/resolved_run_plan.json", "RESOLVED_PLAN")
+    modules = plan.get("ModulePlan")
+    if not isinstance(modules, list) or len(modules) != 5:
+        raise PlanError("RESOLVED_MODULE_COUNT")
+    if [item.get("Stage") for item in modules] != ["S0", "S1", "S1", "S2", "S3"]:
+        raise PlanError("RESOLVED_STAGE_ORDER")
+    return replay, len(modules)
+
+
+def self_test() -> str:
+    checks = []
+    def ck(value: bool) -> None:
+        if not value:
+            raise AssertionError("SELFTEST")
+        checks.append(True)
+    ck(PROGRAM_ID.startswith("UDP002"))
+    ck(PROGRAM_VERSION == "0.1")
+    ck(CONTRACT_VERSION == "U22.0.1")
+    ck(FRAME_START < FRAME_END)
+    ck(FRAME_END - FRAME_START + 1 == 271)
+    ck(len(NEW_MODULES) == 3)
+    ck([item[0].split(".")[1] for item in NEW_MODULES] == ["S1", "S2", "S3"])
+    ck(RUN_ID.startswith("U22B2C_"))
+    ck(token("a b/c") == "A_B_C")
+    ck(len(hashlib.sha256(b"x").hexdigest()) == 64)
+    with tempfile.TemporaryDirectory() as temporary:
+        package = Path(temporary) / "package"
+        package.mkdir()
+        camera_config = {
+            "BindingProfilePath": "02_CONFIG/profiles/test.json",
+            "BindingProfileSha256": "a" * 64,
+            "OtherAcceptedCameraField": 3,
+        }
+        config = build_configuration(
+            package,
+            ("CameraRadar.S0.U001Intake", "0.1.0"),
+            ("CameraRadar.S1.CameraTargetContinuityArbitration", "0.1.0", camera_config),
+        )
+        ck(len(config["ModulePlan"]) == 5)
+        ck([item["Sequence"] for item in config["ModulePlan"]] == [1, 2, 3, 4, 5])
+        ck([item["Stage"] for item in config["ModulePlan"]] == ["S0", "S1", "S1", "S2", "S3"])
+        ck(config["ModulePlan"][2]["Configuration"] == {
+            "BindingProfilePath": "02_CONFIG/profiles/test.json",
+            "BindingProfileSha256": "a" * 64,
+        })
+        ck(config["PrimaryOutcome"]["Formula"] == "RadarDistance-CanonicalCameraDistance")
+        ck(config["FrameStart"] == FRAME_START)
+        ck(config["FrameEnd"] == FRAME_END)
+        ck(len(config["OutputSelection"]) == 5)
+        path = Path(temporary) / "config.json"
+        write_exact(path, config)
+        write_exact(path, config)
+        ck(path.is_file())
+        ck(load_json(path, "TEST")["RunId"] == RUN_ID)
+    ck(CAMERA_RECEIPT.name.endswith(".json"))
+    ck(AVAILABILITY.name.endswith(".json"))
+    ck(QUALIFICATION.suffix == ".py")
+    ck(PREFLIGHT.suffix == ".py")
+    if len(checks) != 24:
+        raise AssertionError("SELFTEST_COUNT")
+    return "B2C-ST N-T24-X0 C-0"
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--qualify-and-prepare", action="store_true")
+    parser.add_argument("--workspace-root")
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        if args.self_test:
+            print(self_test())
+            return 0
+        if not args.workspace_root:
+            raise PlanError("WORKSPACE_ROOT_REQUIRED")
+        root = require_workspace(Path(args.workspace_root))
+        freeze_before = freeze_audit(root)
+        qualified = qualify_new_modules(root)
+        replay, module_count = prepare_short_plan(root)
+        freeze_after = freeze_audit(root)
+        if freeze_before != freeze_after:
+            raise PlanError("FOUNDATION_CHANGED")
+        print(
+            f"B2C N-Q{qualified}-A3-M{module_count}-S4"
+            f"-F{FRAME_START}.{FRAME_END}-R{replay}-X0 C-0"
+        )
+        return 0
+    except PlanError as exc:
+        print(f"B2CE K-{exc.reason}-D-{exc.detail}-X1 C-7")
+        return 7
+    except Exception as exc:
+        print(f"B2CE K-{token(exc.__class__.__name__)}-D-{token(exc)}-X1 C-7")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
