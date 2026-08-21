@@ -1,0 +1,168 @@
+UDP002 U22B3 公司端真实数据验收执行指南
+版本：v0.1
+日期：2026-08-21
+
+一、本次做什么
+
+本节点在已通过的 U22B2F S0-S3 流程后增加两个独立 Module：
+
+S4：Distance-bin Median Baseline
+- 按 RadarDistance 的 5 m 区间估计常态 Camera-Radar discrepancy。
+- 使用 median，降低少量异常值对 baseline 的影响。
+- 样本不足的距离箱使用全局 median，并在输出中明确标记 fallback。
+
+S5：Robust Residual Evidence
+- 计算 Residual = CameraRadarDiscrepancy - BaselineEstimate。
+- 使用零中心 MAD 估计 robust scale。
+- 输出 SignedRobustScore 与 RobustAnomalyScore。
+- 本阶段不设异常阈值，不做 persistence/event merge，不判断 root cause。
+
+本包已在 Mac 本地通过：
+- S0-S5 七 Module 完整执行；
+- 七 Artifact 完整审计；
+- 数学恒等式检查；
+- 确定性 replay；
+- 非法配置 fail-close；
+- Payload 篡改检测与恢复审计。
+
+
+二、开始前确认
+
+从 C-CODE 目录打开 CMD。
+
+1. 确认 U002 工作区存在：
+
+dir U-UDP002
+
+2. 确认 B2F 源配置存在：
+
+dir U-UDP002\02_CONFIG\run_configs\U22B2F_TC001_F41480_41750_V01.json
+
+3. 把以下两个下载文件放到：
+
+U-UDP002\04_TEMP
+
+- UDP002_U22B3_RELEASE_v0_1.zip.txt
+- 本执行指南
+
+4. 将 ZIP 文件重命名：
+
+ren U-UDP002\04_TEMP\UDP002_U22B3_RELEASE_v0_1.zip.txt UDP002_U22B3_RELEASE_v0_1.zip
+
+5. 在资源管理器中解压 ZIP，使下列文件存在：
+
+U-UDP002\04_TEMP\UDP002_U22B3_v0_1\u002_u22b3_install_plan_run_accept_v0_1.py.txt
+
+检查命令：
+
+dir U-UDP002\04_TEMP\UDP002_U22B3_v0_1\u002_u22b3_install_plan_run_accept_v0_1.py.txt
+
+
+三、先运行发布程序自测
+
+在 C-CODE 目录执行：
+
+python U-UDP002\04_TEMP\UDP002_U22B3_v0_1\u002_u22b3_install_plan_run_accept_v0_1.py.txt --self-test
+
+成功标准：
+
+B3REL-ST-PASS-20 C-0
+
+若不是 C-0，停止，不修改 U002 其他文件；只回传最后一行。
+
+
+四、执行一次真实数据验收
+
+仍在 C-CODE 目录执行下面一整条命令：
+
+python U-UDP002\04_TEMP\UDP002_U22B3_v0_1\u002_u22b3_install_plan_run_accept_v0_1.py.txt --execute --workspace-root U-UDP002 --release-root U-UDP002\04_TEMP\UDP002_U22B3_v0_1 --source-config 02_CONFIG\run_configs\U22B2F_TC001_F41480_41750_V01.json --run-id U22B3_TC001_F41480_41750_V01 --module-timeout-seconds 900 --diagnostic-json 04_TEMP\U22B3_TC001_F41480_41750_V01_diagnostic_v0_1.json
+
+程序会自动完成：
+
+1. 校验发布包文件集和 SHA-256；
+2. 安装或确认 S4/S5 Module；
+3. 分别运行 Module qualification；
+4. 读取并严格确认已通过的 B2F 五 Module 配置；
+5. 生成新的 B3 七 Module Run Configuration；
+6. 执行 Engine Preflight；
+7. 串行执行 S0-S5；
+8. 审计七个 Artifact；
+9. 检查行数守恒、Residual 公式和 Robust Score 公式；
+10. 写出详细 diagnostic JSON。
+
+
+五、成功标准与回传
+
+预计成功行格式：
+
+B3R N-M7-A7-R271-O40-V40-E40-B?-G?-X0 C-0
+
+字段：
+
+M：执行 Module 数，本次必须为 7。
+A：Artifact 数，本次必须为 7。
+R：分析区间总 Frame 行数，预计继承 B2F 的 271。
+O：S3 OutcomeValid 行数，预计为 40。
+V：S4 ResidualValid 行数，必须与 O 相同。
+E：S5 EvidenceValid 行数，必须与 V 相同。
+B：实际建立的距离箱数量，由真实数据决定。
+G：使用 global median fallback 的行数，由真实距离分布决定。
+X0 C-0：完整验收通过。
+
+只需回传最后一行，不需要手敲长日志。
+
+若失败：
+
+1. 不要自行修改 Module、Validator、Executor 或源 B2F 配置。
+2. 回传 B3R 的 C-7 行。
+3. 如 K 字段不足以定位，再查看：
+
+U-UDP002\04_TEMP\U22B3_TC001_F41480_41750_V01_diagnostic_v0_1.json
+
+只补充其中 Status、Reason 和最后一个 Diagnostics 项即可。
+
+
+六、输出位置
+
+新 Run Configuration：
+
+U-UDP002\02_CONFIG\run_configs\U22B3_TC001_F41480_41750_V01.json
+
+完整 Run：
+
+U-UDP002\07_OUTPUT\U22B3_TC001_F41480_41750_V01
+
+详细诊断：
+
+U-UDP002\04_TEMP\U22B3_TC001_F41480_41750_V01_diagnostic_v0_1.json
+
+执行后检查输出目录：
+
+dir U-UDP002\07_OUTPUT\U22B3_TC001_F41480_41750_V01
+
+
+七、结果解释边界
+
+- CameraRadarDiscrepancy 仍是 RadarDistance - CanonicalCameraDistance。
+- Radar 只是暂定 reference，不是 ground truth。
+- Baseline 是当前距离条件下的常态 discrepancy 估计。
+- Residual 是剥离该 baseline 后的剩余 discrepancy。
+- RobustAnomalyScore 只表示 residual 相对于 ordinary robust spread 的罕见程度。
+- 本次 baseline 和 scale 来自同一 Run，属于 descriptive evidence，不是跨日志泛化验证。
+- 本阶段不输出 confirmed event，不给出 root cause，不判断 Camera 或 Radar 谁错。
+
+
+八、本节点之后
+
+B3 通过后进入 B4：Candidate Synthesis。
+
+B4 才负责：
+
+- threshold；
+- persistence；
+- event merging；
+- 相邻候选抑制；
+- Top 40；
+- 输出 U003 Review Package。
+
+不要在 B3 内提前加入上述职责。
