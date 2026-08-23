@@ -6,13 +6,13 @@ UDP002 U22B4C v0.2 精度修正版执行指南
 
 v0.1错误地把B4A回传胶囊中四舍五入显示的MAX=2.445当成精确浮点值。
 
-S6 Artifact保存的是更高精度数值，因此S6本身已经成功运行，但v0.1最后的验收器返回：
+S6 Artifact保存的是更高精度数值。S6已通过本地和既有独立验收；公司端v0.1则在正式S6执行前被错误的精确值检查拒绝，并返回：
 
 K-EXPECTED_PEAK_SCORE
 
 v0.2不再使用手工回传的舍入值。它会直接读取同一Run内经过Hash验证的S5 ROBUST_RESIDUAL_EVIDENCE，重新计算精确最大值、峰值FrameCount和Severity，再与S6候选逐项比较。
 
-本次不修改S6算法、阈值、配置、已有Run或已有Artifact。
+因此该C-7不能视为公司端S6执行失败。本次不修改S6算法、阈值、配置、已有Run或已有Artifact。
 
 二、下载与解压
 
