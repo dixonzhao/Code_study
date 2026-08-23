@@ -1,0 +1,170 @@
+UDP002 U22B4C：S6候选合成安装、运行与验收指南
+版本：v0.1
+日期：2026-08-24
+执行环境：Windows CMD，当前目录为C-CODE
+
+一、本次要完成什么
+
+本步骤在已经通过的U22B3 S0-S5结果上新增S6：
+
+ROBUST_RESIDUAL_EVIDENCE
+-> threshold hit
+-> 20 FrameCount范围内的hit burst
+-> 至少2个hit才保留
+-> 100 FrameCount范围内合并为一个调查候选
+-> 最多输出Top 40
+-> ANOMALY_CANDIDATES
+
+S6输出的是“人工调查候选”，不是已确认Event，也不判断root cause。
+
+本次固定策略：
+
+EvidenceThreshold = 2.0
+HitBurstGapFrames = 20
+MinimumBurstHits = 2
+CandidateMergeGapFrames = 100
+MaximumCandidates = 40
+ReviewPaddingFrames = 400
+HighSeverityThreshold = 3.0
+CriticalSeverityThreshold = 5.0
+
+二、执行前必须存在
+
+1. 工作区：
+
+U-UDP002
+
+2. 已完成的B3配置：
+
+U-UDP002\02_CONFIG\run_configs\U22B3_TC001_F41480_41750_V01.json
+
+3. B3运行已经C-0。不要删除或修改B3 Run。
+
+4. 下载并解压：
+
+UDP002_U22B4C_v0_1.zip
+
+解压后的目录必须是：
+
+U-UDP002\04_TEMP\UDP002_U22B4C_v0_1
+
+该目录下应直接看到：
+
+release_manifest.json
+u002_u22b4c_install_plan_run_accept_v0_1.py.txt
+modules
+
+三、Step 1：确认输入和Release目录存在
+
+在C-CODE的CMD执行：
+
+if exist U-UDP002\02_CONFIG\run_configs\U22B3_TC001_F41480_41750_V01.json (echo B3-CONFIG-OK) else (echo B3-CONFIG-MISSING)
+
+if exist U-UDP002\04_TEMP\UDP002_U22B4C_v0_1\release_manifest.json (echo B4C-RELEASE-OK) else (echo B4C-RELEASE-MISSING)
+
+必须同时看到：
+
+B3-CONFIG-OK
+B4C-RELEASE-OK
+
+四、Step 2：Release自测
+
+执行：
+
+python U-UDP002\04_TEMP\UDP002_U22B4C_v0_1\u002_u22b4c_install_plan_run_accept_v0_1.py.txt --self-test
+
+成功标准：
+
+B4C-ST-PASS-23 C-0
+
+如果不是C-0，不要继续正式执行，返回完整错误行。
+
+五、Step 3：自动安装S6并执行S0-S6
+
+整行复制到CMD执行：
+
+python U-UDP002\04_TEMP\UDP002_U22B4C_v0_1\u002_u22b4c_install_plan_run_accept_v0_1.py.txt --execute --workspace-root U-UDP002 --release-root U-UDP002\04_TEMP\UDP002_U22B4C_v0_1 --source-config 02_CONFIG\run_configs\U22B3_TC001_F41480_41750_V01.json --run-id U22B4C_TC001_F41480_41750_V01 --module-timeout-seconds 900 --diagnostic-json 04_TEMP\U22B4C_TC001_F41480_41750_V01_diagnostic_v0_1.json
+
+程序会依次自动完成：
+
+1. 校验Release Manifest和所有文件SHA-256；
+2. 安装或字节级确认S6 Module；
+3. 刷新Module Registry；
+4. 运行S6 qualification self-test；
+5. 刷新Module availability；
+6. 从已验收B3配置生成新的S0-S6配置；
+7. Preflight；
+8. 执行8个Module；
+9. Artifact Store audit；
+10. 检查实测B4A画像对应的候选结果。
+
+原B3配置和B3 Run不会被修改。
+
+六、Step 4：确认输出目录
+
+执行：
+
+if exist U-UDP002\07_OUTPUT\U22B4C_TC001_F41480_41750_V01 (echo B4C-OUTPUT-OK) else (echo B4C-OUTPUT-MISSING)
+
+if exist U-UDP002\07_OUTPUT\U22B4C_TC001_F41480_41750_V01\03_ARTIFACTS\S6 (echo B4C-S6-OK) else (echo B4C-S6-MISSING)
+
+必须同时看到：
+
+B4C-OUTPUT-OK
+B4C-S6-OK
+
+主要人工查看文件位于S6 Artifact目录：
+
+anomaly_candidates.csv
+anomaly_candidates_quality.json
+artifact_manifest.json
+
+七、需要回传的内容
+
+只回传两行：
+
+1. Step 2的完整一行；
+2. Step 3的完整一行。
+
+预计成功形式：
+
+B4C-ST-PASS-23 C-0
+B4C N-M8-A8-R271-V40-H2-C1-P41481-X0 C-0
+
+字段含义：
+
+M8 = 共执行8个Module
+A8 = 共生成8个Artifact
+R271 = S5/S6输入Frame行数
+V40 = EvidenceValid行数
+H2 = score >= 2.0的hit数
+C1 = 输出1个调查候选
+P41481 = 候选峰值FrameCount
+X0 C-0 = 无异常，验收通过
+
+八、失败时怎么回传
+
+若出现C-7，只回传：
+
+1. 完整C-7行；
+2. 以下诊断JSON是否存在（YES/NO）：
+
+U-UDP002\04_TEMP\U22B4C_TC001_F41480_41750_V01_diagnostic_v0_1.json
+
+不要让实现工具自行修改S6算法、阈值、Gate或Validator。
+
+九、成功后的边界
+
+B4C C-0只说明：
+
+- B4A观察到的两个高分点已被确定性压缩成一个调查候选；
+- S0-S6纵向技术链路已打通；
+- 输出具有Manifest、Hash、Lineage和配置记录。
+
+它不说明：
+
+- 已确认Camera或Radar故障；
+- 已识别root cause；
+- 阈值已在全视频或其他日志上完成泛化验证。
+
+下一步是S7 Review Package/Handoff，然后进入U003视频+CAN人工证据确认。
