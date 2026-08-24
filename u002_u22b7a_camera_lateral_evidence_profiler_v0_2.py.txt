@@ -21,7 +21,7 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
 PROGRAM_ID = "UDP002.U22B7A.CameraLateralEvidenceProfiler"
-PROGRAM_VERSION = "0.1.0"
+PROGRAM_VERSION = "0.2.0"
 
 SIGNAL_REQUESTS = {
     "CAMERA_1_DISTANCE": ("2", "0x221", "Distance", True),
@@ -78,6 +78,12 @@ def machine_token(value: object, limit: int = 100) -> str:
 
     token = re.sub(r"[^A-Z0-9_]+", "_", str(value).upper()).strip("_")
     return (token or "UNKNOWN")[:limit]
+
+
+def error_reason(error: BaseException) -> str:
+    """Return a stable reason even when one exception has an empty args tuple."""
+
+    return str(error.args[0]) if error.args else type(error).__name__
 
 
 def canonical_bytes(value: object) -> bytes:
@@ -150,6 +156,12 @@ def normalize_can_id(value: object) -> str:
     return f"0x{number:X}".lower()
 
 
+def normalize_identifier(value: object) -> str:
+    """Normalize harmless separators without crossing a CAN identity boundary."""
+
+    return re.sub(r"[^a-z0-9]+", "", str(value).strip().casefold())
+
+
 def unique_file(root: Path, name: str, reason: str) -> Path:
     """Resolve exactly one regular file by basename."""
 
@@ -159,8 +171,8 @@ def unique_file(root: Path, name: str, reason: str) -> Path:
     return matches[0]
 
 
-def discover_run_root(workspace_root: Path) -> Path:
-    """Choose the newest completed run containing S1 reconstruction evidence."""
+def candidate_run_roots(workspace_root: Path) -> List[Path]:
+    """List completed Run roots newest first without selecting one blindly."""
 
     output_root = workspace_root / "07_OUTPUT"
     if not output_root.is_dir():
@@ -174,10 +186,34 @@ def discover_run_root(workspace_root: Path) -> Path:
             current = current.parent
         if current.parent == output_root:
             candidates.append((path.stat().st_mtime_ns, current))
-    unique = {path.resolve(): stamp for stamp, path in candidates}
+    unique: Dict[Path, int] = {}
+    for stamp, path in candidates:
+        resolved = path.resolve()
+        unique[resolved] = max(unique.get(resolved, 0), stamp)
     if not unique:
         raise ProfileError("COMPLETED_RUN_NOT_FOUND")
-    return max(unique, key=lambda path: unique[path])
+    return sorted(unique, key=lambda path: unique[path], reverse=True)
+
+
+def discover_run_root(workspace_root: Path) -> Path:
+    """Choose the newest completed Run whose U001 package has paired geometry."""
+
+    failures: List[str] = []
+    for run_root in candidate_run_roots(workspace_root):
+        try:
+            input_package = locate_input_package(run_root)
+            catalog = unique_file(
+                input_package,
+                "u001_signal_catalog.csv",
+                "SIGNAL_CATALOG",
+            )
+            resolve_signals(catalog)
+            return run_root
+        except Exception as error:
+            failures.append(machine_token(error_reason(error)))
+    raise ProfileError(
+        "NO_COMPATIBLE_RUN_" + str(len(failures)) + "_" + "_".join(failures[:3])
+    )
 
 
 def locate_input_package(run_root: Path) -> Path:
@@ -212,19 +248,116 @@ def resolve_signals(catalog_path: Path) -> Dict[str, str]:
 
     resolved: Dict[str, str] = {}
     for role, (channel, can_id, signal_name, required) in SIGNAL_REQUESTS.items():
-        matches = [
+        identity_rows = [
             row
             for row in rows
             if str(row.get("Channel", "")).strip() == channel
             and normalize_can_id(row.get("CAN_ID", "")) == normalize_can_id(can_id)
-            and str(row.get("SignalName", "")).strip().casefold()
-            == signal_name.casefold()
         ]
+        requested = normalize_identifier(signal_name)
+        matches = [
+            row
+            for row in identity_rows
+            if normalize_identifier(row.get("SignalName", "")) == requested
+        ]
+        if not matches:
+            matches = [
+                row
+                for row in identity_rows
+                if normalize_identifier(row.get("CanonicalName", "")).endswith(requested)
+            ]
         if len(matches) == 1:
             resolved[role] = str(matches[0]["CanonicalName"]).strip()
         elif required:
             raise ProfileError(f"SIGNAL_{role}_COUNT_{len(matches)}")
     return resolved
+
+
+def discovery_diagnostic(
+    workspace_root: Optional[Path],
+    explicit_run_root: Optional[Path],
+) -> Tuple[Dict[str, object], str]:
+    """Collect all Run/catalog evidence after one failure in the same execution."""
+
+    run_roots: List[Path] = []
+    if explicit_run_root is not None:
+        run_roots = [explicit_run_root]
+    elif workspace_root is not None:
+        try:
+            run_roots = candidate_run_roots(workspace_root)
+        except Exception:
+            run_roots = []
+
+    records: List[Dict[str, object]] = []
+    input_count = 0
+    catalog_count = 0
+    camera_1_lateral_count = 0
+    camera_3_lateral_count = 0
+    compatible_count = 0
+    for run_root in run_roots:
+        record: Dict[str, object] = {"RunRoot": str(run_root)}
+        try:
+            input_package = locate_input_package(run_root)
+            input_count += 1
+            record["InputPackage"] = str(input_package)
+            catalog = unique_file(
+                input_package,
+                "u001_signal_catalog.csv",
+                "SIGNAL_CATALOG",
+            )
+            catalog_count += 1
+            record["SignalCatalog"] = str(catalog)
+            with catalog.open("r", encoding="utf-8-sig", newline="") as stream:
+                rows = list(csv.DictReader(stream))
+            observed: Dict[str, List[str]] = {"0x221": [], "0x251": []}
+            for row in rows:
+                try:
+                    can_id = normalize_can_id(row.get("CAN_ID", ""))
+                except Exception:
+                    continue
+                if str(row.get("Channel", "")).strip() != "2":
+                    continue
+                if can_id in observed:
+                    observed[can_id].append(str(row.get("SignalName", "")))
+            record["ObservedCameraSignals"] = {
+                key: sorted(set(values)) for key, values in observed.items()
+            }
+            camera_1_lateral_count += int(
+                any(
+                    normalize_identifier(value) == "lateralposition"
+                    for value in observed["0x221"]
+                )
+            )
+            camera_3_lateral_count += int(
+                any(
+                    normalize_identifier(value) == "lateralposition"
+                    for value in observed["0x251"]
+                )
+            )
+            record["ResolvedSignals"] = resolve_signals(catalog)
+            record["Compatible"] = True
+            compatible_count += 1
+        except Exception as error:
+            record["Compatible"] = False
+            record["Reason"] = machine_token(error_reason(error))
+        records.append(record)
+    document = {
+        "ProgramId": PROGRAM_ID,
+        "ProgramVersion": PROGRAM_VERSION,
+        "CandidateRunCount": len(run_roots),
+        "InputPackageCount": input_count,
+        "SignalCatalogCount": catalog_count,
+        "Camera1LateralCatalogCount": camera_1_lateral_count,
+        "Camera3LateralCatalogCount": camera_3_lateral_count,
+        "CompatibleRunCount": compatible_count,
+        "Runs": records,
+    }
+    capsule = (
+        f"B7AD N-R{len(run_roots)}-I{input_count}-C{catalog_count}"
+        f"-L1{camera_1_lateral_count}-L3{camera_3_lateral_count}"
+        f"-K{compatible_count}-X0 C-0"
+    )
+    return document, capsule
 
 
 def group_value(
@@ -583,9 +716,9 @@ def self_test() -> None:
         catalog_columns = ("CanonicalName", "CAN_ID", "Channel", "SignalName")
         catalog_rows = [
             ("C1D", "0x221", "2", "Distance"),
-            ("C1L", "0x221", "2", "LateralPosition"),
+            ("C1L", "0x221", "2", "Lateral_Position"),
             ("C3D", "0x251", "2", "Distance"),
-            ("C3L", "0x251", "2", "LateralPosition"),
+            ("C3L", "0x251", "2", "Lateral Position"),
             ("RD", "0x380", "1", "DistanceToObject"),
             ("RF", "0x380", "1", "PrecedingVehicleDetectionFlag"),
         ]
@@ -650,6 +783,7 @@ def self_test() -> None:
                     }
                 )
         output_dir = root / "04_TEMP/B7A_OUTPUT"
+        assert discover_run_root(root) == run_root.resolve()
         capsule = execute(
             run_root,
             output_dir,
@@ -676,7 +810,8 @@ def self_test() -> None:
         )
         assert sweep[0]["ExactlyOneAuthorizedFrames"] == "4"
         assert sweep[-1]["BothAuthorizedFrames"] == "4"
-    print("UDP002-U22B7A-SELFTEST-PASS-18 C-0")
+        assert len(discovery_diagnostic(root, None)[0]["Runs"]) == 1
+    print("UDP002-U22B7A-SELFTEST-PASS-20 C-0")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -716,11 +851,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(capsule)
         return 0
     except Exception as error:
+        output_dir = Path(args.output_dir).resolve() if args.output_dir else None
+        workspace_root = (
+            Path(args.workspace_root).resolve() if args.workspace_root else None
+        )
+        explicit_run_root = Path(args.run_root).resolve() if args.run_root else None
+        diagnostic, diagnostic_capsule = discovery_diagnostic(
+            workspace_root,
+            explicit_run_root,
+        )
+        diagnostic["FailureReason"] = machine_token(error_reason(error))
+        if output_dir is not None:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "b7a_failure_diagnostic.json").write_bytes(
+                canonical_bytes(diagnostic)
+            )
+            (output_dir / "b7a_failure_capsule.txt").write_text(
+                diagnostic_capsule + "\n",
+                encoding="utf-8",
+            )
         print(
             "B7A N-X1 C-7 K-"
-            + machine_token(getattr(error, "args", [type(error).__name__])[0]),
+            + machine_token(error_reason(error)),
             file=sys.stderr,
         )
+        print(diagnostic_capsule, file=sys.stderr)
         return 7
 
 
