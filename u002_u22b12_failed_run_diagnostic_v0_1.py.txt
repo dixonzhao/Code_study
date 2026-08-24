@@ -1,0 +1,351 @@
+#!/usr/bin/env python3
+"""Read-only diagnostic for a failed U22B12 controlled Run."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+import sys
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+
+
+PROGRAM_ID = "UDP002.U22B12.FailedRunDiagnostic"
+PROGRAM_VERSION = "0.1.0"
+DEFAULT_RUN_ID = "U22B12_GOLDEN_TC001_F41380_41780_V01"
+EXPECTED_MODULE_COUNT = 9
+
+
+class DiagnosticError(RuntimeError):
+    """Represent one deterministic diagnostic failure."""
+
+
+def token(value: object, limit: int = 120) -> str:
+    text = re.sub(r"[^A-Z0-9_.-]+", "_", str(value).upper()).strip("_")
+    return (text or "NONE")[:limit]
+
+
+def canonical_bytes(value: object) -> bytes:
+    text = json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False)
+    return (text + "\n").encode("utf-8")
+
+
+def write_json_atomic(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".writing")
+    if temporary.exists():
+        raise DiagnosticError("TEMP_FILE_EXISTS")
+    temporary.write_bytes(canonical_bytes(value))
+    temporary.replace(path)
+
+
+def write_text_atomic(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".writing")
+    if temporary.exists():
+        raise DiagnosticError("TEMP_FILE_EXISTS")
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(value)
+    temporary.replace(path)
+
+
+def load_json_optional(path: Path) -> Optional[Dict[str, object]]:
+    if not path.is_file() or path.is_symlink():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def read_text_optional(path: Path, limit: int = 200_000) -> str:
+    if not path.is_file() or path.is_symlink():
+        return ""
+    data = path.read_bytes()
+    if len(data) > limit:
+        data = data[-limit:]
+    return data.decode("utf-8", errors="replace")
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def sequence_from_name(path: Path) -> int:
+    match = re.match(r"(\d{4})_", path.name)
+    return int(match.group(1)) if match else 0
+
+
+def important_lines(text: str) -> List[str]:
+    """Retain bounded machine-relevant lines instead of a full traceback dump."""
+
+    selected: List[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        upper = line.upper()
+        if not line:
+            continue
+        if any(
+            marker in upper
+            for marker in (
+                "C-7",
+                "ERROR",
+                "FAILED",
+                "TRACEBACK",
+                "EXCEPTION",
+                "CONTRACT",
+                "MISSING",
+                "COUNT",
+                "HASH",
+                "COLUMN",
+                "MAX_AGE",
+                "SIGNAL",
+                "FRAME",
+                "TYPE",
+            )
+        ):
+            selected.append(line[-500:])
+    return selected[-12:]
+
+
+def module_snapshot(run_root: Path, sequence: int, module_id: str) -> Dict[str, object]:
+    prefix = f"{sequence:04d}_"
+    diagnostic_root = run_root / "02_DIAGNOSTICS/modules"
+    matches = sorted(path for path in diagnostic_root.glob(prefix + "*") if path.is_dir())
+    root = matches[0] if len(matches) == 1 else None
+    request = load_json_optional(root / "module_request.json") if root else None
+    result = load_json_optional(root / "module_result.json") if root else None
+    stdout = read_text_optional(root / "stdout.txt") if root else ""
+    stderr = read_text_optional(root / "stderr.txt") if root else ""
+    significant = important_lines(stdout + "\n" + stderr)
+    return {
+        "Sequence": sequence,
+        "ModuleId": module_id,
+        "DiagnosticRoot": str(root) if root else None,
+        "RequestPresent": request is not None,
+        "ResultPresent": result is not None,
+        "ResultStatus": result.get("Status") if result else None,
+        "ResultCapsule": result.get("Capsule") if result else None,
+        "ResultDiagnostics": result.get("Diagnostics") if result else None,
+        "StdoutBytes": len(stdout.encode("utf-8")),
+        "StderrBytes": len(stderr.encode("utf-8")),
+        "ImportantLines": significant,
+        "StdoutTail": stdout[-2000:],
+        "StderrTail": stderr[-2000:],
+    }
+
+
+def plan_modules(run_root: Path) -> List[Tuple[int, str, str, str]]:
+    plan = load_json_optional(run_root / "00_CONFIG/resolved_run_plan.json")
+    if not plan:
+        configuration = load_json_optional(run_root / "00_CONFIG/run_configuration.json")
+        items = configuration.get("ModulePlan") if configuration else None
+    else:
+        items = plan.get("ResolvedPlan")
+        if not isinstance(items, list):
+            items = plan.get("ModulePlan")
+    if not isinstance(items, list):
+        raise DiagnosticError("PLAN_MISSING")
+    result: List[Tuple[int, str, str, str]] = []
+    for index, item in enumerate(items, 1):
+        if not isinstance(item, dict):
+            raise DiagnosticError("PLAN_ITEM_TYPE")
+        sequence = int(item.get("Sequence", index))
+        result.append(
+            (
+                sequence,
+                str(item.get("Stage", "NA")),
+                str(item.get("ModuleId", "NA")),
+                str(item.get("ModuleVersion", "NA")),
+            )
+        )
+    return result
+
+
+def execution_logs(run_root: Path) -> Dict[int, Dict[str, object]]:
+    records: Dict[int, Dict[str, object]] = {}
+    for path in sorted((run_root / "01_LOGS").glob("*.json")):
+        sequence = sequence_from_name(path)
+        value = load_json_optional(path)
+        if sequence and value is not None:
+            value = dict(value)
+            value["Path"] = str(path)
+            records[sequence] = value
+    return records
+
+
+def artifact_count(run_root: Path) -> int:
+    index = load_json_optional(run_root / "run_artifact_index_v0_1.json")
+    if index and isinstance(index.get("Artifacts"), list):
+        return len(index["Artifacts"])
+    manifests = list((run_root / "03_ARTIFACTS").rglob("artifact_manifest.json"))
+    return len(manifests)
+
+
+def best_reason(
+    failed_sequence: int,
+    log: Optional[Mapping[str, object]],
+    snapshot: Mapping[str, object],
+    status: Mapping[str, object],
+) -> str:
+    lines = snapshot.get("ImportantLines")
+    if isinstance(lines, list) and lines:
+        return token(lines[-1], 150)
+    result_capsule = snapshot.get("ResultCapsule")
+    if result_capsule:
+        return token(result_capsule, 150)
+    if log:
+        for key in ("Reason", "Status"):
+            if log.get(key):
+                return token(log[key], 150)
+    if status.get("FailureReason"):
+        return token(status["FailureReason"], 150)
+    return token("SEQUENCE_" + str(failed_sequence) + "_NO_CHILD_REASON", 150)
+
+
+def diagnose(workspace_root: Path, run_id: str) -> Tuple[str, str, Dict[str, object]]:
+    root = workspace_root.resolve()
+    if not root.is_dir() or root.name not in {"U-UDP002", "UDP002"}:
+        raise DiagnosticError("WORKSPACE_ROOT")
+    run_root = root / "07_OUTPUT" / run_id
+    if not run_root.is_dir() or run_root.is_symlink():
+        raise DiagnosticError("RUN_ROOT_MISSING")
+    status = load_json_optional(run_root / "run_status.json")
+    if status is None:
+        raise DiagnosticError("RUN_STATUS_MISSING")
+    plan = plan_modules(run_root)
+    logs = execution_logs(run_root)
+    snapshots: List[Dict[str, object]] = []
+    for sequence, stage, module_id, version in plan:
+        snapshot = module_snapshot(run_root, sequence, module_id)
+        snapshot["Stage"] = stage
+        snapshot["ModuleVersion"] = version
+        snapshot["ExecutionLog"] = logs.get(sequence)
+        snapshots.append(snapshot)
+
+    failed_candidates: List[int] = []
+    for sequence, _, _, _ in plan:
+        log = logs.get(sequence)
+        snapshot = snapshots[sequence - 1]
+        if log and (
+            log.get("Status") not in {None, "SUCCEEDED"}
+            or int(log.get("ExitCode", 0)) != 0
+        ):
+            failed_candidates.append(sequence)
+        elif snapshot.get("ResultStatus") not in {None, "SUCCEEDED"}:
+            failed_candidates.append(sequence)
+
+    completed = int(status.get("CompletedModuleCount", 0) or 0)
+    if failed_candidates:
+        failed_sequence = min(failed_candidates)
+    elif status.get("Status") != "SUCCEEDED" and completed < len(plan):
+        failed_sequence = completed + 1
+    else:
+        failed_sequence = 0
+
+    failed_item = next((item for item in plan if item[0] == failed_sequence), None)
+    failed_snapshot = (
+        next(item for item in snapshots if item["Sequence"] == failed_sequence)
+        if failed_sequence
+        else {}
+    )
+    failed_log = logs.get(failed_sequence) if failed_sequence else None
+    reason = best_reason(failed_sequence, failed_log, failed_snapshot, status)
+    artifacts = artifact_count(run_root)
+    module_short = token(failed_item[2].split(".")[-1] if failed_item else "NONE", 36)
+    stage = token(failed_item[1] if failed_item else "NA", 8)
+    exit_code = failed_log.get("ExitCode") if failed_log else "NA"
+
+    capsule1 = (
+        f"B12D1 N-ST{token(status.get('Status'), 12)}-C{completed}"
+        f"-Q{failed_sequence}-S{stage}-M{module_short}"
+        f"-RC{exit_code}-A{artifacts}-X0 C-0"
+    )
+    capsule2 = f"B12D2 K-{reason}-X0 C-0"
+    report = {
+        "ProgramId": PROGRAM_ID,
+        "ProgramVersion": PROGRAM_VERSION,
+        "CompletionCode": 0,
+        "ReadOnly": True,
+        "RunId": run_id,
+        "RunRoot": str(run_root),
+        "RunStatus": status,
+        "PlanModuleCount": len(plan),
+        "ExecutionLogCount": len(logs),
+        "ArtifactCount": artifacts,
+        "FailedSequence": failed_sequence,
+        "FailedPlanItem": failed_item,
+        "BestReason": reason,
+        "Modules": snapshots,
+        "RunConfigurationSha256": (
+            sha256_file(run_root / "00_CONFIG/run_configuration.json")
+            if (run_root / "00_CONFIG/run_configuration.json").is_file()
+            else None
+        ),
+    }
+    output = root / "04_TEMP/U22B12_DIAGNOSTIC_OUTPUT"
+    write_json_atomic(output / "u22b12_failed_run_diagnostic.json", report)
+    write_text_atomic(output / "u22b12_diagnostic_capsule.txt", capsule1 + "\n" + capsule2 + "\n")
+    return capsule1, capsule2, report
+
+
+def self_test() -> str:
+    checks: List[bool] = []
+
+    def check(value: bool) -> None:
+        if not value:
+            raise DiagnosticError("SELFTEST")
+        checks.append(True)
+
+    check(PROGRAM_ID.startswith("UDP002"))
+    check(PROGRAM_VERSION == "0.1.0")
+    check(EXPECTED_MODULE_COUNT == 9)
+    check(token("a b/c") == "A_B_C")
+    check(token("") == "NONE")
+    check(sequence_from_name(Path("0007_Module.json")) == 7)
+    check(sequence_from_name(Path("invalid.json")) == 0)
+    lines = important_lines("ok\nB5S4 C-7 K-COLUMN_MISSING\nignored")
+    check(len(lines) == 1)
+    check("C-7" in lines[0])
+    check(len(canonical_bytes({"b": 1, "a": 2})) > 5)
+    check(len(hashlib.sha256(b"x").hexdigest()) == 64)
+    check(DEFAULT_RUN_ID.startswith("U22B12"))
+    if len(checks) != 12:
+        raise DiagnosticError("SELFTEST_COUNT")
+    return "B12DST PASS-12 C-0"
+
+
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--diagnose", action="store_true")
+    parser.add_argument("--workspace-root", default="U-UDP002")
+    parser.add_argument("--run-id", default=DEFAULT_RUN_ID)
+    return parser.parse_args(sys.argv[1:] if argv is None else argv)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = parse_args(argv)
+    try:
+        if args.self_test:
+            print(self_test())
+            return 0
+        line1, line2, _ = diagnose(Path(args.workspace_root), args.run_id)
+        print(line1)
+        print(line2)
+        return 0
+    except Exception as error:
+        print("B12DE K-" + token(type(error).__name__) + "-D" + token(error, 120) + "-X1 C-7")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
