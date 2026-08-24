@@ -1,0 +1,103 @@
+UDP002 U22B7Q 全量 Geometry 接入与 B7A 画像
+版本：0.1
+日期：2026-08-24
+
+一、这一步做什么
+
+B7P2 已经生成并验收全量 C22/V21/G4 U001 包。本节点不会修改已经完成的
+Golden Run，也不会立即改变 Camera 选择算法。
+
+本节点自动完成：
+
+1. 按 B7P2 manifest 逐文件验证全量 U001 包；
+2. 读取已验收 B5 配置中的 S0 与 Camera S1 v0.2 定义；
+3. 建立新的 41380–41780 两 Module 受控 Run；
+4. 明确把新 S1 request 链接到全量 U001 包；
+5. 验收两个 Artifact 与 401 帧 Reconstruction；
+6. 自动调用 B7A，输出 paired Distance/LateralPosition 阈值画像；
+7. 保留全部诊断，不把 geometry 提前升级成正式选择规则。
+
+二、下载
+
+从 public repo 下载三个文件到：
+
+C-CODE\U-UDP002\04_TEMP
+
+1. 本指南；
+2. u002_u22b7q_full_geometry_relink_and_profile_v0_1.py.txt
+3. u002_u22b7a_camera_lateral_evidence_profiler_v0_2.py.txt
+
+若第三个文件已存在且名称相同，可以覆盖为本次下载版本。
+
+三、Self-test
+
+从 C-CODE 根目录使用 CMD：
+
+python U-UDP002\04_TEMP\u002_u22b7q_full_geometry_relink_and_profile_v0_1.py.txt --self-test
+
+最后预期：
+
+UDP002-U22B7Q-SELFTEST-PASS-30 C-0
+
+成功时不用回传 Self-test。
+
+四、正式执行
+
+仍从 C-CODE 根目录执行一整行：
+
+python U-UDP002\04_TEMP\u002_u22b7q_full_geometry_relink_and_profile_v0_1.py.txt --execute
+
+程序使用固定且受控的默认路径：
+
+- U001 输入：U-UDP001\03_CASES\TC001_20260422\02_RUNS\U22B7P_FULL_GEOMETRY_V02
+- U002 workspace：U-UDP002
+- 新 Run：U22B7Q_GEOMETRY_RELINK_F41380_41780_V01
+- 结果：U-UDP002\04_TEMP\U22B7Q_OUTPUT
+
+运行期间不要移动 B7P2 文件，不要并行启动同一个 Run。
+
+五、输出目录检查
+
+dir U-UDP002\04_TEMP\U22B7Q_OUTPUT
+
+成功时存在：
+
+- u22b7q_relink_and_profile_receipt.json
+- u22b7q_return_capsule.txt
+- B7A_PROFILE 目录
+
+同时确认新 Run：
+
+dir U-UDP002\07_OUTPUT\U22B7Q_GEOMETRY_RELINK_F41380_41780_V01
+
+六、回传
+
+回传 u22b7q_return_capsule.txt 的两行：
+
+B7Q N-M2-A2-F401-G...-I...-D...-R...-P...-H1-X0 C-0
+B7A N-F401-G...-I...-D...-S8-X0 C-0
+
+其中：
+
+- G：paired Camera geometry 同时有效的帧数；
+- I：旧 distance-only canonical 无效的帧数；
+- D：旧选择与更靠近中心线的 Camera 候补不一致的帧数；
+- R/P：新 Run 或 B7A 是否使用已验收 replay；首次通常为 0。
+
+若失败，仅回传 B7QE 与 MEMO1 两行。完整原因已写入
+U22B7Q_OUTPUT\u22b7q_failure_diagnostic.json。
+
+七、成功后的技术含义
+
+C-0 只证明：全量 Geometry 已通过新 U002 Run 进入只读画像环节。
+
+它不表示：
+
+- Camera 3 一定正确；
+- 离中心线最近一定是控制目标；
+- 横向阈值已经批准；
+- S1 v0.3 已经实现。
+
+下一步将读取 B7A threshold sweep 与重点帧，设计可解释的 S1 v0.3 小实验。
+
+END OF GUIDE
