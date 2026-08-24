@@ -1,0 +1,78 @@
+UDP002 U22B12 -> U003 人工证据确认指南
+版本：v0.1
+日期：2026-08-24
+
+公司执行路径基准：
+
+ExecutionRoot = C-CODE
+WorkspaceRoot = U-UDP002
+TransferRoot = U-UDP002\04_TEMP
+
+一、当前结果
+
+B12 V02 已完成：
+
+B12G N-M9-A9-F401-R271-V271-L0-C2-W1-P41662-D0-X0 C-0
+
+机器侧生成2个候选，并合并为1个视频复核窗口。现在只做人工确认，不修改阈值、Module或配置。
+
+二、检查 U003 输入存在
+
+Event Queue：
+
+U-UDP002\07_OUTPUT\U22B12_GOLDEN_TC001_F41380_41780_V02\03_ARTIFACTS\S7\U22B12_GOLDEN_TC001_F41380_41780_V02.CameraRadar.S7.U003ReviewPackageExport.9\review_queue.csv
+
+Review Data：
+
+U-UDP002\07_OUTPUT\U22B12_GOLDEN_TC001_F41380_41780_V02\03_ARTIFACTS\S7\U22B12_GOLDEN_TC001_F41380_41780_V02.CameraRadar.S7.U003ReviewPackageExport.9\review_data.csv
+
+从 C-CODE 的 CMD 执行存在检查：
+
+if exist U-UDP002\07_OUTPUT\U22B12_GOLDEN_TC001_F41380_41780_V02\03_ARTIFACTS\S7\U22B12_GOLDEN_TC001_F41380_41780_V02.CameraRadar.S7.U003ReviewPackageExport.9\review_queue.csv (echo QUEUE-OK) else (echo QUEUE-MISSING)
+
+if exist U-UDP002\07_OUTPUT\U22B12_GOLDEN_TC001_F41380_41780_V02\03_ARTIFACTS\S7\U22B12_GOLDEN_TC001_F41380_41780_V02.CameraRadar.S7.U003ReviewPackageExport.9\review_data.csv (echo DATA-OK) else (echo DATA-MISSING)
+
+三、启动 U003
+
+使用已经通过验收的 U003 Evidence Review Workbench。若仍保存在标准位置，可从资源管理器双击：
+
+U-UDP003\03_CASES\TC001_20260422\02_OUTPUT\UDP003PK01_RELEASE\U003_Evidence_Review_Workbench_v0_1.exe
+
+四、加载文件
+
+1. 打开本次实测视频。
+2. 沿用已经确认的视频 FrameCount 映射，不重新猜测 Anchor 或 Lag。
+3. Load Event Queue：选择上面的 review_queue.csv。
+4. Load Review Data：选择上面的 review_data.csv。
+5. 确认表格黄色行与视频左下角 FrameCount 一致。
+6. Event Queue 应包含2个 Candidate；逐个选择检查。两者可能位于同一个重叠 Review Window，这是正常的。
+
+五、每个 Candidate 检查什么
+
+1. 候选 PeakFrameCount 附近是否存在可见的跟踪、目标选择或 Camera-Radar discrepancy 变化。
+2. Camera 与 Radar 是否仍然对应同一个物理目标。
+3. Camera Canonical 值是否处于丢失、恢复或目标切换过程。
+4. Radar 数据是否有效；注意本 Run 的 `L0` 表示没有行进入显式 TARGET_LOSS_EVIDENCE 类。
+5. 候选是否只是传感器恢复、目标关联或数据有效性变化，而非真实测距异常。
+6. 若应用 Lag，必须在 Memo 中记录数值和依据。
+
+FrameCount 41662 是第一优先 Peak。第二个 Peak 以 review_queue.csv 中的第二条 Candidate 为准。
+
+六、Review Code
+
+1 = 候选与视频/CAN可见现象一致，值得保留
+2 = 候选不成立或比较对象错误
+3 = 真实目标/场景变化，不应直接解释为传感器异常
+4 = 无法判断、同步或信号定义仍有疑问
+5 = 视频不可用
+
+每个 Candidate 填写1条简短 ShortMemo，并在 U003 中保存 Review。
+
+七、回传
+
+只回传：
+
+B12V C1-<1至5> C2-<1至5> M1-<短Memo> M2-<短Memo>
+
+自由文字尽量每条不超过一句。完成后再决定是否关闭完整 Golden Run，或进入 Radar validity-transition Candidate Branch。
+
