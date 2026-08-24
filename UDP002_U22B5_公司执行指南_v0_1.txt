@@ -1,0 +1,88 @@
+UDP002 U22B5（S7 → U003 Review Package）公司执行指南 v0.1
+
+目标
+----
+在已经通过 B4C2 的 S0-S6 配置后追加 S7，生成可由 U003 人工复核程序直接读取的：
+
+1. review_queue.csv：候选级事件队列；
+2. review_data.csv：用于视频/CAN并排观察的10列精简逐帧表；
+3. review_evidence_detail.csv：诊断用详细证据表；
+4. review_manifest.json 与 review_package_validation.json：血缘与验收记录。
+
+前置条件
+--------
+1. 从 C-CODE 目录运行 CMD。
+2. U-UDP002 已保留 B4C2 通过后的完整工作区。
+3. 以下源配置存在：
+   U-UDP002\02_CONFIG\run_configs\U22B4C_TC001_F41480_41750_V01.json
+4. 下载的 ZIP 位于：
+   U-UDP002\04_TEMP\UDP002_U22B5_v0_1_release.zip
+
+步骤1：解压
+-----------
+在文件资源管理器中把 ZIP 解压到：
+
+U-UDP002\04_TEMP\UDP002_U22B5_v0_1
+
+解压后必须直接看见：
+
+U-UDP002\04_TEMP\UDP002_U22B5_v0_1\release_manifest.json
+U-UDP002\04_TEMP\UDP002_U22B5_v0_1\u002_u22b5_install_plan_run_accept_v0_1.py.txt
+U-UDP002\04_TEMP\UDP002_U22B5_v0_1\modules
+
+不要形成双层同名目录。
+
+步骤2：可选 self-test
+--------------------
+按项目约定，若后续 B5 正式结果为 C-0，则无需单独回传 self-test。
+
+python U-UDP002\04_TEMP\UDP002_U22B5_v0_1\u002_u22b5_install_plan_run_accept_v0_1.py.txt --self-test
+
+预期：
+B5-ST-PASS-21 C-0
+
+步骤3：安装S7并完成S0-S7受控运行
+--------------------------------
+下面是一整行 CMD 命令：
+
+python U-UDP002\04_TEMP\UDP002_U22B5_v0_1\u002_u22b5_install_plan_run_accept_v0_1.py.txt --execute --workspace-root U-UDP002 --release-root U-UDP002\04_TEMP\UDP002_U22B5_v0_1 --source-config 02_CONFIG\run_configs\U22B4C_TC001_F41480_41750_V01.json --run-id U22B5_TC001_F41480_41750_V01 --module-timeout-seconds 900 --diagnostic-json 04_TEMP\U22B5_TC001_F41480_41750_V01_diagnostic_v0_1.json
+
+步骤4：确认输出目录存在
+----------------------
+dir U-UDP002\07_OUTPUT\U22B5_TC001_F41480_41750_V01\03_ARTIFACTS\S7
+
+正常时，S7下有一个以 CameraRadar.S7.U003ReviewPackageExport.9 结尾的目录。
+该目录内必须存在：
+
+review_queue.csv
+review_data.csv
+review_evidence_detail.csv
+review_manifest.json
+review_package_validation.json
+artifact_manifest.json
+
+成功标准与回传
+------------
+只回传正式 B5 行，不需要回传 self-test。
+
+预期格式：
+B5 N-M9-A9-C1-R<逐帧行数>-D<详细行数>-W<合并窗口数>-K10-P<峰值FrameCount>-X0 C-0
+
+本次公司实测的已知期望为：
+M9、A9、C1、K10、P41481、X0、C-0。
+R/D/W由S6候选的Review Window决定，不强行硬编码。
+
+语义边界
+--------
+- C1表示1个调查候选，不是1个已确认异常事件。
+- Radar不是Ground Truth。
+- S7不重新计算Candidate Score，不给Root Cause结论。
+- ReviewResult与ReviewMemo留给工程师在U003中填写。
+
+失败时
+------
+若为 C-7，只回传完整 B5 错误行；详细诊断保存在：
+
+U-UDP002\04_TEMP\U22B5_TC001_F41480_41750_V01_diagnostic_v0_1.json
+
+不要让实现工具先修改正式Module或Gate。
