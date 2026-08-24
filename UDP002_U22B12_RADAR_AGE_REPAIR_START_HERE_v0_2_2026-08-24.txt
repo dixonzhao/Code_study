@@ -1,0 +1,73 @@
+UDP002 U22B12 Radar nullable-age 修正与 Golden Run V02 执行指南
+版本：v0.2
+日期：2026-08-24
+
+公司执行路径基准：
+
+ExecutionRoot = C-CODE
+WorkspaceRoot = U-UDP002
+TransferRoot = U-UDP002\04_TEMP
+
+本指南中的全部路径均为公司 Windows 电脑路径，不引用任何本地编写或存档路径。
+
+一、这一步解决什么
+
+B12 V01 已定位到 Sequence 3 / S1 / RadarMeasurementValidity 0.1.0。
+
+旧模块把 U001 中的空 `Signal__age` 无条件解析为整数。修正版 0.1.1 使用以下规则：
+
+- valid=false 且 age 为空：合法，保持空值；
+- valid=true 且 age 为空：拒绝；
+- age 非空时：必须是非负整数；
+- 禁止将空 age 填成 0。
+
+旧模块和失败的 V01 Run 均保持不变。本次创建新的 V02 Run。
+
+二、下载位置
+
+把下面两个文件直接下载到：
+
+C-CODE\U-UDP002\04_TEMP
+
+1. UDP002_U22B12_RADAR_AGE_REPAIR_PACKAGE_v0_2_2026-08-24.zip
+2. 本执行指南
+
+不要手工创建 `UDP002_U22B12_RADAR_AGE_REPAIR` 子文件夹。
+
+三、直接解压到 04_TEMP
+
+打开 CMD，进入 C-CODE 后执行：
+
+tar -xf U-UDP002\04_TEMP\UDP002_U22B12_RADAR_AGE_REPAIR_PACKAGE_v0_2_2026-08-24.zip -C U-UDP002\04_TEMP
+
+四、检查所需文件
+
+if exist U-UDP002\04_TEMP\u002_u22b12_full_s0_s7_golden_run_v0_3.py.txt (echo RUNNER-OK) else (echo RUNNER-MISSING)
+
+if exist U-UDP002\04_TEMP\RadarMeasurementValidity\0.1.1\module_manifest.json (echo MODULE-OK) else (echo MODULE-MISSING)
+
+五、主程序自测
+
+python U-UDP002\04_TEMP\u002_u22b12_full_s0_s7_golden_run_v0_3.py.txt --self-test
+
+预期：
+
+B12ST PASS-32 C-0
+
+六、安装 0.1.1 并执行完整 Golden Run V02
+
+python U-UDP002\04_TEMP\u002_u22b12_full_s0_s7_golden_run_v0_3.py.txt --execute --workspace-root U-UDP002 --b11-config 02_CONFIG\run_configs\U22B11_GEOMETRY_MODULE_V030_F41380_41780_V01.json --b5-config 02_CONFIG\run_configs\U22B5_TC001_F41480_41750_V01.json --run-id U22B12_GOLDEN_TC001_F41380_41780_V02 --radar-module-source 04_TEMP\RadarMeasurementValidity\0.1.1 --module-timeout-seconds 900
+
+程序会自动完成：模块身份检查、side-by-side 安装、自测、qualification、audit、V02 配置生成、S0-S7 执行、9 Artifact 审计以及 U003 Review Package 验证。
+
+七、检查输出
+
+type U-UDP002\04_TEMP\U22B12_RADAR_AGE_REPAIR_OUTPUT\u22b12_v02_return_capsule.txt
+
+if exist U-UDP002\07_OUTPUT\U22B12_GOLDEN_TC001_F41380_41780_V02\run_status.json (echo RUN-OUTPUT-OK) else (echo RUN-OUTPUT-MISSING)
+
+成功只回传一行：
+
+B12G N-M9-A9-F...-R...-V...-L...-C...-W...-P...-D...-X0 C-0
+
+失败只回传终端最后两行：B12GE 与 B12GD。出现 C-7 后停止，不修改 Core、Module、配置或失败 Run。
