@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+"""Extract the deepest B7Q Executor failure without changing any Run Artifact."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+import sys
+import tempfile
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+
+
+PROGRAM_ID = "UDP002.U22B7QD.ExecutorFailureDiagnostic"
+PROGRAM_VERSION = "0.1.0"
+DEFAULT_RUN_ID = "U22B7Q_GEOMETRY_RELINK_F41380_41780_V01"
+
+
+class DiagnosticError(RuntimeError):
+    """Represent one deterministic diagnostic failure."""
+
+
+def token(value: object, limit: int = 120) -> str:
+    """Normalize one bounded manual-transfer token."""
+
+    text = re.sub(r"[^A-Z0-9_.-]+", "_", str(value).upper()).strip("_")
+    return (text or "NONE")[:limit]
+
+
+def load_json(path: Path, label: str) -> Dict[str, object]:
+    """Load one required JSON object."""
+
+    if not path.is_file():
+        raise DiagnosticError(label + "_MISSING")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as error:
+        raise DiagnosticError(label + "_JSON_" + type(error).__name__) from error
+    if not isinstance(value, dict):
+        raise DiagnosticError(label + "_TYPE")
+    return value
+
+
+def read_text(path: Path) -> str:
+    """Read optional UTF-8 diagnostic text."""
+
+    return path.read_text(encoding="utf-8-sig", errors="replace") if path.is_file() else ""
+
+
+def sha256_file(path: Path) -> str:
+    """Hash one small diagnostic input."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(4 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def parse_deep_reason(stdout: str, stderr: str, fallback: object) -> Tuple[str, str]:
+    """Resolve a stable deepest reason and one bounded supporting detail."""
+
+    combined = stdout + "\n" + stderr
+    reason_matches = re.findall(r"(?:^|[\s|])(?:R|K)-([A-Za-z0-9_.-]+)", combined)
+    if reason_matches:
+        reason = token(reason_matches[-1], 72)
+    else:
+        exception_lines = [
+            line.strip()
+            for line in stderr.splitlines()
+            if re.search(r"(?:Error|Exception):", line)
+        ]
+        reason = token(exception_lines[-1] if exception_lines else fallback, 72)
+    meaningful = [line.strip() for line in combined.splitlines() if line.strip()]
+    detail = token(meaningful[-1] if meaningful else fallback, 180)
+    return reason, detail
+
+
+def module_diagnostic_root(run_root: Path, sequence: int, module_id: str) -> Path:
+    """Resolve the one diagnostic directory for a Module execution record."""
+
+    prefix = f"{sequence:04d}_{module_id}"
+    root = run_root / "02_DIAGNOSTICS/modules"
+    matches = [path for path in root.iterdir() if path.is_dir() and path.name == prefix] if root.is_dir() else []
+    if len(matches) != 1:
+        raise DiagnosticError("MODULE_DIAGNOSTIC_ROOT_COUNT_" + str(len(matches)))
+    return matches[0]
+
+
+def collect_module_records(run_root: Path) -> List[Dict[str, object]]:
+    """Collect every Module execution and its request/stdout/stderr evidence."""
+
+    log_root = run_root / "01_LOGS"
+    records: List[Dict[str, object]] = []
+    if not log_root.is_dir():
+        return records
+    for path in sorted(log_root.glob("*.json")):
+        value = load_json(path, "MODULE_LOG")
+        sequence = int(value.get("Sequence", -1))
+        module_id = str(value.get("ModuleId", "UNKNOWN"))
+        diagnostic_root = module_diagnostic_root(run_root, sequence, module_id)
+        request_path = diagnostic_root / "module_request.json"
+        request = load_json(request_path, "MODULE_REQUEST") if request_path.is_file() else {}
+        stdout_path = diagnostic_root / "stdout.txt"
+        stderr_path = diagnostic_root / "stderr.txt"
+        stdout = read_text(stdout_path)
+        stderr = read_text(stderr_path)
+        configuration = request.get("Configuration")
+        if not isinstance(configuration, dict):
+            configuration = {}
+        input_package = Path(str(request.get("InputPackage", "")))
+        deep_reason, deep_detail = parse_deep_reason(
+            stdout,
+            stderr,
+            value.get("Reason", "UNKNOWN"),
+        )
+        records.append(
+            {
+                "Sequence": sequence,
+                "Stage": value.get("Stage"),
+                "ModuleId": module_id,
+                "ModuleVersion": value.get("ModuleVersion"),
+                "Status": value.get("Status"),
+                "ExitCode": value.get("ExitCode"),
+                "Reason": value.get("Reason"),
+                "DeepReason": deep_reason,
+                "DeepDetail": deep_detail,
+                "InputPackage": str(input_package),
+                "InputPackageExists": input_package.is_dir(),
+                "Configuration": configuration,
+                "ContextFrameStart": configuration.get("ContextFrameStart"),
+                "SeedFrame": configuration.get("SeedFrame"),
+                "SeedRole": configuration.get("SeedRole"),
+                "BindingProfilePath": configuration.get("BindingProfilePath"),
+                "StdoutBytes": len(stdout.encode("utf-8")),
+                "StderrBytes": len(stderr.encode("utf-8")),
+                "StdoutTail": stdout[-4000:],
+                "StderrTail": stderr[-4000:],
+                "LogSha256": sha256_file(path),
+                "RequestSha256": sha256_file(request_path) if request_path.is_file() else None,
+            }
+        )
+    return records
+
+
+def explain_class(reason: str, failed: Mapping[str, object]) -> str:
+    """Map known failure families to a bounded correction class."""
+
+    reason = token(reason, 100)
+    if "CONTEXT_FRAME_START" in reason:
+        return "SOURCE_CONFIG_CONTEXT_RANGE_NOT_MATERIALIZED"
+    if "BINDING" in reason or "SIGNAL_ROLE" in reason:
+        return "BINDING_PROFILE_OR_CANONICAL_SIGNAL_IDENTITY"
+    if "MAX_AGE" in reason or "INTEGER_" in reason:
+        return "MODULE_CONFIGURATION_INTEGER_CONTRACT"
+    if "FRAME" in reason and "RANGE" in reason:
+        return "REQUESTED_FRAME_DOMAIN_OUTSIDE_PACKAGE_OR_CONTEXT"
+    if "INPUT" in reason or "PACKAGE" in reason:
+        return "U001_PACKAGE_INTERFACE_OR_LINKAGE"
+    if failed.get("ModuleId") == "CameraRadar.S0.U001ControlledProfileIntake":
+        return "S0_U001_INTAKE_CONTRACT"
+    if failed.get("ModuleId") == "CameraRadar.S1.CameraTargetContinuityArbitration":
+        return "S1_CAMERA_RUNTIME_OR_CONFIGURATION"
+    return "UNCLASSIFIED_EXECUTOR_CHILD_FAILURE"
+
+
+def diagnose(workspace_root: Path, b7q_output: Path, run_id: str, output_dir: Path) -> Tuple[str, str]:
+    """Diagnose the existing failed Run and write complete evidence."""
+
+    run_root = workspace_root / "07_OUTPUT" / run_id
+    status = load_json(run_root / "run_status.json", "RUN_STATUS")
+    config = load_json(run_root / "00_CONFIG/run_configuration.json", "RUN_CONFIG")
+    outer_path = b7q_output / "u22b7q_failure_diagnostic.json"
+    outer = load_json(outer_path, "B7Q_FAILURE")
+    records = collect_module_records(run_root)
+    failed = [record for record in records if record.get("Status") == "FAILED"]
+    if len(failed) != 1:
+        raise DiagnosticError("FAILED_MODULE_COUNT_" + str(len(failed)))
+    deepest = failed[0]
+    reason = str(deepest["DeepReason"])
+    correction_class = explain_class(reason, deepest)
+    configuration = deepest.get("Configuration")
+    if not isinstance(configuration, dict):
+        configuration = {}
+    frame_start = config.get("FrameStart")
+    frame_end = config.get("FrameEnd")
+    completed = int(status.get("CompletedModuleCount", 0))
+    sequence = int(deepest.get("Sequence", -1))
+    exit_code = int(deepest.get("ExitCode", -1))
+    line1 = (
+        f"B7QD N-ST{token(status.get('Status'), 12)}-CM{completed}-FS{sequence}"
+        f"-RC{exit_code}-CF{token(deepest.get('ContextFrameStart'), 12)}"
+        f"-SF{token(deepest.get('SeedFrame'), 12)}-IP{int(bool(deepest.get('InputPackageExists')))}-X0 C-0"
+    )
+    line2 = f"B7QDK K-{token(reason, 72)}-D-{token(correction_class, 96)} C-0"
+    report = {
+        "CompletionCode": 0,
+        "ProgramId": PROGRAM_ID,
+        "ProgramVersion": PROGRAM_VERSION,
+        "RunId": run_id,
+        "RunRoot": str(run_root.resolve()),
+        "B7QFailureDiagnostic": str(outer_path.resolve()),
+        "RunStatus": status,
+        "RunFrameStart": frame_start,
+        "RunFrameEnd": frame_end,
+        "OuterFailure": outer,
+        "ModuleRecords": records,
+        "DeepestFailure": deepest,
+        "DeepReason": reason,
+        "DeepDetail": deepest.get("DeepDetail"),
+        "CorrectionClass": correction_class,
+        "Decision": "DIAGNOSTIC_ONLY_NO_RUN_OR_CONFIG_MUTATION",
+        "ReturnCapsule": [line1, line2],
+    }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "u22b7qd_executor_failure_diagnostic.json").write_bytes(
+        json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8") + b"\n"
+    )
+    (output_dir / "u22b7qd_return_capsule.txt").write_text(
+        line1 + "\n" + line2 + "\n",
+        encoding="utf-8",
+    )
+    return line1, line2
+
+
+def self_test() -> None:
+    """Exercise reason extraction and correction classification."""
+
+    checks = []
+
+    def check(value: bool) -> None:
+        if not value:
+            raise AssertionError("SELFTEST")
+        checks.append(True)
+
+    check(PROGRAM_ID.startswith("UDP002"))
+    check(PROGRAM_VERSION == "0.1.0")
+    reason, detail = parse_deep_reason(
+        "U22B2FM N-X1 C-7 R-CONTEXT_FRAME_START_REQUIRED\n",
+        "",
+        "MODULE_EXIT",
+    )
+    check(reason == "CONTEXT_FRAME_START_REQUIRED")
+    check("CONTEXT_FRAME_START_REQUIRED" in detail)
+    check(explain_class(reason, {}) == "SOURCE_CONFIG_CONTEXT_RANGE_NOT_MATERIALIZED")
+    check(explain_class("INTEGER_CAMERA_1_DISTANCE_MAX_AGE", {}) == "MODULE_CONFIGURATION_INTEGER_CONTRACT")
+    check(explain_class("BINDING_PROFILE_HASH", {}) == "BINDING_PROFILE_OR_CANONICAL_SIGNAL_IDENTITY")
+    check(explain_class("INPUT_PACKAGE", {}) == "U001_PACKAGE_INTERFACE_OR_LINKAGE")
+    check(token(None) == "NONE")
+    check(token("a b/c") == "A_B_C")
+    check(len(hashlib.sha256(b"x").hexdigest()) == 64)
+    with tempfile.TemporaryDirectory(prefix="u22b7qd_") as temporary:
+        path = Path(temporary) / "x.json"
+        path.write_text('{"a": 1}\n', encoding="utf-8")
+        check(load_json(path, "X")["a"] == 1)
+        check(len(sha256_file(path)) == 64)
+    check(DEFAULT_RUN_ID.endswith("V01"))
+    check("shell" not in collect_module_records.__doc__.lower())
+    check(len(checks) == 15)
+    print("UDP002-U22B7QD-SELFTEST-PASS-15 C-0")
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Run self-test or read-only company failure diagnosis."""
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--diagnose", action="store_true")
+    parser.add_argument("--workspace-root", default="U-UDP002")
+    parser.add_argument("--b7q-output", default="U-UDP002/04_TEMP/U22B7Q_OUTPUT")
+    parser.add_argument("--run-id", default=DEFAULT_RUN_ID)
+    parser.add_argument("--output-dir", default="U-UDP002/04_TEMP/U22B7QD_OUTPUT")
+    args = parser.parse_args(argv)
+    try:
+        if args.self_test:
+            self_test()
+            return 0
+        if not args.diagnose:
+            raise DiagnosticError("MODE_REQUIRED")
+        lines = diagnose(
+            Path(args.workspace_root).resolve(),
+            Path(args.b7q_output).resolve(),
+            args.run_id,
+            Path(args.output_dir).resolve(),
+        )
+        print(lines[0])
+        print(lines[1])
+        return 0
+    except Exception as error:
+        print("B7QDE K-" + token(error, 120) + "-X1 C-7")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

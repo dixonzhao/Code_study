@@ -1,0 +1,59 @@
+UDP002 U22B7QD Executor 失败只读诊断
+版本：0.1
+日期：2026-08-24
+
+目的
+----
+
+B7Q 外层只确认 Executor 返回 7。此程序一次读取完整失败链，不修改 Config、
+Run、Module、U001 package 或任何已生成 Artifact。
+
+它会检查：
+
+- B7Q failure diagnostic；
+- run_status；
+- 每个 Module execution log；
+- module_request；
+- stdout / stderr；
+- InputPackage 是否存在；
+- ContextFrameStart、SeedFrame、BindingProfile 等关键配置；
+- 最深层 R-/K- 根因及修正类别。
+
+下载
+----
+
+把以下程序放入：
+
+C-CODE\U-UDP002\04_TEMP
+
+u002_u22b7qd_executor_failure_diagnostic_v0_1.py.txt
+
+Self-test
+---------
+
+从 C-CODE 根目录使用 CMD：
+
+python U-UDP002\04_TEMP\u002_u22b7qd_executor_failure_diagnostic_v0_1.py.txt --self-test
+
+成功时不用回传 Self-test。
+
+正式诊断
+--------
+
+python U-UDP002\04_TEMP\u002_u22b7qd_executor_failure_diagnostic_v0_1.py.txt --diagnose
+
+输出检查：
+
+dir U-UDP002\04_TEMP\U22B7QD_OUTPUT
+
+回传
+----
+
+只回传 u22b7qd_return_capsule.txt 两行：
+
+B7QD ... C-0
+B7QDK K-...-D-... C-0
+
+完整诊断保存在 u22b7qd_executor_failure_diagnostic.json，不需要手动打开。
+
+END OF GUIDE
