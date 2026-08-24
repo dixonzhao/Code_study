@@ -1,0 +1,24 @@
+@echo off
+setlocal
+
+rem Run this file from the C-CODE root after renaming .cmd.txt to .cmd.
+set "RUNNER=U-UDP002\04_TEMP\u002_u22b11_module_v030_controlled_replay_v0_1.py.txt"
+set "WORKSPACE=U-UDP002"
+set "B7P2=U-UDP001\03_CASES\TC001_20260422\02_RUNS\U22B7P_FULL_GEOMETRY_V02"
+set "LOG=%TEMP%\UDP002_U22B11_RUNTIME_PREFLIGHT_CHECK.log"
+
+if not exist "%RUNNER%" (
+    echo B11PF K-RUNNER_MISSING X1 C-7
+    exit /b 7
+)
+
+python "%RUNNER%" --self-test --c-code-root . --workspace-root "%WORKSPACE%" --b7p2-root "%B7P2%" > "%LOG%" 2>&1
+
+findstr /C:"-E0" /C:"B7UPFS" "%LOG%"
+if errorlevel 1 (
+    echo B11PF K-PREFLIGHT_CAPSULE_MISSING X1 C-7
+    type "%LOG%"
+)
+
+del "%LOG%" >nul 2>&1
+endlocal
