@@ -1,0 +1,88 @@
+UDP002 U22B7N 跨工作区 Geometry 完整审计
+版本：0.1
+日期：2026-08-24
+
+一、为什么要做 B7N
+
+上一版 B7M 只扫描了 U-UDP002，因此只能证明当前 Golden Run 所引用的包
+没有 Camera 1/3 LateralPosition；它没有检查 U-UDP001 中曾生成的 B14
+Controlled Profile 包。
+
+B7N 从 C-CODE 根目录一次扫描：
+
+1. U-UDP001 与 U-UDP002 中全部 U001 六文件包；
+2. Camera 1/3 Distance + LateralPosition 是否真正进入 Catalog/Frame View；
+3. 包是 Full Case 还是 bounded smoke；
+4. 全部 S1 Run 实际引用哪个包；
+5. B13 Controlled Profile 四控制表是否仍存在且完整；
+6. CANDump.csv、DBC1.dbc、DBC2.dbc 是否齐全；
+7. U001 G1-G8A 受控运行所需程序是否齐全；
+8. 下一步应重连、全量重跑，还是重建 Profile。
+
+程序只读取目录、CSV header/Catalog、少量 manifest 与行数；不读取 Raw CAN
+payload 内容，不修改任何现有包。
+
+二、放置文件
+
+把程序下载到：
+
+C-CODE\U-UDP002\04_TEMP
+
+三、Self-test
+
+从 C-CODE 根目录使用 CMD：
+
+python U-UDP002\04_TEMP\u002_u22b7n_cross_workspace_geometry_readiness_audit_v0_1.py.txt --self-test
+
+预期：
+
+UDP002-U22B7N-SELFTEST-PASS-24 C-0
+
+Self-test 正常时不用回传。
+
+四、正式运行
+
+确保旧输出目录不存在，然后从 C-CODE 执行：
+
+python U-UDP002\04_TEMP\u002_u22b7n_cross_workspace_geometry_readiness_audit_v0_1.py.txt --c-code-root . --output-dir U-UDP002\04_TEMP\U22B7N_OUTPUT
+
+五、确认输出目录
+
+dir U-UDP002\04_TEMP\U22B7N_OUTPUT
+
+应包含五个文件：
+
+1. b7n_all_u001_packages.csv
+2. b7n_all_s1_links.csv
+3. b7n_controlled_profiles.csv
+4. b7n_readiness_and_decision.json
+5. b7n_return_capsule.txt
+
+六、只回传一行
+
+只回传 b7n_return_capsule.txt，例如：
+
+B7N N-P16-G1-F0-R9-L0-C1-S1-E1-D2-X0 C-0
+
+字段：
+
+P = 全部 U001 包数
+G = 含成对 Camera geometry 的包数
+F = 非归档 Full Case geometry 包数
+R = S1 Run 数
+L = 已引用 geometry 包的 S1 Run 数
+C = 完整非归档 Controlled Profile 数
+S = 完整非归档 Source/DBC 组数
+E = U001 Controlled runtime 是否齐全
+D = 下一步动作码
+
+D0：Full geometry 已被 S1 使用，直接重跑 B7A。
+D1：Full geometry 包存在但未链接，重建 U002 Run 链接。
+D2：只有 bounded geometry 包，使用已验证 Profile 全量重跑 U001。
+D3：Profile/Source/Runtime 齐全但无 geometry 包，全量运行 U001。
+D4：需先重建或恢复 Controlled Profile。
+D5：U001 实体化前置材料不完整。
+
+详细路径、缺失程序和证据全部保存在 JSON/CSV，不需要手敲。
+
+END OF GUIDE

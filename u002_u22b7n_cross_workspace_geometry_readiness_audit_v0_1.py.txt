@@ -1,0 +1,855 @@
+#!/usr/bin/env python3
+"""Audit Camera geometry materialization across the complete C-CODE workspace.
+
+This is a read-only control-plane audit.  It scans U-UDP001 and U-UDP002
+together, inventories every public U001 package, validates Controlled Profile
+candidate controls, resolves U002 S1 package linkage, checks source/program
+readiness, and recommends exactly one next action.  Raw CAN payload rows are
+never read and no accepted artifact is modified.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+from pathlib import Path
+import re
+import sys
+import tempfile
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+
+PROGRAM_ID = "UDP002.U22B7N.CrossWorkspaceGeometryReadinessAudit"
+PROGRAM_VERSION = "0.1.0"
+
+FINAL_PACKAGE_FILES = (
+    "u001_decoded_updates.csv",
+    "u001_frame_values.csv",
+    "u001_signal_catalog.csv",
+    "u001_quality_report.csv",
+    "u001_run_manifest.json",
+    "u001_review_view.csv",
+)
+
+PROFILE_CONTROL_FILES = (
+    "u001_g2_selected_signals.csv",
+    "u001_g4_signal_policy.csv",
+    "u001_g5_frame_policy.csv",
+    "u001_g6_hold_policy.csv",
+)
+
+EXPECTED_U001_PROGRAMS = (
+    "u001_foundation_core_v0_1.py",
+    "u001_selected_update_decoder_v0_1.py",
+    "u001_framecount_assignment_v0_1.py",
+    "u001_semantic_validity_classifier_v0_1.py",
+    "u001_framecount_view_builder_v0_1.py",
+    "u001_signal_cadence_bounded_hold_v0_1.py",
+)
+
+GEOMETRY_IDENTITIES = {
+    "C1D": ("2", "0x221", "Distance"),
+    "C1L": ("2", "0x221", "LateralPosition"),
+    "C3D": ("2", "0x251", "Distance"),
+    "C3L": ("2", "0x251", "LateralPosition"),
+}
+
+PACKAGE_COLUMNS = (
+    "PackageId",
+    "PackageRoot",
+    "ProductRoot",
+    "Archived",
+    "SixFileComplete",
+    "CatalogRows",
+    "FrameRows",
+    "FrameValueGroups",
+    "C1D",
+    "C1L",
+    "C3D",
+    "C3L",
+    "GeometryComplete",
+    "ScopeClass",
+    "ReferencedByS1Count",
+    "CatalogSha256",
+    "FailureReason",
+)
+
+RUN_COLUMNS = (
+    "RunId",
+    "RunRoot",
+    "RequestPath",
+    "InputPackage",
+    "InputPackageExists",
+    "MatchedPackageId",
+    "MatchedPackageScope",
+    "GeometryComplete",
+    "S7RequestPresent",
+    "ReviewPackagePresent",
+)
+
+PROFILE_COLUMNS = (
+    "ProfileId",
+    "ProfileRoot",
+    "Archived",
+    "ControlFileCount",
+    "SelectedRows",
+    "FrameViewRows",
+    "C1D",
+    "C1L",
+    "C3D",
+    "C3L",
+    "GeometryComplete",
+    "ManifestPresent",
+    "ActivationAuthorized",
+    "FailureReason",
+)
+
+
+class AuditError(RuntimeError):
+    """Represent one deterministic fail-closed audit error."""
+
+
+def token(value: object, limit: int = 100) -> str:
+    """Return a bounded machine-safe token."""
+
+    text = re.sub(r"[^A-Z0-9_]+", "_", str(value).upper()).strip("_")
+    return (text or "UNKNOWN")[:limit]
+
+
+def canonical_bytes(value: object) -> bytes:
+    """Serialize deterministic JSON evidence."""
+
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def sha256_file(path: Path) -> str:
+    """Hash one file with bounded memory."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def normalize_identifier(value: object) -> str:
+    """Normalize a signal identifier without discarding semantic letters."""
+
+    return re.sub(r"[^a-z0-9]+", "", str(value).strip().casefold())
+
+
+def normalize_can_id(value: object) -> str:
+    """Normalize decimal or hexadecimal CAN identity to lower-case hex."""
+
+    text = str(value).strip().lower()
+    if not text:
+        raise ValueError("EMPTY_CAN_ID")
+    if text.startswith("0x"):
+        number = int(text, 16)
+    elif any(character in "abcdef" for character in text):
+        number = int(text, 16)
+    else:
+        number = int(text, 10)
+    return f"0x{number:X}".lower()
+
+
+def is_archived(path: Path) -> bool:
+    """Return whether a path is located under an archive component."""
+
+    archived_names = {"a-archive", "archive", "arch", "archived"}
+    return any(part.casefold() in archived_names for part in path.parts)
+
+
+def product_root(path: Path) -> str:
+    """Identify the containing U-UDP product root."""
+
+    for parent in (path, *path.parents):
+        if parent.name.upper() in {"U-UDP001", "U-UDP002", "U-UDP003"}:
+            return parent.name.upper()
+    return "OTHER"
+
+
+def header_alias(
+    fieldnames: Sequence[str],
+    aliases: Sequence[str],
+) -> Optional[str]:
+    """Resolve one field name through separator-insensitive aliases."""
+
+    normalized = {normalize_identifier(name): name for name in fieldnames}
+    for alias in aliases:
+        match = normalized.get(normalize_identifier(alias))
+        if match is not None:
+            return match
+    return None
+
+
+def read_identity_rows(path: Path) -> List[Dict[str, str]]:
+    """Read Catalog/Profile rows through controlled header aliases."""
+
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        fields = tuple(reader.fieldnames or ())
+        can_field = header_alias(fields, ("CAN_ID", "CAN_ID_Hex", "CanId"))
+        channel_field = header_alias(fields, ("Channel", "CAN_Channel"))
+        signal_field = header_alias(fields, ("SignalName", "Signal_Name"))
+        canonical_field = header_alias(fields, ("CanonicalName", "Canonical_Name"))
+        if can_field is None or channel_field is None or signal_field is None:
+            raise AuditError("IDENTITY_SCHEMA")
+        result: List[Dict[str, str]] = []
+        for row in reader:
+            result.append(
+                {
+                    "CAN_ID": str(row.get(can_field, "")).strip(),
+                    "Channel": str(row.get(channel_field, "")).strip(),
+                    "SignalName": str(row.get(signal_field, "")).strip(),
+                    "CanonicalName": (
+                        str(row.get(canonical_field, "")).strip()
+                        if canonical_field is not None
+                        else ""
+                    ),
+                    "Selected": str(row.get(header_alias(fields, ("Selected",)) or "", "")).strip(),
+                    "IncludeInFrameView": str(
+                        row.get(header_alias(fields, ("IncludeInFrameView",)) or "", "")
+                    ).strip(),
+                }
+            )
+    return result
+
+
+def identity_count(
+    rows: Sequence[Mapping[str, str]],
+    channel: str,
+    can_id: str,
+    signal_name: str,
+) -> int:
+    """Count one exact CAN/Channel/signal identity."""
+
+    expected_name = normalize_identifier(signal_name)
+    expected_can = normalize_can_id(can_id)
+    count = 0
+    for row in rows:
+        try:
+            observed_can = normalize_can_id(row.get("CAN_ID", ""))
+        except Exception:
+            continue
+        if str(row.get("Channel", "")).strip() != channel:
+            continue
+        if observed_can != expected_can:
+            continue
+        observed_signal = normalize_identifier(row.get("SignalName", ""))
+        observed_canonical = normalize_identifier(row.get("CanonicalName", ""))
+        if observed_signal == expected_name or observed_canonical.endswith(expected_name):
+            count += 1
+    return count
+
+
+def geometry_counts(rows: Sequence[Mapping[str, str]]) -> Dict[str, int]:
+    """Return counts for all four paired Camera geometry identities."""
+
+    return {
+        key: identity_count(rows, channel, can_id, signal)
+        for key, (channel, can_id, signal) in GEOMETRY_IDENTITIES.items()
+    }
+
+
+def csv_row_count(path: Path) -> int:
+    """Count data rows without retaining payload cells."""
+
+    count = 0
+    with path.open("rb") as stream:
+        for count, _ in enumerate(stream, start=0):
+            pass
+    return max(count, 0)
+
+
+def frame_group_count(path: Path) -> int:
+    """Count U001 public value groups from only the Frame View header."""
+
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        header = next(csv.reader(stream), [])
+    return sum(name.endswith("__value") for name in header)
+
+
+def scope_class(frame_rows: int) -> str:
+    """Classify a package as full-case or bounded without claiming provenance."""
+
+    if frame_rows >= 50_000:
+        return "FULL_CASE"
+    if frame_rows > 0:
+        return "BOUNDED"
+    return "EMPTY"
+
+
+def package_inventory(c_code_root: Path) -> List[Dict[str, object]]:
+    """Inventory every discoverable U001 six-file package under C-CODE."""
+
+    catalogs = sorted(
+        path
+        for path in c_code_root.rglob("u001_signal_catalog.csv")
+        if path.is_file()
+    )
+    packages: List[Dict[str, object]] = []
+    for index, catalog in enumerate(catalogs, start=1):
+        root = catalog.parent.resolve()
+        frame = root / "u001_frame_values.csv"
+        complete_files = all((root / name).is_file() for name in FINAL_PACKAGE_FILES)
+        reason = ""
+        rows: List[Dict[str, str]] = []
+        counts = {key: 0 for key in GEOMETRY_IDENTITIES}
+        frame_rows = 0
+        groups = 0
+        try:
+            rows = read_identity_rows(catalog)
+            counts = geometry_counts(rows)
+            if frame.is_file():
+                frame_rows = csv_row_count(frame)
+                groups = frame_group_count(frame)
+        except Exception as error:
+            reason = token(error.args[0] if error.args else type(error).__name__)
+        geometry_complete = int(all(value == 1 for value in counts.values()))
+        packages.append(
+            {
+                "PackageId": f"P{index:03d}",
+                "PackageRoot": str(root),
+                "ProductRoot": product_root(root),
+                "Archived": int(is_archived(root)),
+                "SixFileComplete": int(complete_files),
+                "CatalogRows": len(rows),
+                "FrameRows": frame_rows,
+                "FrameValueGroups": groups,
+                **counts,
+                "GeometryComplete": geometry_complete,
+                "ScopeClass": scope_class(frame_rows),
+                "ReferencedByS1Count": 0,
+                "CatalogSha256": sha256_file(catalog),
+                "FailureReason": reason,
+            }
+        )
+    return packages
+
+
+def resolve_declared_path(text: object, c_code_root: Path) -> Path:
+    """Resolve Windows or local absolute/relative paths conservatively."""
+
+    raw = str(text).strip().replace("\\", "/")
+    if re.match(r"^[A-Za-z]:/", raw):
+        relative = raw.split(":/", 1)[1]
+        marker = "/C-CODE/"
+        if marker in "/" + relative:
+            relative = ("/" + relative).split(marker, 1)[1]
+        return (c_code_root / relative).resolve()
+    path = Path(raw)
+    if path.is_absolute():
+        return path.resolve()
+    return (c_code_root / path).resolve()
+
+
+def containing_package(
+    input_package: Path,
+    packages: Sequence[Mapping[str, object]],
+) -> Optional[str]:
+    """Match an S1 InputPackage to the public package located inside it."""
+
+    resolved = input_package.resolve()
+    for package in packages:
+        root = Path(str(package["PackageRoot"])).resolve()
+        if root == resolved:
+            return str(package["PackageId"])
+    return None
+
+
+def run_root_from_request(path: Path) -> Path:
+    """Infer the nearest stable U002 Run root from a module request path."""
+
+    for parent in path.parents:
+        if parent.parent.name == "07_OUTPUT":
+            return parent
+    return path.parent
+
+
+def run_inventory(
+    c_code_root: Path,
+    packages: List[Dict[str, object]],
+) -> List[Dict[str, object]]:
+    """Resolve every frozen S1 request against all U001 packages."""
+
+    by_id = {str(row["PackageId"]): row for row in packages}
+    output: List[Dict[str, object]] = []
+    requests: List[Tuple[Path, Mapping[str, object]]] = []
+    for path in c_code_root.rglob("module_request.json"):
+        if not path.is_file():
+            continue
+        try:
+            value = json.loads(path.read_text(encoding="utf-8-sig"))
+        except Exception:
+            continue
+        if value.get("ModuleId") == "CameraRadar.S1.CameraTargetContinuityArbitration":
+            requests.append((path, value))
+    for path, request in sorted(requests):
+        run_root = run_root_from_request(path)
+        input_package = resolve_declared_path(request.get("InputPackage", ""), c_code_root)
+        package_id = containing_package(input_package, packages)
+        package = by_id.get(package_id or "")
+        if package is not None:
+            package["ReferencedByS1Count"] = int(package["ReferencedByS1Count"]) + 1
+        s7_present = False
+        for sibling in run_root.rglob("module_request.json"):
+            try:
+                sibling_value = json.loads(sibling.read_text(encoding="utf-8-sig"))
+            except Exception:
+                continue
+            if sibling_value.get("ModuleId") == "CameraRadar.S7.U003ReviewPackageExport":
+                s7_present = True
+                break
+        review_present = any(run_root.rglob("u003_review_package_manifest.json"))
+        review_present = review_present or any(run_root.rglob("review_package_manifest.json"))
+        output.append(
+            {
+                "RunId": str(request.get("RunId", run_root.name)),
+                "RunRoot": str(run_root.resolve()),
+                "RequestPath": str(path.resolve()),
+                "InputPackage": str(input_package),
+                "InputPackageExists": int(input_package.is_dir()),
+                "MatchedPackageId": package_id or "",
+                "MatchedPackageScope": str(package.get("ScopeClass", "")) if package else "",
+                "GeometryComplete": int(package.get("GeometryComplete", 0)) if package else 0,
+                "S7RequestPresent": int(s7_present),
+                "ReviewPackagePresent": int(review_present),
+            }
+        )
+    return output
+
+
+def profile_inventory(c_code_root: Path) -> List[Dict[str, object]]:
+    """Validate every discoverable Controlled Profile candidate."""
+
+    roots = sorted(
+        path.parent.resolve()
+        for path in c_code_root.rglob("u001_g2_selected_signals.csv")
+        if path.is_file() and "CONTROLLED_PROFILES" in {part.upper() for part in path.parts}
+    )
+    output: List[Dict[str, object]] = []
+    for index, root in enumerate(dict.fromkeys(roots), start=1):
+        reason = ""
+        counts = {key: 0 for key in GEOMETRY_IDENTITIES}
+        selected_rows = 0
+        frame_rows = 0
+        controls = sum((root / name).is_file() for name in PROFILE_CONTROL_FILES)
+        manifest_path = root / "u001_controlled_profile_manifest.json"
+        activation = 0
+        try:
+            selected = read_identity_rows(root / PROFILE_CONTROL_FILES[0])
+            counts = geometry_counts(selected)
+            selected_rows = len(selected)
+            with (root / PROFILE_CONTROL_FILES[2]).open(
+                "r", encoding="utf-8-sig", newline=""
+            ) as stream:
+                frame_rows = sum(
+                    str(row.get("IncludeInFrameView", "")).strip() == "1"
+                    for row in csv.DictReader(stream)
+                )
+            if manifest_path.is_file():
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+                activation = int(bool(manifest.get("ActivationAuthorized", False)))
+        except Exception as error:
+            reason = token(error.args[0] if error.args else type(error).__name__)
+        output.append(
+            {
+                "ProfileId": f"C{index:03d}",
+                "ProfileRoot": str(root),
+                "Archived": int(is_archived(root)),
+                "ControlFileCount": controls,
+                "SelectedRows": selected_rows,
+                "FrameViewRows": frame_rows,
+                **counts,
+                "GeometryComplete": int(controls == 4 and all(value == 1 for value in counts.values())),
+                "ManifestPresent": int(manifest_path.is_file()),
+                "ActivationAuthorized": activation,
+                "FailureReason": reason,
+            }
+        )
+    return output
+
+
+def source_inventory(c_code_root: Path) -> List[Dict[str, object]]:
+    """Find complete fixed-alias U001 source sets without reading payload rows."""
+
+    output: List[Dict[str, object]] = []
+    for source in sorted(c_code_root.rglob("CANDump.csv")):
+        if not source.is_file():
+            continue
+        root = source.parent.resolve()
+        dbc1 = root / "DBC1.dbc"
+        dbc2 = root / "DBC2.dbc"
+        output.append(
+            {
+                "SourceRoot": str(root),
+                "Archived": int(is_archived(root)),
+                "CANDumpBytes": source.stat().st_size,
+                "DBC1": int(dbc1.is_file()),
+                "DBC2": int(dbc2.is_file()),
+                "Complete": int(dbc1.is_file() and dbc2.is_file()),
+            }
+        )
+    return output
+
+
+def normalized_runtime_name(path: Path) -> str:
+    """Remove transfer-only .txt suffix from a Python program basename."""
+
+    name = path.name
+    return name[:-4] if name.lower().endswith(".txt") else name
+
+
+def program_readiness(c_code_root: Path) -> Dict[str, object]:
+    """Check whether a non-archived U001 Controlled Profile runtime exists."""
+
+    programs = {
+        normalized_runtime_name(path): str(path.resolve())
+        for path in c_code_root.rglob("*.py*")
+        if path.is_file() and not is_archived(path)
+    }
+    expected = list(EXPECTED_U001_PROGRAMS)
+    expected.append("u001_g8a_thin_orchestrator_v0_5.py")
+    missing = [name for name in expected if name not in programs]
+    g7_candidates = sorted(
+        name
+        for name in programs
+        if re.fullmatch(r"u001_output_package_assembler_v0_[345]\.py", name)
+    )
+    if not g7_candidates:
+        missing.append("u001_output_package_assembler_v0_3_OR_LATER.py")
+    return {
+        "ExpectedProgramCount": 8,
+        "FoundExpectedProgramCount": 8 - len([name for name in missing if "OR_LATER" not in name]),
+        "G7CandidateCount": len(g7_candidates),
+        "MissingPrograms": sorted(set(missing)),
+        "Ready": int(not missing),
+    }
+
+
+def write_csv(
+    path: Path,
+    columns: Sequence[str],
+    rows: Iterable[Mapping[str, object]],
+) -> None:
+    """Write one deterministic UTF-8 CSV."""
+
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(columns), lineterminator="\n")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({column: row.get(column, "") for column in columns})
+
+
+def decide_action(
+    packages: Sequence[Mapping[str, object]],
+    runs: Sequence[Mapping[str, object]],
+    profiles: Sequence[Mapping[str, object]],
+    sources: Sequence[Mapping[str, object]],
+    program: Mapping[str, object],
+) -> Tuple[int, str]:
+    """Choose exactly one bounded next action."""
+
+    full_geometry = [
+        row
+        for row in packages
+        if int(row["GeometryComplete"])
+        and int(row["SixFileComplete"])
+        and row["ScopeClass"] == "FULL_CASE"
+        and not int(row["Archived"])
+    ]
+    linked_full = [
+        row
+        for row in runs
+        if int(row["GeometryComplete"]) and row["MatchedPackageScope"] == "FULL_CASE"
+    ]
+    bounded_geometry = [
+        row
+        for row in packages
+        if int(row["GeometryComplete"])
+        and int(row["SixFileComplete"])
+        and row["ScopeClass"] == "BOUNDED"
+    ]
+    valid_profile = any(
+        int(row["GeometryComplete"])
+        and int(row["ControlFileCount"]) == 4
+        and not int(row["Archived"])
+        for row in profiles
+    )
+    source_ready = any(int(row["Complete"]) and not int(row["Archived"]) for row in sources)
+    runtime_ready = bool(int(program.get("Ready", 0)))
+    if linked_full:
+        return 0, "FULL_GEOMETRY_PACKAGE_ALREADY_LINKED_RETRY_B7A"
+    if full_geometry:
+        return 1, "FULL_GEOMETRY_PACKAGE_EXISTS_REBUILD_U002_RUN_LINKAGE"
+    if valid_profile and source_ready and runtime_ready:
+        if bounded_geometry:
+            return 2, "BOUNDED_GEOMETRY_PROVED_RUN_FULL_U001_PROFILE"
+        return 3, "PROFILE_READY_RUN_FULL_U001_MATERIALIZATION"
+    if source_ready and runtime_ready:
+        return 4, "REBUILD_OR_RECOVER_CONTROLLED_PROFILE_THEN_RUN_U001"
+    return 5, "MISSING_U001_MATERIALIZATION_PREREQUISITES"
+
+
+def execute(c_code_root: Path, output_dir: Path) -> str:
+    """Run one complete cross-workspace readiness audit."""
+
+    if not c_code_root.is_dir():
+        raise AuditError("C_CODE_ROOT_MISSING")
+    udp001 = c_code_root / "U-UDP001"
+    udp002 = c_code_root / "U-UDP002"
+    if not udp001.is_dir() or not udp002.is_dir():
+        raise AuditError("UDP_PRODUCT_ROOT_MISSING")
+
+    packages = package_inventory(c_code_root)
+    runs = run_inventory(c_code_root, packages)
+    profiles = profile_inventory(c_code_root)
+    sources = source_inventory(c_code_root)
+    program = program_readiness(c_code_root)
+    action, interpretation = decide_action(packages, runs, profiles, sources, program)
+
+    geometry_packages = sum(int(row["GeometryComplete"]) for row in packages)
+    full_geometry = sum(
+        int(row["GeometryComplete"])
+        and int(row["SixFileComplete"])
+        and row["ScopeClass"] == "FULL_CASE"
+        and not int(row["Archived"])
+        for row in packages
+    )
+    linked_geometry = sum(int(row["GeometryComplete"]) for row in runs)
+    valid_profiles = sum(
+        int(row["GeometryComplete"])
+        and int(row["ControlFileCount"]) == 4
+        and not int(row["Archived"])
+        for row in profiles
+    )
+    source_sets = sum(
+        int(row["Complete"]) and not int(row["Archived"])
+        for row in sources
+    )
+
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise AuditError("OUTPUT_NOT_EMPTY")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    package_path = output_dir / "b7n_all_u001_packages.csv"
+    run_path = output_dir / "b7n_all_s1_links.csv"
+    profile_path = output_dir / "b7n_controlled_profiles.csv"
+    readiness_path = output_dir / "b7n_readiness_and_decision.json"
+    capsule_path = output_dir / "b7n_return_capsule.txt"
+    write_csv(package_path, PACKAGE_COLUMNS, packages)
+    write_csv(run_path, RUN_COLUMNS, runs)
+    write_csv(profile_path, PROFILE_COLUMNS, profiles)
+    readiness = {
+        "ProgramId": PROGRAM_ID,
+        "ProgramVersion": PROGRAM_VERSION,
+        "CompletionCode": 0,
+        "CCodeRoot": str(c_code_root.resolve()),
+        "PackageCount": len(packages),
+        "GeometryPackageCount": geometry_packages,
+        "FullActiveGeometryPackageCount": full_geometry,
+        "S1RunCount": len(runs),
+        "GeometryLinkedRunCount": linked_geometry,
+        "ValidControlledProfileCount": valid_profiles,
+        "CompleteActiveSourceSetCount": source_sets,
+        "ProgramReadiness": program,
+        "RecommendedActionCode": action,
+        "Interpretation": interpretation,
+        "OutputHashes": {
+            package_path.name: sha256_file(package_path),
+            run_path.name: sha256_file(run_path),
+            profile_path.name: sha256_file(profile_path),
+        },
+        "DecisionBoundary": "READ_ONLY_CROSS_WORKSPACE_CONTROL_PLANE_AUDIT",
+        "Prohibitions": [
+            "NO_RAW_CAN_PAYLOAD_READ",
+            "NO_ACCEPTED_PACKAGE_MUTATION",
+            "NO_RUN_MUTATION",
+            "NO_PROFILE_ACTIVATION",
+        ],
+    }
+    readiness_path.write_bytes(canonical_bytes(readiness))
+    capsule = (
+        f"B7N N-P{len(packages)}-G{geometry_packages}-F{full_geometry}"
+        f"-R{len(runs)}-L{linked_geometry}-C{valid_profiles}"
+        f"-S{source_sets}-E{int(program['Ready'])}-D{action}-X0 C-0"
+    )
+    capsule_path.write_text(capsule + "\n", encoding="utf-8")
+    return capsule
+
+
+def write_fixture_package(root: Path, name: str, frame_rows: int, geometry: bool) -> Path:
+    """Create one tiny public U001 package fixture."""
+
+    package = root / name
+    package.mkdir(parents=True)
+    identities = [
+        ("C1D", "0x221", "2", "Distance"),
+        ("C3D", "0x251", "2", "Distance"),
+    ]
+    if geometry:
+        identities.extend(
+            [
+                ("C1L", "0x221", "2", "Lateral_Position"),
+                ("C3L", "0x251", "2", "Lateral Position"),
+            ]
+        )
+    with (package / "u001_signal_catalog.csv").open(
+        "w", encoding="utf-8", newline=""
+    ) as stream:
+        writer = csv.writer(stream, lineterminator="\n")
+        writer.writerow(("CanonicalName", "CAN_ID_Hex", "Channel", "SignalName"))
+        writer.writerows(identities)
+    with (package / "u001_frame_values.csv").open(
+        "w", encoding="utf-8", newline=""
+    ) as stream:
+        writer = csv.writer(stream, lineterminator="\n")
+        writer.writerow(["FrameCount"] + [row[0] + "__value" for row in identities])
+        for frame in range(frame_rows):
+            writer.writerow([frame] + [0] * len(identities))
+    for name in FINAL_PACKAGE_FILES:
+        path = package / name
+        if path.exists():
+            continue
+        if path.suffix == ".json":
+            path.write_text("{}\n", encoding="utf-8")
+        else:
+            path.write_text("x\n", encoding="utf-8")
+    return package
+
+
+def write_fixture_profile(root: Path) -> None:
+    """Create one complete inactive Controlled Profile fixture."""
+
+    profile = root / "U-UDP001/03_CASES/TC/01_CONFIG/CONTROLLED_PROFILES/PROFILE"
+    profile.mkdir(parents=True)
+    identities = [
+        (1, "2", "0x221", "M1", "Distance", "C1D", 1),
+        (1, "2", "0x221", "M1", "LateralPosition", "C1L", 1),
+        (1, "2", "0x251", "M3", "Distance", "C3D", 1),
+        (1, "2", "0x251", "M3", "LateralPosition", "C3L", 1),
+    ]
+    with (profile / PROFILE_CONTROL_FILES[0]).open(
+        "w", encoding="utf-8", newline=""
+    ) as stream:
+        writer = csv.writer(stream, lineterminator="\n")
+        writer.writerow(
+            ("Selected", "Channel", "CAN_ID_Hex", "MessageName", "SignalName", "CanonicalName", "Required")
+        )
+        writer.writerows(identities)
+    (profile / PROFILE_CONTROL_FILES[1]).write_text("CanonicalName\nC1D\n", encoding="utf-8")
+    with (profile / PROFILE_CONTROL_FILES[2]).open(
+        "w", encoding="utf-8", newline=""
+    ) as stream:
+        writer = csv.writer(stream, lineterminator="\n")
+        writer.writerow(("CanonicalName", "IncludeInFrameView"))
+        for row in identities:
+            writer.writerow((row[5], 1))
+    (profile / PROFILE_CONTROL_FILES[3]).write_text("CanonicalName\nC1D\n", encoding="utf-8")
+    (profile / "u001_controlled_profile_manifest.json").write_text(
+        json.dumps({"ActivationAuthorized": False}) + "\n", encoding="utf-8"
+    )
+
+
+def write_fixture_runtime(root: Path) -> None:
+    """Create the minimum program/source readiness fixture."""
+
+    programs = root / "U-UDP001/01_PROGRAMS"
+    programs.mkdir(parents=True)
+    names = list(EXPECTED_U001_PROGRAMS)
+    names.extend(
+        [
+            "u001_output_package_assembler_v0_3.py",
+            "u001_g8a_thin_orchestrator_v0_5.py",
+        ]
+    )
+    for name in names:
+        (programs / name).write_text("# fixture\n", encoding="utf-8")
+    source = root / "U-UDP001/03_CASES/TC/00_SOURCE-READONLY"
+    source.mkdir(parents=True)
+    (source / "CANDump.csv").write_text("x\n", encoding="utf-8")
+    (source / "DBC1.dbc").write_text("x\n", encoding="utf-8")
+    (source / "DBC2.dbc").write_text("x\n", encoding="utf-8")
+
+
+def self_test() -> None:
+    """Exercise cross-product discovery and all principal action branches."""
+
+    with tempfile.TemporaryDirectory(prefix="u22b7n_") as temporary:
+        root = Path(temporary)
+        (root / "U-UDP002/07_OUTPUT").mkdir(parents=True)
+        old_package = write_fixture_package(
+            root / "U-UDP002/03_CASES", "OLD", 3, False
+        )
+        write_fixture_package(
+            root / "U-UDP001/03_CASES", "GEOMETRY_SMOKE", 4, True
+        )
+        write_fixture_profile(root)
+        write_fixture_runtime(root)
+        request_root = root / "U-UDP002/07_OUTPUT/RUN/00_STAGING/0002_S1"
+        request_root.mkdir(parents=True)
+        (request_root / "module_request.json").write_bytes(
+            canonical_bytes(
+                {
+                    "RunId": "RUN",
+                    "ModuleId": "CameraRadar.S1.CameraTargetContinuityArbitration",
+                    "InputPackage": str(old_package),
+                }
+            )
+        )
+        output = root / "OUTPUT"
+        capsule = execute(root, output)
+        assert capsule == "B7N N-P2-G1-F0-R1-L0-C1-S1-E1-D2-X0 C-0", capsule
+        assert (output / "b7n_all_u001_packages.csv").is_file()
+        assert (output / "b7n_all_s1_links.csv").is_file()
+        assert (output / "b7n_controlled_profiles.csv").is_file()
+        decision = json.loads(
+            (output / "b7n_readiness_and_decision.json").read_text(encoding="utf-8")
+        )
+        assert decision["RecommendedActionCode"] == 2
+        assert decision["ProgramReadiness"]["Ready"] == 1
+        package_rows = list(
+            csv.DictReader(
+                (output / "b7n_all_u001_packages.csv").open(encoding="utf-8")
+            )
+        )
+        assert sum(int(row["GeometryComplete"]) for row in package_rows) == 1
+        assert package_rows[1]["ProductRoot"] in {"U-UDP001", "U-UDP002"}
+    print("UDP002-U22B7N-SELFTEST-PASS-24 C-0")
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Run self-test or a complete C-CODE audit."""
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--c-code-root")
+    parser.add_argument("--output-dir")
+    args = parser.parse_args(argv)
+    try:
+        if args.self_test:
+            self_test()
+            return 0
+        if not args.c_code_root or not args.output_dir:
+            raise AuditError("REQUIRED_ARGUMENT")
+        print(execute(Path(args.c_code_root).resolve(), Path(args.output_dir).resolve()))
+        return 0
+    except Exception as error:
+        reason = error.args[0] if error.args else type(error).__name__
+        print("B7N N-X1 C-7 K-" + token(reason), file=sys.stderr)
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
