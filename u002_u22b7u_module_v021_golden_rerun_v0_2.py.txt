@@ -29,9 +29,9 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
 PROGRAM_ID = "UDP002.U22B7U.ModuleV021GoldenRerun"
-PROGRAM_VERSION = "0.1.0"
+PROGRAM_VERSION = "0.2.0"
 B7Q_BASENAME = "u002_u22b7q_full_geometry_relink_and_profile_v0_1.py.txt"
-B7A_BASENAME = "u002_u22b7a_camera_lateral_evidence_profiler_v0_2.py.txt"
+B7A_BASENAME = "u002_u22b7a_camera_lateral_evidence_profiler_v0_3.py.txt"
 FAILED_RUN_ID = "U22B7Q_GEOMETRY_RELINK_F41380_41780_V01"
 RUN_ID = "U22B7U_GEOMETRY_RELINK_F41380_41780_V04"
 FRAME_START = 41380
@@ -115,6 +115,7 @@ HISTORICAL_FAILURE_TEST_MAP = {
 RUN_HISTORICAL_FAILURE_COVERAGE = (
     *HISTORICAL_FAILURE_COVERAGE,
     "FP030_U001_NULLABLE_AGE_COUPLED_STATE",
+    "FP031_B7A_NULLABLE_AGE_READER",
 )
 RUN_HISTORICAL_FAILURE_TEST_MAP = {
     **HISTORICAL_FAILURE_TEST_MAP,
@@ -122,6 +123,9 @@ RUN_HISTORICAL_FAILURE_TEST_MAP = {
         "T16A_MODULE_UPGRADE",
         "T16B_OLD_MODULE_PRESERVED",
         "T23C_MODULE_QUALIFICATION",
+    ),
+    "FP031_B7A_NULLABLE_AGE_READER": (
+        "T23D_B7A_NULLABLE_AGE_VERSION",
     ),
 }
 
@@ -155,6 +159,111 @@ def dependency_path(basename: str) -> Path:
     if len(matches) != 1:
         raise RefreshError("DEPENDENCY_COUNT", f"{basename}:{len(matches)}", "IMPORT")
     return matches[0]
+
+
+def dependency_candidates(basename: str) -> List[Path]:
+    """Return every regular-file match in the two approved TEMP locations."""
+
+    program_dir = Path(__file__).resolve().parent
+    return [
+        path
+        for path in (
+            program_dir / basename,
+            program_dir / "B7R_ACTIVE" / basename,
+        )
+        if path.is_file() and not path.is_symlink()
+    ]
+
+
+def runtime_preflight(
+    c_code_root: Path,
+    workspace_root: Path,
+    b7p2_root: Path,
+) -> bool:
+    """Print one machine line per required runtime object and helper self-test."""
+
+    module_root = (
+        workspace_root
+        / "01_PROGRAMS/modules/S1"
+        / "CameraRadar.S1.CameraTargetContinuityArbitration/0.2.1"
+    )
+    items = [
+        ("PROGRAM", Path(__file__).resolve(), "F"),
+        ("WORKSPACE", workspace_root, "D"),
+        ("PREFLIGHT", workspace_root / "01_PROGRAMS/core/u002_u22_engine_preflight_v0_1.py", "F"),
+        ("EXECUTOR", workspace_root / "01_PROGRAMS/core/u002_u22_stage_executor_v0_1.py", "F"),
+        ("STORE", workspace_root / "01_PROGRAMS/core/u002_u22_artifact_store_v0_1.py", "F"),
+        ("QUALIFY", workspace_root / "01_PROGRAMS/core/u002_u22_module_qualification_v0_1.py", "F"),
+        ("MODMAN", module_root / "module_manifest.json", "F"),
+        ("ALGCARD", module_root / "algorithm_card.json", "F"),
+        ("CFGSCH", module_root / "configuration_schema.json", "F"),
+        ("MODIMPL", module_root / "implementation.py", "F"),
+        ("MODTEST", module_root / "selftest.py", "F"),
+        (
+            "QUALREC",
+            workspace_root
+            / "00_CONTROL/registry/qualifications"
+            / "CameraRadar.S1.CameraTargetContinuityArbitration/0.2.1"
+            / "qualification_receipt.json",
+            "F",
+        ),
+        ("B7P2ROOT", b7p2_root, "D"),
+        ("B7P2MAN", b7p2_root / "u22b7p2_full_materialization_manifest.json", "F"),
+    ]
+    results: List[bool] = []
+    index = 1
+    for key, path, kind in items:
+        exists = (
+            path.is_dir()
+            if kind == "D"
+            else path.is_file() and not path.is_symlink()
+        )
+        results.append(exists)
+        print(
+            f"B7UPF I{index:02d}-K{key}-T{kind}-E{int(exists)}"
+            f"-X{int(not exists)} C-{'0' if exists else '7'}"
+        )
+        index += 1
+
+    helper_paths: Dict[str, Optional[Path]] = {}
+    for key, basename in (("B7Q", B7Q_BASENAME), ("B7A", B7A_BASENAME)):
+        matches = dependency_candidates(basename)
+        exact = len(matches) == 1
+        results.append(exact)
+        helper_paths[key] = matches[0] if exact else None
+        print(
+            f"B7UPF I{index:02d}-K{key}-TF-N{len(matches)}-E{int(exact)}"
+            f"-X{int(not exact)} C-{'0' if exact else '7'}"
+        )
+        index += 1
+
+    for key in ("B7Q", "B7A"):
+        path = helper_paths[key]
+        passed = False
+        return_code = 999
+        if path is not None:
+            result = subprocess.run(
+                [sys.executable, str(path), "--self-test"],
+                text=True,
+                capture_output=True,
+                timeout=120,
+                check=False,
+            )
+            return_code = result.returncode
+            passed = return_code == 0 and "C-0" in result.stdout
+        results.append(passed)
+        print(
+            f"B7UPF I{index:02d}-K{key}ST-TR-RC{return_code}-E{int(passed)}"
+            f"-X{int(not passed)} C-{'0' if passed else '7'}"
+        )
+        index += 1
+
+    missing = len(results) - sum(results)
+    print(
+        f"B7UPFS N{len(results)}-E{sum(results)}-M{missing}"
+        f"-X{int(missing > 0)} C-{'0' if missing == 0 else '7'}"
+    )
+    return missing == 0
 
 
 def load_adjacent(name: str, basename: str):
@@ -653,7 +762,7 @@ def execute(
             int(config["FrameStart"]),
             int(config["FrameEnd"]),
         )
-        profile_dir = output_dir / "B7A_PROFILE"
+        profile_dir = output_dir / "B7A_PROFILE_V03"
         b7a_capsule, b7a_counts, profile_replay = b7q.run_or_replay_b7a(
             b7a_program,
             run_root,
@@ -699,6 +808,7 @@ def execute(
                 "Correction": "REGENERATE_PROFILE_FROM_EXACT_S0_INVENTORY",
                 "MetadataCompilation": "NONE_BLANK_MAX_AGE_TO_INTEGER_ZERO",
                 "S1ModuleCorrection": "0.2.0_TO_0.2.1_NULLABLE_AGE_CONTRACT",
+                "B7AProfilerCorrection": "0.2.0_TO_0.3.0_NULLABLE_AGE_CONTRACT",
                 "ModuleQualificationCapsule": qualification_result.stdout.strip()[-240:],
                 "HistoricalFailureCoverage": list(RUN_HISTORICAL_FAILURE_COVERAGE),
                 "HistoricalFailureTestMap": {
@@ -725,6 +835,11 @@ def execute(
             reason = machine_token(type(error).__name__, 72)
             detail = machine_token(str(error), 180)
             stage = "UNHANDLED"
+        if diagnostics:
+            last = diagnostics[-1]
+            child_tail = str(last.get("StderrTail", "") or last.get("StdoutTail", ""))
+            if child_tail.strip():
+                detail = machine_token(str(detail) + "_" + child_tail[-400:], 180)
         line1 = f"B7UE K-{reason}-J{stage}-X1 C-7"
         line2 = f"B7UD K-{reason}-D{detail}-X0 C-0"
         try:
@@ -934,7 +1049,7 @@ def self_test() -> None:
         check("T17_RANGE", FRAME_END - FRAME_START + 1 == 401)
         check("T18_ROLE_COUNT", len(ROLE_IDENTITIES) == 7)
         check("T19_PROGRAM", PROGRAM_ID.startswith("UDP002"))
-        check("T20_VERSION", PROGRAM_VERSION == "0.1.0")
+        check("T20_VERSION", PROGRAM_VERSION == "0.2.0")
         check("T21_DEPENDENCIES", B7Q_BASENAME.endswith(".py.txt"))
         check("T22_DIAGNOSTIC", "u22b7u_failure_diagnostic.json" in Path(__file__).read_text(encoding="utf-8"))
         check(
@@ -949,6 +1064,10 @@ def self_test() -> None:
             in Path(__file__).read_text(encoding="utf-8"),
         )
         check(
+            "T23D_B7A_NULLABLE_AGE_VERSION",
+            B7A_BASENAME.endswith("v0_3.py.txt"),
+        )
+        check(
             "T23B_HISTORY_TEST_MAP",
             set(RUN_HISTORICAL_FAILURE_TEST_MAP)
             == set(RUN_HISTORICAL_FAILURE_COVERAGE)
@@ -959,9 +1078,9 @@ def self_test() -> None:
             ),
         )
         check("T24_CAPSULE", len("B7U N-I22-B7-M21-A2-F401-G401-R0-P0-X0 C-0") < 100)
-    if len(checks) != 41:
+    if len(checks) != 42:
         raise AssertionError("SELFTEST_COUNT")
-    print("UDP002-U22B7U-SELFTEST-PASS-41 C-0")
+    print("UDP002-U22B7U-SELFTEST-PASS-42 C-0")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -969,6 +1088,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--unit-test-only", action="store_true")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--c-code-root", default=".")
     parser.add_argument("--workspace-root", default="U-UDP002")
@@ -982,9 +1102,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--module-timeout-seconds", type=int, default=1800)
     args = parser.parse_args(argv)
     try:
-        if args.self_test:
+        if args.unit_test_only:
             self_test()
             return 0
+        if args.self_test:
+            self_test()
+            return 0 if runtime_preflight(
+                Path(args.c_code_root).resolve(),
+                Path(args.workspace_root).resolve(),
+                Path(args.b7p2_root).resolve(),
+            ) else 7
         if not args.execute:
             raise RefreshError("MODE_REQUIRED", "USE_EXECUTE", "CLI")
         line1, line2 = execute(
