@@ -3,9 +3,10 @@
 
 This correction intentionally preserves the fail-closed inventory fingerprint.
 It never edits an existing profile or failed Run.  Instead it selects governed
-semantic identities from the S0 inventory, writes one new immutable profile,
-creates one new Run configuration, and executes S0 plus the accepted Camera S1
-module before invoking the read-only B7A geometry profiler.
+semantic identities from the S0 inventory, compiles declarative hold metadata
+into executable MaxAgeFrames values, writes one new immutable profile, creates
+one new Run configuration, and executes S0 plus the accepted Camera S1 module
+before invoking the read-only B7A geometry profiler.
 """
 
 from __future__ import annotations
@@ -27,11 +28,11 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
 PROGRAM_ID = "UDP002.U22B7R.InventoryBoundProfileRefresh"
-PROGRAM_VERSION = "0.1.0"
+PROGRAM_VERSION = "0.2.0"
 B7Q_BASENAME = "u002_u22b7q_full_geometry_relink_and_profile_v0_1.py.txt"
 B7A_BASENAME = "u002_u22b7a_camera_lateral_evidence_profiler_v0_2.py.txt"
 FAILED_RUN_ID = "U22B7Q_GEOMETRY_RELINK_F41380_41780_V01"
-RUN_ID = "U22B7R_GEOMETRY_RELINK_F41380_41780_V01"
+RUN_ID = "U22B7R_GEOMETRY_RELINK_F41380_41780_V02"
 FRAME_START = 41380
 FRAME_END = 41780
 
@@ -64,6 +65,11 @@ ROLE_IDENTITIES = {
     "RADAR_DETECTION_FLAG": ("1", "380", "precedingvehicledetectionflag"),
     "VEHICLE_SPEED": (None, "5E1", "vehiclespeed"),
 }
+HISTORICAL_FAILURE_COVERAGE = (
+    "FP027_MAX_AGE_COMPILATION",
+    "U22B1B4_NONE_BLANK_MAX_AGE",
+    "U22B2DR3_CLASS_LEVEL_ROLE_COMPILATION",
+)
 
 
 class RefreshError(RuntimeError):
@@ -210,6 +216,61 @@ def parse_nonnegative_integer(value: object, field: str) -> int:
     return int(number)
 
 
+def compile_hold_policy(
+    row: Mapping[str, str],
+    role: str,
+) -> Tuple[int, Optional[Dict[str, object]]]:
+    """Compile declarative hold metadata into one executable integer policy.
+
+    Historical rule FP027:
+    - NONE plus blank means no cross-FrameCount hold and compiles to integer 0;
+    - NONE plus an explicit value must equal integer 0;
+    - BOUNDED / BOUNDED_HOLD requires an explicit nonnegative integer;
+    - unknown or contradictory combinations fail closed.
+    """
+
+    policy = str(row.get("HoldPolicy", "")).strip().upper()
+    observed = row.get("MaxAgeFrames")
+    observed_text = str(observed if observed is not None else "").strip()
+    if policy == "NONE":
+        if observed_text == "":
+            return 0, {
+                "Role": role,
+                "HoldPolicy": policy,
+                "ObservedMaxAgeFrames": "BLANK",
+                "CompiledMaxAgeFrames": 0,
+                "Rule": "NO_HOLD_IMPLIES_ZERO_FRAME_AGE",
+            }
+        parsed = parse_nonnegative_integer(observed, role + "_MAX_AGE")
+        if parsed != 0:
+            raise RefreshError("NONE_NONZERO_MAX_AGE", role, "PROFILE")
+        change = None
+        if not isinstance(observed, int):
+            change = {
+                "Role": role,
+                "HoldPolicy": policy,
+                "ObservedMaxAgeFrames": observed_text,
+                "CompiledMaxAgeFrames": 0,
+                "Rule": "CONTROL_FIELD_INTEGER_COMPILATION",
+            }
+        return 0, change
+    if policy in {"BOUNDED", "BOUNDED_HOLD"}:
+        if observed_text == "":
+            raise RefreshError("BOUNDED_MAX_AGE_BLANK", role, "PROFILE")
+        parsed = parse_nonnegative_integer(observed, role + "_MAX_AGE")
+        change = None
+        if not isinstance(observed, int):
+            change = {
+                "Role": role,
+                "HoldPolicy": policy,
+                "ObservedMaxAgeFrames": observed_text,
+                "CompiledMaxAgeFrames": parsed,
+                "Rule": "CONTROL_FIELD_INTEGER_COMPILATION",
+            }
+        return parsed, change
+    raise RefreshError("UNKNOWN_HOLD_POLICY", f"{role}:{policy or 'BLANK'}", "PROFILE")
+
+
 def read_inventory(path: Path) -> List[Dict[str, str]]:
     """Read and validate the exact S0 signal inventory."""
 
@@ -293,12 +354,15 @@ def exact_role_matches(
     return matches
 
 
-def binding_record(row: Mapping[str, str], role: str) -> Dict[str, object]:
+def binding_record(
+    row: Mapping[str, str],
+    role: str,
+) -> Tuple[Dict[str, object], Optional[Dict[str, object]]]:
     """Preserve inventory semantics while materializing typed policy fields."""
 
     if not parse_boolean(row.get("IncludeInFrameView"), role + "_FRAME"):
         raise RefreshError("NOT_IN_FRAME_VIEW", role, "PROFILE")
-    parse_nonnegative_integer(row.get("MaxAgeFrames"), role + "_MAX_AGE")
+    compiled_max_age, compilation = compile_hold_policy(row, role)
     result: Dict[str, object] = {
         field: row.get(field, "") for field in INVENTORY_REQUIRED
     }
@@ -309,7 +373,8 @@ def binding_record(row: Mapping[str, str], role: str) -> Dict[str, object]:
     result["IncludeInReviewView"] = parse_boolean(
         row.get("IncludeInReviewView"), role + "_REVIEW"
     )
-    return result
+    result["MaxAgeFrames"] = compiled_max_age
+    return result, compilation
 
 
 def build_profile(
@@ -321,17 +386,21 @@ def build_profile(
 
     bindings: Dict[str, List[Dict[str, object]]] = {}
     counts: Dict[str, int] = {}
+    compilation_changes: List[Dict[str, object]] = []
     for role in ROLE_IDENTITIES:
         matches = exact_role_matches(rows, role)
         counts[role] = len(matches)
         if len(matches) != 1:
             raise RefreshError("ROLE_COUNT", f"{role}:{len(matches)}", "PROFILE")
-        bindings[role] = [binding_record(matches[0], role)]
+        record, compilation = binding_record(matches[0], role)
+        bindings[role] = [record]
+        if compilation is not None:
+            compilation_changes.append(compilation)
     inventory_hash = sha256_file(inventory)
     profile = {
         "ContractVersion": "U002_SIGNAL_BINDING_PROFILE_V0_1",
         "BindingProfileId": "TC001.CameraRadar.FullGeometry." + inventory_hash[:12],
-        "BindingProfileVersion": "0.1.0",
+        "BindingProfileVersion": "0.2.0",
         "Status": "CONTROLLED_INVENTORY_BOUND",
         "SourceRunId": source_run_id,
         "SourceInventorySha256": inventory_hash,
@@ -341,6 +410,9 @@ def build_profile(
         "BindingCounts": counts,
         "DuplicateRoleCount": 0,
         "BlockingIssues": [],
+        "CompilationRule": "HOLD_POLICY_TO_EXECUTABLE_INTEGER_MAX_AGE_V0_1",
+        "CompilationChanges": compilation_changes,
+        "HistoricalFailureCoverage": list(HISTORICAL_FAILURE_COVERAGE),
         "Prohibitions": [
             "Recognition_ID is not authoritative target truth",
             "Radar is not used to select the Camera target",
@@ -430,7 +502,7 @@ def execute(
         profile_name = (
             "tc001_camera_radar_full_geometry_binding_"
             + str(profile["SourceInventorySha256"])[:12]
-            + "_v0_1.json"
+            + "_v0_2.json"
         )
         profile_path = workspace_root / "02_CONFIG/signal_profiles" / profile_name
         profile_disposition = persist_immutable(profile_path, profile, "PROFILE")
@@ -479,7 +551,7 @@ def execute(
             raise RefreshError("PROTECTED_INPUT_CHANGED", "HASH_OR_METADATA", "VERIFY")
         output_dir.mkdir(parents=True, exist_ok=True)
         line1 = (
-            f"B7R N-I{len(rows)}-B{len(role_counts)}-M2"
+            f"B7R2 N-I{len(rows)}-B{len(role_counts)}-M2"
             f"-A{linked['ArtifactCount']}-F{linked['ReconstructionRows']}"
             f"-G{b7a_counts['PairedGeometryRows']}"
             f"-R{run_replay}-P{profile_replay}-X0 C-0"
@@ -510,6 +582,8 @@ def execute(
                 "B7ACounts": b7a_counts,
                 "Diagnostics": diagnostics,
                 "Correction": "REGENERATE_PROFILE_FROM_EXACT_S0_INVENTORY",
+                "MetadataCompilation": "NONE_BLANK_MAX_AGE_TO_INTEGER_ZERO",
+                "HistoricalFailureCoverage": list(HISTORICAL_FAILURE_COVERAGE),
                 "ProhibitedCorrection": "DO_NOT_DISABLE_OR_REWRITE_INVENTORY_HASH_CHECK",
                 "NextAction": "AUTHOR_AND_TEST_CAMERA_S1_V0_3_GEOMETRY_EXPERIMENT",
             },
@@ -566,7 +640,12 @@ def self_test() -> None:
             raise AssertionError(name)
         checks.append(name)
 
-    def row(role: str, canonical: str) -> Dict[str, str]:
+    def row(
+        role: str,
+        canonical: str,
+        hold_policy: str = "NONE",
+        max_age: str = "",
+    ) -> Dict[str, str]:
         channel, can_id, signal = ROLE_IDENTITIES[role]
         return {
             "CanonicalName": canonical,
@@ -580,8 +659,8 @@ def self_test() -> None:
             "UpdateMode": "EVENT_DRIVEN",
             "StorageDtype": "float64",
             "WithinFramePolicy": "LAST_VALID_UPDATE",
-            "HoldPolicy": "BOUNDED_HOLD",
-            "MaxAgeFrames": "1",
+            "HoldPolicy": hold_policy,
+            "MaxAgeFrames": max_age,
             "RequiredForAnalysis": "1",
             "IncludeInFrameView": "1",
             "IncludeInReviewView": "1",
@@ -604,6 +683,14 @@ def self_test() -> None:
         check("T05_BLOCKING", profile["BlockingIssues"] == [])
         check("T06_DUPLICATE", profile["DuplicateRoleCount"] == 0)
         check("T07_PROHIBITIONS", len(profile["Prohibitions"]) == 4)
+        check("T07A_COMPILE_COUNT", len(profile["CompilationChanges"]) == 7)
+        check(
+            "T07B_COMPILED_ZERO",
+            all(
+                selected[0]["MaxAgeFrames"] == 0
+                for selected in profile["Bindings"].values()
+            ),
+        )
         check("T08_ROLE_EXACT", len(exact_role_matches(observed, "CAMERA_1_DISTANCE")) == 1)
         check("T09_NO_FUZZY", normalize_name("DistanceExtra") != "distance")
         path = root / "profile.json"
@@ -615,6 +702,33 @@ def self_test() -> None:
         except RefreshError as error:
             failed = error.reason == "ROLE_COUNT"
         check("T12_AMBIGUITY", failed)
+        explicit_zero, explicit_zero_change = compile_hold_policy(
+            row("CAMERA_1_DISTANCE", "Z", "NONE", "0"),
+            "CAMERA_1_DISTANCE",
+        )
+        check("T12A_NONE_ZERO", explicit_zero == 0)
+        check("T12B_NONE_ZERO_TYPED", explicit_zero_change is not None)
+        bounded, bounded_change = compile_hold_policy(
+            row("CAMERA_1_DISTANCE", "B", "BOUNDED_HOLD", "3"),
+            "CAMERA_1_DISTANCE",
+        )
+        check("T12C_BOUNDED", bounded == 3)
+        check("T12D_BOUNDED_TYPED", bounded_change is not None)
+        rejected = []
+        for policy, age, expected_reason in (
+            ("NONE", "1", "NONE_NONZERO_MAX_AGE"),
+            ("BOUNDED_HOLD", "", "BOUNDED_MAX_AGE_BLANK"),
+            ("UNKNOWN", "1", "UNKNOWN_HOLD_POLICY"),
+            ("BOUNDED", "1.5", "INTEGER"),
+        ):
+            try:
+                compile_hold_policy(
+                    row("CAMERA_1_DISTANCE", "R", policy, age),
+                    "CAMERA_1_DISTANCE",
+                )
+            except RefreshError as error:
+                rejected.append(error.reason == expected_reason)
+        check("T12E_POLICY_REJECTION_MATRIX", rejected == [True, True, True, True])
         source = {
             "ContractVersion": "U22.0.1",
             "RunId": "OLD",
@@ -665,7 +779,7 @@ def self_test() -> None:
         check("T17_RANGE", FRAME_END - FRAME_START + 1 == 401)
         check("T18_ROLE_COUNT", len(ROLE_IDENTITIES) == 7)
         check("T19_PROGRAM", PROGRAM_ID.startswith("UDP002"))
-        check("T20_VERSION", PROGRAM_VERSION == "0.1.0")
+        check("T20_VERSION", PROGRAM_VERSION == "0.2.0")
         check("T21_DEPENDENCIES", B7Q_BASENAME.endswith(".py.txt"))
         check("T22_DIAGNOSTIC", "u22b7r_failure_diagnostic.json" in Path(__file__).read_text(encoding="utf-8"))
         check(
@@ -673,10 +787,11 @@ def self_test() -> None:
             "DO_NOT_DISABLE_OR_REWRITE_INVENTORY_HASH_CHECK"
             in Path(__file__).read_text(encoding="utf-8"),
         )
-        check("T24_CAPSULE", len("B7R N-I22-B7-M2-A2-F401-G401-R0-P0-X0 C-0") < 100)
-    if len(checks) != 24:
+        check("T23A_HISTORY", len(HISTORICAL_FAILURE_COVERAGE) == 3)
+        check("T24_CAPSULE", len("B7R2 N-I22-B7-M2-A2-F401-G401-R0-P0-X0 C-0") < 100)
+    if len(checks) != 32:
         raise AssertionError("SELFTEST_COUNT")
-    print("UDP002-U22B7R-SELFTEST-PASS-24 C-0")
+    print("UDP002-U22B7R2-SELFTEST-PASS-32 C-0")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -691,7 +806,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--b7p2-root",
         default="U-UDP001/03_CASES/TC001_20260422/02_RUNS/U22B7P_FULL_GEOMETRY_V02",
     )
-    parser.add_argument("--output-dir", default="U-UDP002/04_TEMP/U22B7R_OUTPUT")
+    parser.add_argument("--output-dir", default="U-UDP002/04_TEMP/U22B7R2_OUTPUT")
     parser.add_argument("--failed-run-id", default=FAILED_RUN_ID)
     parser.add_argument("--run-id", default=RUN_ID)
     parser.add_argument("--module-timeout-seconds", type=int, default=1800)
