@@ -28,11 +28,11 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
 PROGRAM_ID = "UDP002.U22B7R.InventoryBoundProfileRefresh"
-PROGRAM_VERSION = "0.2.0"
+PROGRAM_VERSION = "0.3.0"
 B7Q_BASENAME = "u002_u22b7q_full_geometry_relink_and_profile_v0_1.py.txt"
 B7A_BASENAME = "u002_u22b7a_camera_lateral_evidence_profiler_v0_2.py.txt"
 FAILED_RUN_ID = "U22B7Q_GEOMETRY_RELINK_F41380_41780_V01"
-RUN_ID = "U22B7R_GEOMETRY_RELINK_F41380_41780_V02"
+RUN_ID = "U22B7R_GEOMETRY_RELINK_F41380_41780_V03"
 FRAME_START = 41380
 FRAME_END = 41780
 
@@ -65,11 +65,52 @@ ROLE_IDENTITIES = {
     "RADAR_DETECTION_FLAG": ("1", "380", "precedingvehicledetectionflag"),
     "VEHICLE_SPEED": (None, "5E1", "vehiclespeed"),
 }
+REQUIRED_ROLES = (
+    "CAMERA_1_DISTANCE",
+    "CAMERA_1_LATERAL_POSITION",
+    "CAMERA_3_DISTANCE",
+    "CAMERA_3_LATERAL_POSITION",
+    "RADAR_DISTANCE",
+    "RADAR_DETECTION_FLAG",
+)
+OPTIONAL_ROLES = ("VEHICLE_SPEED",)
 HISTORICAL_FAILURE_COVERAGE = (
     "FP027_MAX_AGE_COMPILATION",
+    "FP028_HISTORICAL_RULE_CONFORMANCE",
     "U22B1B4_NONE_BLANK_MAX_AGE",
     "U22B2DR3_CLASS_LEVEL_ROLE_COMPILATION",
 )
+HISTORICAL_FAILURE_TEST_MAP = {
+    "FP027_MAX_AGE_COMPILATION": (
+        "T07A_COMPILE_COUNT",
+        "T07B_COMPILED_ZERO",
+        "T12A_NONE_ZERO",
+        "T12B_NONE_ZERO_TYPED",
+        "T12C_BOUNDED",
+        "T12D_BOUNDED_TYPED",
+        "T12E_POLICY_REJECTION_MATRIX",
+    ),
+    "FP028_HISTORICAL_RULE_CONFORMANCE": (
+        "T07C_OPTIONAL_ZERO_COUNT",
+        "T07D_OPTIONAL_EMPTY_LIST",
+        "T07F_REQUIRED_MISSING",
+        "T07G_OPTIONAL_DUPLICATE",
+        "T12_AMBIGUITY",
+    ),
+    "U22B1B4_NONE_BLANK_MAX_AGE": (
+        "T07B_COMPILED_ZERO",
+        "T12A_NONE_ZERO",
+        "T12B_NONE_ZERO_TYPED",
+    ),
+    "U22B2DR3_CLASS_LEVEL_ROLE_COMPILATION": (
+        "T07C_OPTIONAL_ZERO_COUNT",
+        "T07D_OPTIONAL_EMPTY_LIST",
+        "T07E_OPTIONAL_NO_COMPILE",
+        "T07F_REQUIRED_MISSING",
+        "T07G_OPTIONAL_DUPLICATE",
+        "T12_AMBIGUITY",
+    ),
+}
 
 
 class RefreshError(RuntimeError):
@@ -382,7 +423,7 @@ def build_profile(
     rows: Sequence[Mapping[str, str]],
     source_run_id: str,
 ) -> Tuple[Dict[str, object], Dict[str, int]]:
-    """Create one complete base profile without guessing or resolving ambiguity."""
+    """Create one complete profile with explicit required/optional cardinality."""
 
     bindings: Dict[str, List[Dict[str, object]]] = {}
     counts: Dict[str, int] = {}
@@ -390,8 +431,13 @@ def build_profile(
     for role in ROLE_IDENTITIES:
         matches = exact_role_matches(rows, role)
         counts[role] = len(matches)
-        if len(matches) != 1:
+        if len(matches) > 1:
             raise RefreshError("ROLE_COUNT", f"{role}:{len(matches)}", "PROFILE")
+        if len(matches) == 0:
+            if role in REQUIRED_ROLES:
+                raise RefreshError("ROLE_COUNT", f"{role}:0", "PROFILE")
+            bindings[role] = []
+            continue
         record, compilation = binding_record(matches[0], role)
         bindings[role] = [record]
         if compilation is not None:
@@ -400,12 +446,13 @@ def build_profile(
     profile = {
         "ContractVersion": "U002_SIGNAL_BINDING_PROFILE_V0_1",
         "BindingProfileId": "TC001.CameraRadar.FullGeometry." + inventory_hash[:12],
-        "BindingProfileVersion": "0.2.0",
+        "BindingProfileVersion": "0.3.0",
         "Status": "CONTROLLED_INVENTORY_BOUND",
         "SourceRunId": source_run_id,
         "SourceInventorySha256": inventory_hash,
         "InventorySignalCount": len(rows),
-        "RequiredRoles": list(ROLE_IDENTITIES),
+        "RequiredRoles": list(REQUIRED_ROLES),
+        "OptionalRoles": list(OPTIONAL_ROLES),
         "Bindings": bindings,
         "BindingCounts": counts,
         "DuplicateRoleCount": 0,
@@ -413,6 +460,9 @@ def build_profile(
         "CompilationRule": "HOLD_POLICY_TO_EXECUTABLE_INTEGER_MAX_AGE_V0_1",
         "CompilationChanges": compilation_changes,
         "HistoricalFailureCoverage": list(HISTORICAL_FAILURE_COVERAGE),
+        "HistoricalFailureTestMap": {
+            key: list(value) for key, value in HISTORICAL_FAILURE_TEST_MAP.items()
+        },
         "Prohibitions": [
             "Recognition_ID is not authoritative target truth",
             "Radar is not used to select the Camera target",
@@ -502,7 +552,7 @@ def execute(
         profile_name = (
             "tc001_camera_radar_full_geometry_binding_"
             + str(profile["SourceInventorySha256"])[:12]
-            + "_v0_2.json"
+            + "_v0_3.json"
         )
         profile_path = workspace_root / "02_CONFIG/signal_profiles" / profile_name
         profile_disposition = persist_immutable(profile_path, profile, "PROFILE")
@@ -551,7 +601,7 @@ def execute(
             raise RefreshError("PROTECTED_INPUT_CHANGED", "HASH_OR_METADATA", "VERIFY")
         output_dir.mkdir(parents=True, exist_ok=True)
         line1 = (
-            f"B7R2 N-I{len(rows)}-B{len(role_counts)}-M2"
+            f"B7R3 N-I{len(rows)}-B{len(role_counts)}-M2"
             f"-A{linked['ArtifactCount']}-F{linked['ReconstructionRows']}"
             f"-G{b7a_counts['PairedGeometryRows']}"
             f"-R{run_replay}-P{profile_replay}-X0 C-0"
@@ -584,6 +634,10 @@ def execute(
                 "Correction": "REGENERATE_PROFILE_FROM_EXACT_S0_INVENTORY",
                 "MetadataCompilation": "NONE_BLANK_MAX_AGE_TO_INTEGER_ZERO",
                 "HistoricalFailureCoverage": list(HISTORICAL_FAILURE_COVERAGE),
+                "HistoricalFailureTestMap": {
+                    key: list(value)
+                    for key, value in HISTORICAL_FAILURE_TEST_MAP.items()
+                },
                 "ProhibitedCorrection": "DO_NOT_DISABLE_OR_REWRITE_INVENTORY_HASH_CHECK",
                 "NextAction": "AUTHOR_AND_TEST_CAMERA_S1_V0_3_GEOMETRY_EXPERIMENT",
             },
@@ -689,8 +743,40 @@ def self_test() -> None:
             all(
                 selected[0]["MaxAgeFrames"] == 0
                 for selected in profile["Bindings"].values()
+                if selected
             ),
         )
+        without_optional = [
+            item
+            for item in observed
+            if len(exact_role_matches([item], "VEHICLE_SPEED")) == 0
+        ]
+        optional_profile, optional_counts = build_profile(
+            inventory,
+            without_optional,
+            "FAILED_TEST",
+        )
+        check("T07C_OPTIONAL_ZERO_COUNT", optional_counts["VEHICLE_SPEED"] == 0)
+        check("T07D_OPTIONAL_EMPTY_LIST", optional_profile["Bindings"]["VEHICLE_SPEED"] == [])
+        check("T07E_OPTIONAL_NO_COMPILE", len(optional_profile["CompilationChanges"]) == 6)
+        required_missing_rejected = False
+        try:
+            build_profile(inventory, observed[1:], "FAILED_TEST")
+        except RefreshError as error:
+            required_missing_rejected = (
+                error.reason == "ROLE_COUNT"
+                and error.detail == "CAMERA_1_DISTANCE_0"
+            )
+        check("T07F_REQUIRED_MISSING", required_missing_rejected)
+        optional_duplicate_rejected = False
+        try:
+            build_profile(inventory, observed + [dict(observed[-1])], "FAILED_TEST")
+        except RefreshError as error:
+            optional_duplicate_rejected = (
+                error.reason == "ROLE_COUNT"
+                and error.detail == "VEHICLE_SPEED_2"
+            )
+        check("T07G_OPTIONAL_DUPLICATE", optional_duplicate_rejected)
         check("T08_ROLE_EXACT", len(exact_role_matches(observed, "CAMERA_1_DISTANCE")) == 1)
         check("T09_NO_FUZZY", normalize_name("DistanceExtra") != "distance")
         path = root / "profile.json"
@@ -779,7 +865,7 @@ def self_test() -> None:
         check("T17_RANGE", FRAME_END - FRAME_START + 1 == 401)
         check("T18_ROLE_COUNT", len(ROLE_IDENTITIES) == 7)
         check("T19_PROGRAM", PROGRAM_ID.startswith("UDP002"))
-        check("T20_VERSION", PROGRAM_VERSION == "0.2.0")
+        check("T20_VERSION", PROGRAM_VERSION == "0.3.0")
         check("T21_DEPENDENCIES", B7Q_BASENAME.endswith(".py.txt"))
         check("T22_DIAGNOSTIC", "u22b7r_failure_diagnostic.json" in Path(__file__).read_text(encoding="utf-8"))
         check(
@@ -787,11 +873,20 @@ def self_test() -> None:
             "DO_NOT_DISABLE_OR_REWRITE_INVENTORY_HASH_CHECK"
             in Path(__file__).read_text(encoding="utf-8"),
         )
-        check("T23A_HISTORY", len(HISTORICAL_FAILURE_COVERAGE) == 3)
-        check("T24_CAPSULE", len("B7R2 N-I22-B7-M2-A2-F401-G401-R0-P0-X0 C-0") < 100)
-    if len(checks) != 32:
+        check("T23A_HISTORY", len(HISTORICAL_FAILURE_COVERAGE) == 4)
+        check(
+            "T23B_HISTORY_TEST_MAP",
+            set(HISTORICAL_FAILURE_TEST_MAP) == set(HISTORICAL_FAILURE_COVERAGE)
+            and all(
+                test_name in checks
+                for test_names in HISTORICAL_FAILURE_TEST_MAP.values()
+                for test_name in test_names
+            ),
+        )
+        check("T24_CAPSULE", len("B7R3 N-I22-B7-M2-A2-F401-G401-R0-P0-X0 C-0") < 100)
+    if len(checks) != 38:
         raise AssertionError("SELFTEST_COUNT")
-    print("UDP002-U22B7R2-SELFTEST-PASS-32 C-0")
+    print("UDP002-U22B7R3-SELFTEST-PASS-38 C-0")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -806,7 +901,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--b7p2-root",
         default="U-UDP001/03_CASES/TC001_20260422/02_RUNS/U22B7P_FULL_GEOMETRY_V02",
     )
-    parser.add_argument("--output-dir", default="U-UDP002/04_TEMP/U22B7R2_OUTPUT")
+    parser.add_argument("--output-dir", default="U-UDP002/04_TEMP/U22B7R3_OUTPUT")
     parser.add_argument("--failed-run-id", default=FAILED_RUN_ID)
     parser.add_argument("--run-id", default=RUN_ID)
     parser.add_argument("--module-timeout-seconds", type=int, default=1800)
