@@ -1,0 +1,585 @@
+#!/usr/bin/env python3
+"""Correct B7P full-source execution with an explicit positive source limit.
+
+Version 0.1 followed the U001 interface manual and encoded full source as
+MaxSourceRows=0.  The accepted legacy G2 implementation rejects that value,
+which leaves exactly G1 accepted and G2 failed.  Version 0.2 first audits that
+failure, streams the Raw CAN file once to determine its exact positive data-row
+count, records immutable source metadata, and then executes the same isolated
+B13 Controlled Profile path with that positive count.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+
+PROGRAM_ID = "UDP002.U22B7P.FullGeometryMaterializationController"
+PROGRAM_VERSION = "0.2.0"
+V1_BASENAME = "u002_u22b7p_full_geometry_materialization_controller_v0_1.py.txt"
+RUN_ID = "U22B7P_FULL_GEOMETRY_V02"
+SEGMENT_ID = "FULL_SOURCE_EXACT_POSITIVE_ROW_LIMIT"
+
+
+class CorrectionError(RuntimeError):
+    """Represent one deterministic v0.2 correction failure."""
+
+    def __init__(self, reason: str, detail: object = "NA", stage: str = "B7P2"):
+        self.reason = machine_token(reason, 72)
+        self.detail = machine_token(detail, 180)
+        self.stage = machine_token(stage, 24)
+        super().__init__(self.reason)
+
+
+def machine_token(value: object, limit: int = 100) -> str:
+    """Return one bounded token for the manual capsule."""
+
+    text = re.sub(r"[^A-Z0-9_.-]+", "_", str(value).upper()).strip("_")
+    return (text or "UNKNOWN")[:limit]
+
+
+def load_v1():
+    """Load the adjacent accepted v0.1 helper surface."""
+
+    path = Path(__file__).resolve().with_name(V1_BASENAME)
+    if not path.is_file():
+        raise CorrectionError("V1_DEPENDENCY_MISSING", V1_BASENAME, "IMPORT")
+    loader = importlib.machinery.SourceFileLoader("u22b7p_v1_runtime", str(path))
+    specification = importlib.util.spec_from_loader(loader.name, loader)
+    if specification is None:
+        raise CorrectionError("V1_DEPENDENCY_SPEC", V1_BASENAME, "IMPORT")
+    module = importlib.util.module_from_spec(specification)
+    loader.exec_module(module)
+    return module
+
+
+V1 = load_v1()
+B14 = V1.B14
+G7V05 = V1.G7V05
+
+
+def write_text(path: Path, text: str) -> None:
+    """Write deterministic UTF-8 evidence atomically."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(text)
+    os.replace(temporary, path)
+
+
+def write_json(path: Path, value: Mapping[str, object]) -> None:
+    """Write deterministic JSON evidence."""
+
+    write_text(
+        path,
+        json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+    )
+
+
+def sha256_file(path: Path) -> str:
+    """Hash a file with bounded memory."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def count_csv_data_rows(path: Path) -> Dict[str, object]:
+    """Count physical CSV data rows in bounded blocks and preserve metadata."""
+
+    if not path.is_file() or path.is_symlink() or path.stat().st_size == 0:
+        raise CorrectionError("SOURCE_FILE_INVALID", path.name, "COUNT")
+    stat_before = path.stat()
+    line_count = 0
+    last_byte = b""
+    with path.open("rb") as stream:
+        while True:
+            block = stream.read(16 * 1024 * 1024)
+            if not block:
+                break
+            line_count += block.count(b"\n")
+            last_byte = block[-1:]
+    if last_byte and last_byte != b"\n":
+        line_count += 1
+    data_rows = max(line_count - 1, 0)
+    stat_after = path.stat()
+    if (
+        stat_before.st_size != stat_after.st_size
+        or stat_before.st_mtime_ns != stat_after.st_mtime_ns
+    ):
+        raise CorrectionError("SOURCE_CHANGED_DURING_COUNT", path.name, "COUNT")
+    if data_rows <= 0:
+        raise CorrectionError("SOURCE_DATA_ROWS", data_rows, "COUNT")
+    return {
+        "Path": str(path.resolve()),
+        "Bytes": stat_before.st_size,
+        "ModifiedTimeNs": stat_before.st_mtime_ns,
+        "PhysicalLineCount": line_count,
+        "DataRowCount": data_rows,
+    }
+
+
+def read_json(path: Path, label: str) -> Dict[str, object]:
+    """Read one required JSON object."""
+
+    if not path.is_file():
+        raise CorrectionError(label + "_MISSING", path.name, "PRIOR")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as error:
+        raise CorrectionError(label + "_JSON", type(error).__name__, "PRIOR") from error
+    if not isinstance(value, dict):
+        raise CorrectionError(label + "_TYPE", path.name, "PRIOR")
+    return value
+
+
+def audit_prior_zero_limit_failure(prior_root: Path) -> Dict[str, object]:
+    """Confirm the v0.1 failure shape before applying the v0.2 correction."""
+
+    config_path = prior_root / "01_CONFIG" / "u22b7p_full_geometry_config.json"
+    manifest_path = (
+        prior_root
+        / "03_RUN"
+        / "CONTROL_OUTPUT"
+        / "u001_g8a2_orchestration_manifest.json"
+    )
+    config = read_json(config_path, "PRIOR_CONFIG")
+    manifest = read_json(manifest_path, "PRIOR_MANIFEST")
+    parameters = config.get("Parameters")
+    if not isinstance(parameters, dict):
+        raise CorrectionError("PRIOR_PARAMETERS", "TYPE", "PRIOR")
+    max_rows = parameters.get("MaxSourceRows")
+    stages = manifest.get("Stages")
+    if not isinstance(stages, list):
+        raise CorrectionError("PRIOR_STAGES", "TYPE", "PRIOR")
+    successful = [
+        row
+        for row in stages
+        if isinstance(row, dict) and row.get("Success") is True
+    ]
+    stage_ids = [str(row.get("StageId")) for row in successful]
+    if max_rows != 0:
+        raise CorrectionError("PRIOR_MAX_ROWS_NOT_ZERO", max_rows, "PRIOR")
+    if manifest.get("Status") != "FAILURE" or stage_ids != ["G1"]:
+        raise CorrectionError(
+            "PRIOR_FAILURE_SHAPE",
+            f"{manifest.get('Status')}:{'.'.join(stage_ids)}",
+            "PRIOR",
+        )
+    log_root = prior_root / "03_RUN" / "CONTROL_OUTPUT"
+    stdout_path = log_root / "G2_stdout.txt"
+    stderr_path = log_root / "G2_stderr.txt"
+    stdout = stdout_path.read_text(encoding="utf-8-sig", errors="replace") if stdout_path.is_file() else ""
+    stderr = stderr_path.read_text(encoding="utf-8-sig", errors="replace") if stderr_path.is_file() else ""
+    return {
+        "PriorRoot": str(prior_root.resolve()),
+        "PriorStatus": manifest.get("Status"),
+        "SuccessfulStages": stage_ids,
+        "ConfiguredMaxSourceRows": max_rows,
+        "G2StdoutPresent": int(stdout_path.is_file()),
+        "G2StderrPresent": int(stderr_path.is_file()),
+        "G2StdoutTail": stdout[-2000:],
+        "G2StderrTail": stderr[-2000:],
+        "FailureClass": "ZERO_FULL_SOURCE_LIMIT_CONTRACT_MISMATCH",
+    }
+
+
+def run_child_capture(
+    label: str,
+    command: Sequence[str],
+    log_root: Path,
+) -> Dict[str, object]:
+    """Run one child process and preserve complete logs."""
+
+    started = time.monotonic()
+    completed = subprocess.run(
+        list(command),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        shell=False,
+    )
+    duration = round(time.monotonic() - started, 3)
+    stdout_path = log_root / f"{label}_stdout.txt"
+    stderr_path = log_root / f"{label}_stderr.txt"
+    write_text(stdout_path, completed.stdout)
+    write_text(stderr_path, completed.stderr)
+    return {
+        "Label": label,
+        "Command": list(command),
+        "ReturnCode": completed.returncode,
+        "DurationSeconds": duration,
+        "StdoutLog": stdout_path.name,
+        "StderrLog": stderr_path.name,
+        "StdoutTail": completed.stdout[-3000:],
+        "StderrTail": completed.stderr[-3000:],
+    }
+
+
+def require_success(result: Mapping[str, object], stage: str) -> None:
+    """Fail closed on a nonzero child exit."""
+
+    if int(result.get("ReturnCode", 7)) != 0:
+        raise CorrectionError(
+            "CHILD_EXIT",
+            f"{result.get('Label')}:{result.get('ReturnCode')}",
+            stage,
+        )
+
+
+def build_capsule(
+    source_rows: int,
+    verification: Mapping[str, object],
+    recovery_used: int,
+) -> Tuple[str, str]:
+    """Build an informative two-line result below the manual bandwidth limit."""
+
+    line1 = (
+        f"B7P2 N-S{source_rows}-U{verification['UpdateRows']}"
+        f"-F{verification['FrameRows']}-C{verification['CatalogSignals']}"
+        f"-V{verification['FrameSignals']}-G{verification['GeometryBindingCount']}"
+        f"-R{recovery_used}-H1-X0 C-0"
+    )
+    line2 = "B7P2I FIX-ZERO_TO_EXACT_POSITIVE_ROW_LIMIT-FULL_GEOMETRY_READY-NEXT_LINK_U002 C-0"
+    return line1, line2
+
+
+def write_failure(
+    output_root: Optional[Path],
+    error: BaseException,
+    children: Sequence[Mapping[str, object]],
+) -> Tuple[str, str]:
+    """Persist full diagnostics while returning only two short lines."""
+
+    if isinstance(error, CorrectionError):
+        reason, detail, stage = error.reason, error.detail, error.stage
+    elif isinstance(error, V1.MaterializationError):
+        reason, detail, stage = error.reason, error.detail, error.stage
+    else:
+        reason = machine_token(type(error).__name__, 72)
+        detail = machine_token(str(error), 180)
+        stage = "UNHANDLED"
+    line1 = f"B7P2E K-{reason}-J{stage}-X1 C-7"
+    line2 = f"MEMO1-{detail}"
+    if output_root is not None:
+        try:
+            output_root.mkdir(parents=True, exist_ok=True)
+            write_json(
+                output_root / "u22b7p2_failure_diagnostic.json",
+                {
+                    "CompletionCode": 7,
+                    "ProgramId": PROGRAM_ID,
+                    "ProgramVersion": PROGRAM_VERSION,
+                    "Reason": reason,
+                    "Detail": detail,
+                    "Stage": stage,
+                    "ChildResults": list(children),
+                    "Traceback": traceback.format_exc(),
+                },
+            )
+            write_text(output_root / "u22b7p2_return_capsule.txt", line1 + "\n" + line2 + "\n")
+        except Exception:
+            pass
+    return line1, line2
+
+
+def execute_corrected_full(
+    c_code_root: Path,
+    prior_failure_root: Path,
+    output_root: Path,
+) -> Tuple[str, str]:
+    """Audit v0.1, count source rows and execute corrected full materialization."""
+
+    children: List[Dict[str, object]] = []
+    try:
+        if output_root.exists():
+            raise CorrectionError("OUTPUT_ALREADY_EXISTS", output_root.name, "PREFLIGHT")
+        prior = audit_prior_zero_limit_failure(prior_failure_root)
+        udp001_root = (c_code_root / "U-UDP001").resolve()
+        case_root = (udp001_root / "03_CASES" / "TC001_20260422").resolve()
+        profile_root = V1.discover_profile(case_root)
+        profile = B14.validate_profile(profile_root)
+        layout = B14.validate_u001_layout(udp001_root, case_root)
+        source_path = case_root / "00_SOURCE-READONLY" / "CANDump.csv"
+        source_count = count_csv_data_rows(source_path)
+        exact_rows = int(source_count["DataRowCount"])
+
+        protected_paths = [
+            *layout["Programs"].values(),
+            layout["Orchestrator"],
+            *layout["ActiveControls"].values(),
+            *[profile_root / name for name in B14.PROFILE_FILES],
+        ]
+        before = B14.snapshot_files(protected_paths)
+
+        output_root.mkdir(parents=True)
+        shadow_root = output_root / "00_ISOLATED_UDP001"
+        shadow_programs = shadow_root / "01_PROGRAMS"
+        shadow_controls = shadow_root / "02_CONTROL"
+        config_root = output_root / "01_CONFIG"
+        preflight_root = output_root / "02_PREFLIGHT"
+        run_root = output_root / "03_RUN"
+        log_root = output_root / "04_DIAGNOSTICS"
+        recovery_root = output_root / "05_G7V05_RECOVERY"
+        config_root.mkdir()
+        log_root.mkdir()
+
+        copied_programs: Dict[str, object] = {}
+        for name, source in layout["Programs"].items():
+            copied_programs[name] = B14.copy_verified(source, shadow_programs / name)
+        copied_controls: Dict[str, object] = {}
+        for name in B14.CONTROL_FILES:
+            copied_controls[name] = B14.copy_verified(profile_root / name, shadow_controls / name)
+
+        config_path = config_root / "u22b7p2_full_geometry_config.json"
+        orchestrator = layout["Orchestrator"]
+        make_config = [
+            sys.executable,
+            str(orchestrator),
+            "--make-config",
+            "--udp001-root", str(shadow_root),
+            "--case-root", str(case_root),
+            "--out", str(config_path),
+            "--dataset-id", V1.DATASET_ID,
+            "--run-id", RUN_ID,
+            "--segment-id", SEGMENT_ID,
+            "--source-id", V1.SOURCE_ID,
+            "--max-source-rows", str(exact_rows),
+            "--decode-chunksize", "50000",
+            "--assignment-chunksize", "100000",
+            "--classification-chunksize", "100000",
+            "--frame-chunksize", "100000",
+            "--hold-chunksize", "100000",
+            "--max-assignment-age-rows", "200",
+        ]
+        result = run_child_capture("MAKE_CONFIG", make_config, log_root)
+        children.append(result)
+        require_success(result, "CONFIG")
+
+        preflight = [
+            sys.executable,
+            str(orchestrator),
+            "--preflight",
+            "--config", str(config_path),
+            "--out", str(preflight_root),
+        ]
+        result = run_child_capture("PREFLIGHT", preflight, log_root)
+        children.append(result)
+        require_success(result, "PREFLIGHT")
+        preflight_capsule = preflight_root / "udp001_g8a2_preflight_capsule.txt"
+        if not preflight_capsule.is_file() or "C-0" not in preflight_capsule.read_text(
+            encoding="utf-8-sig", errors="replace"
+        ):
+            raise CorrectionError("PREFLIGHT_CAPSULE", "NOT_C0", "PREFLIGHT")
+
+        run_command = [
+            sys.executable,
+            str(orchestrator),
+            "--run",
+            "--config", str(config_path),
+            "--out-root", str(run_root),
+        ]
+        result = run_child_capture("FULL_RUN", run_command, log_root)
+        children.append(result)
+
+        recovery_used = 0
+        if int(result["ReturnCode"]) == 0:
+            B14.parse_g8_capsule(
+                run_root / "CONTROL_OUTPUT" / "udp001_g8a2_return_capsule.txt"
+            )
+            package = V1.package_from_direct_run(run_root)
+        else:
+            V1.validate_recoverable_g7_failure(run_root)
+            G7V05.install_v05_behavior()
+            recovery_lines = G7V05.recover_b14_v05(
+                udp001_root,
+                output_root,
+                recovery_root,
+                V1.DATASET_ID,
+                RUN_ID,
+                SEGMENT_ID,
+                V1.SOURCE_ID,
+            )
+            children.append(
+                {"Label": "G7V05_RECOVERY", "ReturnCode": 0, "Capsule": list(recovery_lines)}
+            )
+            recovery_used = 1
+            package = V1.package_from_recovery(recovery_root)
+
+        verification = V1.verify_geometry_package(package)
+        after = B14.snapshot_files(protected_paths)
+        if before != after:
+            raise CorrectionError("PROTECTED_INPUT_CHANGED", "HASH_OR_METADATA", "VERIFY")
+        source_after = source_path.stat()
+        if (
+            source_after.st_size != source_count["Bytes"]
+            or source_after.st_mtime_ns != source_count["ModifiedTimeNs"]
+        ):
+            raise CorrectionError("SOURCE_CHANGED_AFTER_RUN", source_path.name, "VERIFY")
+
+        line1, line2 = build_capsule(exact_rows, verification, recovery_used)
+        write_json(
+            output_root / "u22b7p2_full_materialization_manifest.json",
+            {
+                "CompletionCode": 0,
+                "ProgramId": PROGRAM_ID,
+                "ProgramVersion": PROGRAM_VERSION,
+                "Correction": "ZERO_TO_EXACT_POSITIVE_SOURCE_ROW_LIMIT",
+                "PriorFailureAudit": prior,
+                "SourceCount": source_count,
+                "DatasetId": V1.DATASET_ID,
+                "RunId": RUN_ID,
+                "SegmentId": SEGMENT_ID,
+                "SourceId": V1.SOURCE_ID,
+                "ProfileId": V1.PROFILE_ID,
+                "ProfileRoot": str(profile_root),
+                "ProfileSelectedSignals": profile["SelectedSignals"],
+                "ProfileFrameViewSignals": profile["FrameViewSignals"],
+                "ProfileActivated": False,
+                "AcceptedControlWrites": 0,
+                "ProtectedInputsUnchanged": True,
+                "G7V05RecoveryUsed": bool(recovery_used),
+                "Verification": verification,
+                "CopiedPrograms": copied_programs,
+                "CopiedControls": copied_controls,
+                "ChildResults": children,
+                "ReturnCapsule": [line1, line2],
+                "NextAction": "LINK_FULL_GEOMETRY_PACKAGE_TO_NEW_U002_RUN",
+            },
+        )
+        write_text(output_root / "u22b7p2_return_capsule.txt", line1 + "\n" + line2 + "\n")
+        write_text(output_root / "U22B7P2_COMPLETE.marker", "C-0\n")
+        return line1, line2
+    except Exception as error:
+        return write_failure(output_root, error, children)
+
+
+def write_prior_fixture(root: Path) -> Path:
+    """Create the exact v0.1 zero-limit failure shape."""
+
+    prior = root / "PRIOR"
+    config = prior / "01_CONFIG" / "u22b7p_full_geometry_config.json"
+    manifest = prior / "03_RUN" / "CONTROL_OUTPUT" / "u001_g8a2_orchestration_manifest.json"
+    write_json(config, {"Parameters": {"MaxSourceRows": 0}})
+    write_json(
+        manifest,
+        {
+            "Status": "FAILURE",
+            "Stages": [{"StageId": "G1", "Success": True}],
+        },
+    )
+    write_text(manifest.parent / "G2_stdout.txt", "")
+    write_text(manifest.parent / "G2_stderr.txt", "MAX_SOURCE_ROWS\n")
+    return prior
+
+
+def self_test() -> None:
+    """Validate dependency surface, source counting and correction evidence."""
+
+    V1.self_test()
+    checks: List[str] = []
+
+    def check(name: str, condition: bool) -> None:
+        if not condition:
+            raise AssertionError(name)
+        checks.append(name)
+
+    with tempfile.TemporaryDirectory(prefix="u22b7p2_") as temporary:
+        root = Path(temporary)
+        source = root / "CANDump.csv"
+        source.write_bytes(b"H1,H2\n1,2\n3,4\n5,6")
+        counted = count_csv_data_rows(source)
+        check("T01_LINE_COUNT", counted["PhysicalLineCount"] == 4)
+        check("T02_DATA_ROWS", counted["DataRowCount"] == 3)
+        check("T03_BYTES", counted["Bytes"] == source.stat().st_size)
+        check("T04_MTIME", counted["ModifiedTimeNs"] == source.stat().st_mtime_ns)
+        prior = audit_prior_zero_limit_failure(write_prior_fixture(root))
+        check("T05_PRIOR_STATUS", prior["PriorStatus"] == "FAILURE")
+        check("T06_PRIOR_STAGE", prior["SuccessfulStages"] == ["G1"])
+        check("T07_PRIOR_ZERO", prior["ConfiguredMaxSourceRows"] == 0)
+        check("T08_PRIOR_CLASS", prior["FailureClass"].startswith("ZERO_"))
+        check("T09_STDERR", prior["G2StderrPresent"] == 1)
+        line1, line2 = build_capsule(
+            274522,
+            {
+                "UpdateRows": 100,
+                "FrameRows": 56596,
+                "CatalogSignals": 22,
+                "FrameSignals": 21,
+                "GeometryBindingCount": 4,
+            },
+            1,
+        )
+        check("T10_CAPSULE_CODE", line1.endswith("C-0"))
+        check("T11_CAPSULE_SOURCE", "-S274522-" in line1)
+        check("T12_CAPSULE_BOUND", len(line1) < 180)
+        check("T13_INFO_BOUND", len(line2) < 140)
+        check("T14_EXACT_FIX", "EXACT_POSITIVE" in line2)
+        check("T15_V1_LOADED", V1.PROGRAM_VERSION == "0.1.0")
+        check("T16_RUN_VERSION", RUN_ID.endswith("V02"))
+        check("T17_SHELL_FALSE", "shell=False" in Path(__file__).read_text(encoding="utf-8"))
+        check("T18_NO_ZERO_FLAG", '"--max-source-rows", str(exact_rows)' in Path(__file__).read_text(encoding="utf-8"))
+        check("T19_DIAGNOSTIC", "u22b7p2_failure_diagnostic.json" in Path(__file__).read_text(encoding="utf-8"))
+        check("T20_NEXT_LINK", "NEXT_LINK_U002" in line2)
+    if len(checks) != 20:
+        raise AssertionError("SELFTEST_COUNT")
+    print("UDP002-U22B7P2-SELFTEST-PASS-20 C-0")
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Run self-test or one corrected full materialization."""
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--run-corrected-full", action="store_true")
+    parser.add_argument("--c-code-root")
+    parser.add_argument("--prior-failure-root")
+    parser.add_argument("--output-root")
+    args = parser.parse_args(argv)
+    try:
+        if args.self_test:
+            self_test()
+            return 0
+        required = (
+            args.run_corrected_full,
+            args.c_code_root,
+            args.prior_failure_root,
+            args.output_root,
+        )
+        if not all(required):
+            raise CorrectionError("REQUIRED_ARGUMENT")
+        line1, line2 = execute_corrected_full(
+            Path(args.c_code_root).resolve(),
+            Path(args.prior_failure_root).resolve(),
+            Path(args.output_root).resolve(),
+        )
+        print(line1)
+        print(line2)
+        return 0 if line1.endswith("C-0") else 7
+    except Exception as error:
+        line1, line2 = write_failure(None, error, [])
+        print(line1)
+        print(line2)
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
