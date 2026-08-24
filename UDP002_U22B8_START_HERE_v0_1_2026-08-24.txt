@@ -1,0 +1,113 @@
+UDP002 U22B8 公司执行指南
+版本：v0.1
+日期：2026-08-24
+
+一、本步在做什么
+
+B7U 已经完成：S1 Module 0.2.1 在 401 Frame 的实测区间重建成功，B7A 0.3
+也生成了 Camera 1/3 距离、横向位置与 Radar 状态的只读证据表。
+
+B8 现在只做一件事：从这份已接受证据中，自动提取“Radar持续不可用”的少量
+候选区间，并生成 U003 可以直接载入的 Review Package。
+
+本步不会：
+
+- 把 CenterlinePreferredRole 升级为正式 Camera Selector；
+- 判断 Radar 一定发生故障；
+- 判断 Camera 一定正确；
+- 修改 B7U、B7A 或已接受的 U002 Run。
+
+自动候选规则：
+
+- RadarDistance 状态有效；
+- 距离必须大于 0 m 且小于 270 m；
+- PrecedingVehicleDetectionFlag 必须大于 0；
+- 连续不可用至少 5 Frame 才形成候选；
+- 间隔不超过 5 Frame 的不可用段合并；
+- 复核范围向前、向后各扩 40 Frame；
+- 扩展后重叠的窗口继续合并；
+- 最多输出 10 个候选。
+
+二、下载位置
+
+把 GitHub 中以下两个文件直接下载到：
+
+C-CODE\U-UDP002\04_TEMP
+
+1. UDP002_U22B8_START_HERE_v0_1_2026-08-24.txt
+2. u002_u22b8_radar_loss_review_package_builder_v0_1.py.txt
+
+不要改名，不要删除 .txt 后缀。
+
+三、整理 04_TEMP
+
+从 C-CODE 目录打开 CMD，执行：
+
+python U-UDP002\04_TEMP\u002_u22b8_radar_loss_review_package_builder_v0_1.py.txt --prepare-run
+
+它会保留：
+
+- A-Archive
+- U22B7U_OUTPUT（B8的受控输入）
+- 本次B8程序
+- 本执行指南
+
+其他顶层项目会整体移动到：
+
+U-UDP002\04_TEMP\A-Archive\U22B8_PREPARE_时间
+
+不会删除历史文件。
+
+四、自测和实机依赖检查
+
+python U-UDP002\04_TEMP\u002_u22b8_radar_loss_review_package_builder_v0_1.py.txt --self-test
+
+成功时最后两行应为：
+
+UDP002-U22B8-SELFTEST-PASS-... C-0
+B8PF N-E6-P6-M0-X0 C-0
+
+不用回传这两行。若 B8PF 不是 C-0，不要执行正式运行。
+
+五、正式执行
+
+python U-UDP002\04_TEMP\u002_u22b8_radar_loss_review_package_builder_v0_1.py.txt --execute
+
+成功时终端只需回传 B8 开头的一行：
+
+B8 N-C...-F...-L...-S...-E...-X0 C-0
+
+失败时回传程序自动输出的 B8E 与 B8D 两行。
+
+六、检查输出目录
+
+dir U-UDP002\04_TEMP\U22B8_OUTPUT
+dir U-UDP002\04_TEMP\U22B8_OUTPUT\U003_REVIEW_PACKAGE
+
+U003_REVIEW_PACKAGE 必须包含六个文件：
+
+1. review_queue.csv
+2. review_data.csv
+3. review_evidence_detail.csv
+4. review_package_validation.json
+5. review_manifest.json
+6. artifact_manifest.json
+
+七、成功后的 U003 操作
+
+1. 启动 U003 FrameCount Video Reviewer。
+2. 载入测试视频并确认 FrameCount Anchor。
+3. Event CSV 选择 review_queue.csv。
+4. CAN/Review Data CSV 选择 review_data.csv。
+5. 逐个 Event 检查 Radar目标丢失开始、恢复、Camera目标和横向位置。
+6. 在 U003 中填写 ReviewResult 与短 Memo。
+7. 导出 Plot CSV 或更新后的 Review Queue。
+
+review_data.csv 只有 14 个面向人工感知的字段；完整逐帧证据保存在
+review_evidence_detail.csv，不需要在 U003 主表中全部显示。
+
+八、回传限制
+
+成功只回传 B8 一行。不要手抄 JSON、Hash、长路径或完整候选表。
+
+下一轮我会根据 B8 中的候选数量给出非常短的中文人工复核说明。
