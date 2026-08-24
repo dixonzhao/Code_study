@@ -1,0 +1,59 @@
+@echo off
+setlocal
+
+rem Run from the C-CODE root after renaming .cmd.txt to .cmd.
+set "LEGACY=u002_u22b7a_camera_lateral_evidence_profiler_v0_2.py.txt"
+set "TEMP=U-UDP002\04_TEMP"
+set "RUNNER=%TEMP%\u002_u22b11_module_v030_controlled_replay_v0_1.py.txt"
+set "B7Q=%TEMP%\u002_u22b7q_full_geometry_relink_and_profile_v0_1.py.txt"
+set "B7P2=U-UDP001\03_CASES\TC001_20260422\02_RUNS\U22B7P_FULL_GEOMETRY_V02"
+set "LOG=%TMP%\UDP002_U22B11_PREFLIGHT_REPAIR.log"
+
+if not exist "%~dp0%LEGACY%" (
+    echo B11FIX K-LEGACY_HELPER_DOWNLOAD_MISSING X1 C-7
+    exit /b 7
+)
+if not exist "%RUNNER%" (
+    echo B11FIX K-RUNNER_MISSING X1 C-7
+    exit /b 7
+)
+if not exist "%B7Q%" (
+    echo B11FIX K-B7Q_MISSING X1 C-7
+    exit /b 7
+)
+
+copy /Y "%~dp0%LEGACY%" "%TEMP%\%LEGACY%" >nul
+if errorlevel 1 (
+    echo B11FIX K-LEGACY_HELPER_COPY X1 C-7
+    exit /b 7
+)
+
+python "%RUNNER%" --prepare-run --workspace-root U-UDP002
+if errorlevel 1 (
+    echo B11FIX K-TEMP_PREPARE X1 C-7
+    exit /b 7
+)
+
+python "%B7Q%" --self-test
+if errorlevel 1 (
+    echo B11FIX K-B7Q_SELFTEST X1 C-7
+    exit /b 7
+)
+
+python "%RUNNER%" --self-test --c-code-root . --workspace-root U-UDP002 --b7p2-root "%B7P2%" > "%LOG%" 2>&1
+findstr /C:"-E0" /C:"B7UPFS" "%LOG%"
+if errorlevel 1 (
+    echo B11FIX K-PREFLIGHT_CAPSULE_MISSING X1 C-7
+    type "%LOG%"
+    exit /b 7
+)
+
+findstr /C:"B7UPFS N19-E19-M0-X0 C-0" "%LOG%" >nul
+if errorlevel 1 (
+    echo B11FIX K-PREFLIGHT_NOT_ACCEPTED X1 C-7
+    exit /b 7
+)
+
+del "%LOG%" >nul 2>&1
+echo B11FIX N-L1-A1-Q1-P1-X0 C-0
+endlocal
