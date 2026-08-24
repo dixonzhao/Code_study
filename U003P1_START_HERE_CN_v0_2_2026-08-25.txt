@@ -1,6 +1,8 @@
 U003P1 - PeakFrameCount导航、Event删除与B12复核
-版本：v0.1
+版本：v0.2
 日期：2026-08-25
+
+v0.2修正：B12正式输出位于U-UDP002\07_OUTPUT，不在旧的03_CASES目录。
 
 ExecutionRoot = C-CODE
 WorkspaceRoot = U-UDP003
@@ -24,7 +26,7 @@ C-CODE\U-UDP003\04_TEMP
 
 - framecount_video_reviewer_v0_6.py.txt
 - u003_peak_navigation_acceptance_gate_v0_2.py.txt
-- U003P1_START_HERE_CN_v0_1_2026-08-25.txt
+- U003P1_START_HERE_CN_v0_2_2026-08-25.txt
 
 三、CMD存在性检查
 
@@ -33,7 +35,7 @@ C-CODE\U-UDP003\04_TEMP
 dir U-UDP003\04_TEMP\framecount_video_reviewer_v0_6.py.txt
 dir U-UDP003\04_TEMP\u003_peak_navigation_acceptance_gate_v0_2.py.txt
 dir U-UDP003\01_PROGRAMS
-dir U-UDP002\03_CASES\TC001_20260422
+dir U-UDP002\07_OUTPUT\U22B12_GOLDEN_TC001_F41380_41780_V02
 if exist U-UDP003\04_TEMP\framecount_video_reviewer_v0_6.py.txt echo U003P1-SOURCE-FOUND
 
 如果任意命令显示File Not Found，停止，不要继续。
@@ -56,12 +58,23 @@ dir U-UDP003\03_CASES\TC001_20260422\02_OUTPUT\U003P1_PEAK_NAVIGATION_ACCEPTANCE
 
 成功标准：最后一条Gate输出以C-0结束。
 
-六、找到B12输入
+六、确认B12正式S7输入
 
-dir /s /b U-UDP002\03_CASES\TC001_20260422\*review_queue*.csv
-dir /s /b U-UDP002\03_CASES\TC001_20260422\*review_data*.csv
+Event Queue：
 
-记录B12最新输出中的Event Queue和Review Data路径。不要重新运行U001/U002。
+U-UDP002\07_OUTPUT\U22B12_GOLDEN_TC001_F41380_41780_V02\03_ARTIFACTS\S7\U22B12_GOLDEN_TC001_F41380_41780_V02.CameraRadar.S7.U003ReviewPackageExport.9\review_queue.csv
+
+Review Data：
+
+U-UDP002\07_OUTPUT\U22B12_GOLDEN_TC001_F41380_41780_V02\03_ARTIFACTS\S7\U22B12_GOLDEN_TC001_F41380_41780_V02.CameraRadar.S7.U003ReviewPackageExport.9\review_data.csv
+
+CMD确认：
+
+if exist U-UDP002\07_OUTPUT\U22B12_GOLDEN_TC001_F41380_41780_V02\03_ARTIFACTS\S7\U22B12_GOLDEN_TC001_F41380_41780_V02.CameraRadar.S7.U003ReviewPackageExport.9\review_queue.csv (echo B12-QUEUE-OK) else (echo B12-QUEUE-MISSING)
+
+if exist U-UDP002\07_OUTPUT\U22B12_GOLDEN_TC001_F41380_41780_V02\03_ARTIFACTS\S7\U22B12_GOLDEN_TC001_F41380_41780_V02.CameraRadar.S7.U003ReviewPackageExport.9\review_data.csv (echo B12-DATA-OK) else (echo B12-DATA-MISSING)
+
+两个结果都必须为OK。不要移动文件，不要重新运行U001/U002。
 
 七、启动U003 v0.6
 
