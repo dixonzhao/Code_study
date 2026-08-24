@@ -1,0 +1,720 @@
+#!/usr/bin/env python3
+"""Profile geometry-policy consequences using the accepted B7A/B9 evidence.
+
+This read-only calibration tool does not implement or promote S1 0.3.  It uses
+two human-labelled FrameCount intervals to compare explicit absolute-lateral and
+centerline-advantage parameters, then emits a ranked evidence table.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import re
+import shutil
+import sys
+import tempfile
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+
+PROGRAM_ID = "UDP002.U22B10.GeometryPolicyConsequenceProfiler"
+PROGRAM_VERSION = "0.1.0"
+DEFAULT_B7A_PROFILE = Path(
+    "U-UDP002/04_TEMP/U22B7U_OUTPUT/B7A_PROFILE_V03"
+)
+DEFAULT_B9_PACKAGE = Path(
+    "U-UDP002/04_TEMP/U22B9_OUTPUT/"
+    "U003_REVIEW_PACKAGE_RECOVERY_COMPLETE"
+)
+DEFAULT_OUTPUT_DIR = Path("U-UDP002/04_TEMP/U22B10_OUTPUT")
+DEFAULT_TEMP_ROOT = Path("U-UDP002/04_TEMP")
+
+PRE_RECOVERY_START = 41603
+PRE_RECOVERY_END = 41647
+CAMERA3_TARGET_START = 41648
+CAMERA3_TARGET_END = 41680
+
+DEFAULT_MAX_ABS_LATERAL = (0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0)
+DEFAULT_MINIMUM_ADVANTAGE = (0.25, 0.5, 0.75, 1.0)
+
+REQUIRED_COLUMNS = (
+    "FrameCount",
+    "Camera1DistanceValid",
+    "Camera1LateralPosition",
+    "Camera1LateralValid",
+    "Camera3DistanceValid",
+    "Camera3LateralPosition",
+    "Camera3LateralValid",
+)
+
+PROFILE_COLUMNS = (
+    "ProfileRank",
+    "MaxReacquisitionAbsLateralMeters",
+    "MinimumCenterlineAdvantageMeters",
+    "LabelPreRecoveryRows",
+    "PreRecoveryExpectedNonePassRows",
+    "PreRecoveryFalseCamera1Rows",
+    "PreRecoveryFalseCamera3Rows",
+    "LabelCamera3Rows",
+    "Camera3ExpectedPassRows",
+    "Camera3WrongCamera1Rows",
+    "Camera3AmbiguousRows",
+    "Camera3NoneRows",
+    "AllRows",
+    "AllCamera1Selections",
+    "AllCamera3Selections",
+    "AllAmbiguousRows",
+    "AllNoneRows",
+    "HardLabelFailureCount",
+    "LabelCorrectCount",
+    "SelectionCoverageRows",
+    "DecisionStatus",
+)
+
+EVIDENCE_COLUMNS = (
+    "FrameCount",
+    "HumanExpectedRole",
+    "Camera1DistanceValid",
+    "Camera1LateralPosition",
+    "Camera1AbsLateral",
+    "Camera3DistanceValid",
+    "Camera3LateralPosition",
+    "Camera3AbsLateral",
+    "SelectedRole",
+    "SelectionReason",
+    "MaxReacquisitionAbsLateralMeters",
+    "MinimumCenterlineAdvantageMeters",
+)
+
+
+class B10Error(RuntimeError):
+    """Represent one deterministic fail-closed calibration error."""
+
+
+def machine_token(value: object, limit: int = 120) -> str:
+    token = re.sub(r"[^A-Z0-9_]+", "_", str(value).upper()).strip("_")
+    return (token or "UNKNOWN")[:limit]
+
+
+def error_reason(error: BaseException) -> str:
+    return str(error.args[0]) if error.args else type(error).__name__
+
+
+def canonical_bytes(value: object) -> bytes:
+    text = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+        allow_nan=False,
+    )
+    return (text + "\n").encode("utf-8")
+
+
+def write_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".writing")
+    temporary.write_bytes(canonical_bytes(value))
+    os.replace(temporary, path)
+
+
+def load_json(path: Path, reason: str) -> Dict[str, object]:
+    if not path.is_file() or path.is_symlink():
+        raise B10Error(reason + "_MISSING")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as error:
+        raise B10Error(reason + "_JSON") from error
+    if not isinstance(value, dict):
+        raise B10Error(reason + "_TYPE")
+    return value
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def parse_optional_float(value: object) -> Optional[float]:
+    text = str(value if value is not None else "").strip()
+    if not text:
+        return None
+    try:
+        number = float(text)
+    except ValueError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def parse_integer(value: object, field: str) -> int:
+    number = parse_optional_float(value)
+    if number is None or not number.is_integer():
+        raise B10Error("INTEGER_" + machine_token(field))
+    return int(number)
+
+
+def parse_boolean(value: object, field: str) -> bool:
+    text = str(value if value is not None else "").strip().lower()
+    if text in {"1", "true"}:
+        return True
+    if text in {"0", "false", ""}:
+        return False
+    raise B10Error("BOOLEAN_" + machine_token(field))
+
+
+def write_csv(
+    path: Path,
+    columns: Sequence[str],
+    rows: Iterable[Mapping[str, object]],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=list(columns),
+            lineterminator="\n",
+        )
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({column: row.get(column, "") for column in columns})
+
+
+def verify_inputs(b7a_profile: Path, b9_package: Path) -> Path:
+    """Verify accepted B7A rows and B9 recovery coverage."""
+
+    row_path = b7a_profile / "b7a_camera_lateral_evidence_rows.csv"
+    quality = load_json(
+        b7a_profile / "b7a_camera_lateral_evidence_quality.json",
+        "B7A_QUALITY",
+    )
+    hashes = quality.get("OutputHashes")
+    if not isinstance(hashes, dict):
+        raise B10Error("B7A_OUTPUT_HASHES")
+    if str(hashes.get(row_path.name, "")) != sha256_file(row_path):
+        raise B10Error("B7A_ROWS_HASH")
+    b7a_capsule = b7a_profile / "b7a_return_capsule.txt"
+    if not b7a_capsule.is_file() or not b7a_capsule.read_text(
+        encoding="utf-8-sig"
+    ).strip().endswith("C-0"):
+        raise B10Error("B7A_NOT_ACCEPTED")
+
+    validation = load_json(
+        b9_package / "review_package_validation.json",
+        "B9_VALIDATION",
+    )
+    if validation.get("GateStatus") != "PASS":
+        raise B10Error("B9_NOT_ACCEPTED")
+    if int(validation.get("ExtendedReviewEndFrame", 0)) < CAMERA3_TARGET_END:
+        raise B10Error("B9_REVIEW_COVERAGE")
+    artifact = load_json(b9_package / "artifact_manifest.json", "B9_ARTIFACT")
+    payload_hashes = artifact.get("PayloadHashes")
+    if not isinstance(payload_hashes, dict):
+        raise B10Error("B9_PAYLOAD_HASHES")
+    for name, expected in payload_hashes.items():
+        path = b9_package / str(name)
+        if not path.is_file() or sha256_file(path) != str(expected):
+            raise B10Error("B9_PAYLOAD_HASH_" + machine_token(name))
+    return row_path
+
+
+def read_rows(path: Path) -> List[Dict[str, object]]:
+    """Read strictly increasing geometry evidence."""
+
+    rows: List[Dict[str, object]] = []
+    previous: Optional[int] = None
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        missing = [column for column in REQUIRED_COLUMNS if column not in (reader.fieldnames or [])]
+        if missing:
+            raise B10Error("SOURCE_COLUMNS_" + machine_token("_".join(missing)))
+        for source in reader:
+            frame = parse_integer(source["FrameCount"], "FRAMECOUNT")
+            if previous is not None and frame <= previous:
+                raise B10Error("FRAMECOUNT_ORDER")
+            previous = frame
+            row: Dict[str, object] = dict(source)
+            row["FrameCount"] = frame
+            rows.append(row)
+    if not rows:
+        raise B10Error("SOURCE_ROWS_EMPTY")
+    frames = {int(row["FrameCount"]) for row in rows}
+    for required in (
+        PRE_RECOVERY_START,
+        PRE_RECOVERY_END,
+        CAMERA3_TARGET_START,
+        CAMERA3_TARGET_END,
+    ):
+        if required not in frames:
+            raise B10Error("LABEL_FRAME_MISSING_" + str(required))
+    return rows
+
+
+def human_expected_role(frame: int) -> str:
+    """Return the accepted human label for calibration rows only."""
+
+    if PRE_RECOVERY_START <= frame <= PRE_RECOVERY_END:
+        return "NONE"
+    if CAMERA3_TARGET_START <= frame <= CAMERA3_TARGET_END:
+        return "CAMERA_3_DISTANCE"
+    return "UNLABELLED"
+
+
+def geometry_select(
+    row: Mapping[str, object],
+    maximum_abs_lateral: float,
+    minimum_advantage: float,
+) -> Tuple[str, str, Optional[float], Optional[float]]:
+    """Apply one stateless geometry consequence rule for calibration only."""
+
+    l1 = parse_optional_float(row["Camera1LateralPosition"])
+    l3 = parse_optional_float(row["Camera3LateralPosition"])
+    v1 = parse_boolean(row["Camera1DistanceValid"], "CAMERA1_DISTANCE_VALID")
+    v1 = v1 and parse_boolean(row["Camera1LateralValid"], "CAMERA1_LATERAL_VALID")
+    v3 = parse_boolean(row["Camera3DistanceValid"], "CAMERA3_DISTANCE_VALID")
+    v3 = v3 and parse_boolean(row["Camera3LateralValid"], "CAMERA3_LATERAL_VALID")
+    g1 = abs(l1) if v1 and l1 is not None else None
+    g3 = abs(l3) if v3 and l3 is not None else None
+    a1 = g1 is not None and g1 <= maximum_abs_lateral
+    a3 = g3 is not None and g3 <= maximum_abs_lateral
+    if a1 and not a3:
+        return "CAMERA_1_DISTANCE", "ONLY_CAMERA_1_AUTHORIZED", g1, g3
+    if a3 and not a1:
+        return "CAMERA_3_DISTANCE", "ONLY_CAMERA_3_AUTHORIZED", g1, g3
+    if not a1 and not a3:
+        return "NONE", "NO_GEOMETRY_AUTHORIZED_CANDIDATE", g1, g3
+    difference = abs(float(g1) - float(g3))
+    if difference < minimum_advantage:
+        return "AMBIGUOUS", "CENTERLINE_ADVANTAGE_BELOW_MARGIN", g1, g3
+    if float(g1) < float(g3):
+        return "CAMERA_1_DISTANCE", "CAMERA_1_CENTERLINE_ADVANTAGE", g1, g3
+    if float(g3) < float(g1):
+        return "CAMERA_3_DISTANCE", "CAMERA_3_CENTERLINE_ADVANTAGE", g1, g3
+    return "AMBIGUOUS", "EQUAL_ABSOLUTE_LATERAL", g1, g3
+
+
+def evaluate_profile(
+    rows: Sequence[Mapping[str, object]],
+    maximum_abs_lateral: float,
+    minimum_advantage: float,
+) -> Tuple[Dict[str, object], List[Dict[str, object]]]:
+    """Evaluate one policy profile against all rows and the two human labels."""
+
+    counts = {
+        "LabelPreRecoveryRows": 0,
+        "PreRecoveryExpectedNonePassRows": 0,
+        "PreRecoveryFalseCamera1Rows": 0,
+        "PreRecoveryFalseCamera3Rows": 0,
+        "LabelCamera3Rows": 0,
+        "Camera3ExpectedPassRows": 0,
+        "Camera3WrongCamera1Rows": 0,
+        "Camera3AmbiguousRows": 0,
+        "Camera3NoneRows": 0,
+        "AllRows": 0,
+        "AllCamera1Selections": 0,
+        "AllCamera3Selections": 0,
+        "AllAmbiguousRows": 0,
+        "AllNoneRows": 0,
+    }
+    evidence: List[Dict[str, object]] = []
+    for row in rows:
+        frame = int(row["FrameCount"])
+        selected, reason, g1, g3 = geometry_select(
+            row,
+            maximum_abs_lateral,
+            minimum_advantage,
+        )
+        counts["AllRows"] += 1
+        if selected == "CAMERA_1_DISTANCE":
+            counts["AllCamera1Selections"] += 1
+        elif selected == "CAMERA_3_DISTANCE":
+            counts["AllCamera3Selections"] += 1
+        elif selected == "AMBIGUOUS":
+            counts["AllAmbiguousRows"] += 1
+        else:
+            counts["AllNoneRows"] += 1
+
+        expected = human_expected_role(frame)
+        if expected == "NONE":
+            counts["LabelPreRecoveryRows"] += 1
+            if selected in {"NONE", "AMBIGUOUS"}:
+                counts["PreRecoveryExpectedNonePassRows"] += 1
+            elif selected == "CAMERA_1_DISTANCE":
+                counts["PreRecoveryFalseCamera1Rows"] += 1
+            elif selected == "CAMERA_3_DISTANCE":
+                counts["PreRecoveryFalseCamera3Rows"] += 1
+        elif expected == "CAMERA_3_DISTANCE":
+            counts["LabelCamera3Rows"] += 1
+            if selected == expected:
+                counts["Camera3ExpectedPassRows"] += 1
+            elif selected == "CAMERA_1_DISTANCE":
+                counts["Camera3WrongCamera1Rows"] += 1
+            elif selected == "AMBIGUOUS":
+                counts["Camera3AmbiguousRows"] += 1
+            else:
+                counts["Camera3NoneRows"] += 1
+        if expected != "UNLABELLED":
+            evidence.append(
+                {
+                    "FrameCount": frame,
+                    "HumanExpectedRole": expected,
+                    "Camera1DistanceValid": row["Camera1DistanceValid"],
+                    "Camera1LateralPosition": row["Camera1LateralPosition"],
+                    "Camera1AbsLateral": "" if g1 is None else format(g1, ".12g"),
+                    "Camera3DistanceValid": row["Camera3DistanceValid"],
+                    "Camera3LateralPosition": row["Camera3LateralPosition"],
+                    "Camera3AbsLateral": "" if g3 is None else format(g3, ".12g"),
+                    "SelectedRole": selected,
+                    "SelectionReason": reason,
+                    "MaxReacquisitionAbsLateralMeters": maximum_abs_lateral,
+                    "MinimumCenterlineAdvantageMeters": minimum_advantage,
+                }
+            )
+    hard_failures = (
+        counts["PreRecoveryFalseCamera1Rows"]
+        + counts["PreRecoveryFalseCamera3Rows"]
+        + counts["Camera3WrongCamera1Rows"]
+    )
+    label_correct = (
+        counts["PreRecoveryExpectedNonePassRows"]
+        + counts["Camera3ExpectedPassRows"]
+    )
+    coverage = counts["AllCamera1Selections"] + counts["AllCamera3Selections"]
+    summary: Dict[str, object] = {
+        "MaxReacquisitionAbsLateralMeters": maximum_abs_lateral,
+        "MinimumCenterlineAdvantageMeters": minimum_advantage,
+        **counts,
+        "HardLabelFailureCount": hard_failures,
+        "LabelCorrectCount": label_correct,
+        "SelectionCoverageRows": coverage,
+        "DecisionStatus": "CALIBRATION_EVIDENCE_ONLY",
+    }
+    return summary, evidence
+
+
+def rank_profiles(profiles: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    """Rank transparently: label safety, label recovery, then broad coverage."""
+
+    ranked = sorted(
+        profiles,
+        key=lambda row: (
+            int(row["HardLabelFailureCount"]),
+            -int(row["Camera3ExpectedPassRows"]),
+            -int(row["PreRecoveryExpectedNonePassRows"]),
+            -int(row["SelectionCoverageRows"]),
+            -float(row["MaxReacquisitionAbsLateralMeters"]),
+            -float(row["MinimumCenterlineAdvantageMeters"]),
+        ),
+    )
+    for rank, row in enumerate(ranked, start=1):
+        row["ProfileRank"] = rank
+    return ranked
+
+
+def execute(b7a_profile: Path, b9_package: Path, output_dir: Path) -> str:
+    """Run the complete consequence grid and write ranked evidence."""
+
+    row_path = verify_inputs(b7a_profile, b9_package)
+    rows = read_rows(row_path)
+    profiles: List[Dict[str, object]] = []
+    evidence_by_key: Dict[Tuple[float, float], List[Dict[str, object]]] = {}
+    for threshold in DEFAULT_MAX_ABS_LATERAL:
+        for advantage in DEFAULT_MINIMUM_ADVANTAGE:
+            summary, evidence = evaluate_profile(rows, threshold, advantage)
+            profiles.append(summary)
+            evidence_by_key[(threshold, advantage)] = evidence
+    ranked = rank_profiles(profiles)
+    best = ranked[0]
+    best_key = (
+        float(best["MaxReacquisitionAbsLateralMeters"]),
+        float(best["MinimumCenterlineAdvantageMeters"]),
+    )
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True)
+    profile_path = output_dir / "b10_geometry_policy_profile_ranking.csv"
+    evidence_path = output_dir / "b10_top_profile_labelled_evidence.csv"
+    quality_path = output_dir / "b10_geometry_policy_quality.json"
+    write_csv(profile_path, PROFILE_COLUMNS, ranked)
+    write_csv(evidence_path, EVIDENCE_COLUMNS, evidence_by_key[best_key])
+    quality = {
+        "ProgramId": PROGRAM_ID,
+        "ProgramVersion": PROGRAM_VERSION,
+        "CompletionCode": 0,
+        "ProfileCount": len(ranked),
+        "FrameRowCount": len(rows),
+        "HumanLabels": {
+            "ExpectedNone": [PRE_RECOVERY_START, PRE_RECOVERY_END],
+            "ExpectedCamera3": [CAMERA3_TARGET_START, CAMERA3_TARGET_END],
+        },
+        "TopProfile": best,
+        "RankingOrder": [
+            "minimum HardLabelFailureCount",
+            "maximum Camera3ExpectedPassRows",
+            "maximum PreRecoveryExpectedNonePassRows",
+            "maximum SelectionCoverageRows",
+            "largest tested threshold",
+            "largest tested advantage margin",
+        ],
+        "DecisionBoundary": (
+            "READ_ONLY_CONSEQUENCE_PROFILE_NOT_S1_V03_PARAMETER_APPROVAL"
+        ),
+        "SourceHashes": {
+            row_path.name: sha256_file(row_path),
+            "B9ArtifactManifest": sha256_file(b9_package / "artifact_manifest.json"),
+        },
+        "OutputHashes": {
+            profile_path.name: sha256_file(profile_path),
+            evidence_path.name: sha256_file(evidence_path),
+        },
+    }
+    write_json(quality_path, quality)
+    capsule = (
+        f"B10 N-G{len(ranked)}"
+        f"-P{best['LabelPreRecoveryRows']}"
+        f"-Q{best['LabelCamera3Rows']}"
+        f"-T{round(best_key[0] * 100)}"
+        f"-M{round(best_key[1] * 100)}"
+        f"-W{best['HardLabelFailureCount']}"
+        f"-C{best['Camera3ExpectedPassRows']}"
+        f"-A{best['Camera3AmbiguousRows']}-X0 C-0"
+    )
+    (output_dir / "u22b10_return_capsule.txt").write_text(
+        capsule + "\n",
+        encoding="utf-8",
+    )
+    return capsule
+
+
+def prepare_run(temp_root: Path) -> str:
+    """Archive old node material while preserving B7A and B9 accepted inputs."""
+
+    if not temp_root.is_dir():
+        raise B10Error("TEMP_ROOT_MISSING")
+    keep = {
+        "A-Archive",
+        "U22B7U_OUTPUT",
+        "U22B9_OUTPUT",
+        "UDP002_U22B10_START_HERE_v0_1_2026-08-24.txt",
+        "u002_u22b10_geometry_policy_consequence_profiler_v0_1.py.txt",
+    }
+    archive = temp_root / "A-Archive"
+    archive.mkdir(exist_ok=True)
+    stamp = __import__("datetime").datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    destination = archive / ("U22B10_PREPARE_" + stamp)
+    moved: List[str] = []
+    for path in sorted(temp_root.iterdir(), key=lambda item: item.name.casefold()):
+        if path.name in keep:
+            continue
+        destination.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(path), str(destination / path.name))
+        moved.append(path.name)
+    if moved:
+        write_json(
+            destination / "u22b10_temp_cleanup_manifest.json",
+            {"Moved": moved, "Kept": sorted(keep), "DeletionCount": 0},
+        )
+    return f"B10CLEAN N-M{len(moved)}-K{len(keep)}-A{int(bool(moved))}-X0 C-0"
+
+
+def runtime_preflight(b7a_profile: Path, b9_package: Path) -> str:
+    required = (
+        b7a_profile / "b7a_camera_lateral_evidence_rows.csv",
+        b7a_profile / "b7a_camera_lateral_evidence_quality.json",
+        b7a_profile / "b7a_return_capsule.txt",
+        b9_package / "review_queue.csv",
+        b9_package / "review_data.csv",
+        b9_package / "review_evidence_detail.csv",
+        b9_package / "review_package_validation.json",
+        b9_package / "review_manifest.json",
+        b9_package / "artifact_manifest.json",
+    )
+    passed = sum(path.is_file() and not path.is_symlink() for path in required)
+    missing = len(required) - passed
+    return f"B10PF N-E{len(required)}-P{passed}-M{missing}-X{int(bool(missing))} C-{7 if missing else 0}"
+
+
+def make_fixture(root: Path) -> Tuple[Path, Path]:
+    """Create deterministic B7A/B9 evidence for the self-test."""
+
+    profile = root / "B7A_PROFILE_V03"
+    profile.mkdir(parents=True)
+    rows: List[Dict[str, object]] = []
+    for frame in range(PRE_RECOVERY_START - 2, CAMERA3_TARGET_END + 3):
+        pre = PRE_RECOVERY_START <= frame <= PRE_RECOVERY_END
+        post = CAMERA3_TARGET_START <= frame <= CAMERA3_TARGET_END
+        row = {
+            "FrameCount": frame,
+            "Camera1DistanceValid": 1,
+            "Camera1LateralPosition": "1.8" if pre or post else "0.2",
+            "Camera1LateralValid": 1,
+            "Camera3DistanceValid": int(post),
+            "Camera3LateralPosition": "0.2" if post else "",
+            "Camera3LateralValid": int(post),
+        }
+        rows.append(row)
+    row_path = profile / "b7a_camera_lateral_evidence_rows.csv"
+    write_csv(row_path, REQUIRED_COLUMNS, rows)
+    write_json(
+        profile / "b7a_camera_lateral_evidence_quality.json",
+        {"OutputHashes": {row_path.name: sha256_file(row_path)}},
+    )
+    (profile / "b7a_return_capsule.txt").write_text(
+        "B7A N-F82-G0-I0-D0-S8-X0 C-0\n",
+        encoding="utf-8",
+    )
+
+    package = root / "B9_PACKAGE"
+    package.mkdir()
+    for name, text in (
+        ("review_queue.csv", "EventID\nRL0001\n"),
+        ("review_data.csv", "FrameCount\n41603\n"),
+        ("review_evidence_detail.csv", "FrameCount\n41603\n"),
+    ):
+        (package / name).write_text(text, encoding="utf-8")
+    write_json(
+        package / "review_package_validation.json",
+        {"GateStatus": "PASS", "ExtendedReviewEndFrame": CAMERA3_TARGET_END},
+    )
+    write_json(package / "review_manifest.json", {"ProgramId": "FIXTURE"})
+    payload_names = (
+        "review_queue.csv",
+        "review_data.csv",
+        "review_evidence_detail.csv",
+        "review_package_validation.json",
+        "review_manifest.json",
+    )
+    write_json(
+        package / "artifact_manifest.json",
+        {
+            "PayloadHashes": {
+                name: sha256_file(package / name) for name in payload_names
+            }
+        },
+    )
+    return profile, package
+
+
+def self_test() -> None:
+    """Exercise signed symmetry, labelled ranking, hashing and outputs."""
+
+    checks = 0
+    with tempfile.TemporaryDirectory(prefix="u22b10_selftest_") as temporary:
+        root = Path(temporary)
+        profile, package = make_fixture(root)
+        capsule = execute(profile, package, root / "OUT")
+        checks += 1
+        if not capsule.startswith("B10 N-G32-") or not capsule.endswith("C-0"):
+            raise B10Error("SELFTEST_CAPSULE")
+        output = root / "OUT"
+        for name in (
+            "b10_geometry_policy_profile_ranking.csv",
+            "b10_top_profile_labelled_evidence.csv",
+            "b10_geometry_policy_quality.json",
+            "u22b10_return_capsule.txt",
+        ):
+            checks += 1
+            if not (output / name).is_file():
+                raise B10Error("SELFTEST_FILE_" + machine_token(name))
+        rows = read_rows(profile / "b7a_camera_lateral_evidence_rows.csv")
+        sample = dict(rows[0])
+        sample.update(
+            {
+                "Camera1DistanceValid": 1,
+                "Camera1LateralValid": 1,
+                "Camera1LateralPosition": "-1.95",
+                "Camera3DistanceValid": 1,
+                "Camera3LateralValid": 1,
+                "Camera3LateralPosition": "0.15",
+            }
+        )
+        selected, _, g1, g3 = geometry_select(sample, 3.0, 0.5)
+        checks += 1
+        if selected != "CAMERA_3_DISTANCE" or g1 != 1.95 or g3 != 0.15:
+            raise B10Error("SELFTEST_SIGNED_ABSOLUTE")
+        sample["Camera1LateralPosition"] = "1.95"
+        selected2, _, g1b, _ = geometry_select(sample, 3.0, 0.5)
+        checks += 1
+        if selected2 != selected or g1b != g1:
+            raise B10Error("SELFTEST_SIGN_SYMMETRY")
+        quality = load_json(output / "b10_geometry_policy_quality.json", "SELFTEST_QUALITY")
+        checks += 1
+        if quality.get("ProfileCount") != 32:
+            raise B10Error("SELFTEST_PROFILE_COUNT")
+    print(f"UDP002-U22B10-SELFTEST-PASS-{checks} C-0")
+
+
+def write_failure(output_dir: Path, stage: str, error: BaseException) -> None:
+    reason = machine_token(error_reason(error))
+    diagnostic = {
+        "ProgramId": PROGRAM_ID,
+        "ProgramVersion": PROGRAM_VERSION,
+        "Stage": stage,
+        "ErrorType": type(error).__name__,
+        "Reason": error_reason(error),
+        "CompletionCode": 7,
+        "RequiredB7AProfile": str(DEFAULT_B7A_PROFILE),
+        "RequiredB9Package": str(DEFAULT_B9_PACKAGE),
+        "Recovery": (
+            "Keep U22B7U_OUTPUT and U22B9_OUTPUT in 04_TEMP, run --self-test, "
+            "then retry without editing accepted evidence."
+        ),
+    }
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        write_json(output_dir / "u22b10_failure_diagnostic.json", diagnostic)
+    except Exception:
+        pass
+    print(f"B10E K-{reason}-J{machine_token(stage, 24)}-X1 C-7")
+    print(f"B10D K-{reason}-D{type(error).__name__}-X0 C-0")
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--prepare-run", action="store_true")
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--preflight-only", action="store_true")
+    mode.add_argument("--execute", action="store_true")
+    parser.add_argument("--b7a-profile", type=Path, default=DEFAULT_B7A_PROFILE)
+    parser.add_argument("--b9-package", type=Path, default=DEFAULT_B9_PACKAGE)
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--temp-root", type=Path, default=DEFAULT_TEMP_ROOT)
+    args = parser.parse_args(argv)
+    stage = "START"
+    try:
+        if args.prepare_run:
+            stage = "PREPARE"
+            print(prepare_run(args.temp_root))
+            return 0
+        if args.self_test:
+            stage = "SELFTEST"
+            self_test()
+            summary = runtime_preflight(args.b7a_profile, args.b9_package)
+            print(summary)
+            return 0 if summary.endswith("C-0") else 7
+        if args.preflight_only:
+            stage = "PREFLIGHT"
+            summary = runtime_preflight(args.b7a_profile, args.b9_package)
+            print(summary)
+            return 0 if summary.endswith("C-0") else 7
+        stage = "PREFLIGHT"
+        if not runtime_preflight(args.b7a_profile, args.b9_package).endswith("C-0"):
+            raise B10Error("RUNTIME_PREFLIGHT")
+        stage = "EXECUTE"
+        print(execute(args.b7a_profile, args.b9_package, args.output_dir))
+        return 0
+    except Exception as error:
+        write_failure(args.output_dir, stage, error)
+        return 7
+
+
+if __name__ == "__main__":
+    sys.exit(main())
