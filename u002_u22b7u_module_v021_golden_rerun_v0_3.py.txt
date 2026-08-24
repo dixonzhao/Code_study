@@ -21,17 +21,21 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import traceback
+from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
 PROGRAM_ID = "UDP002.U22B7U.ModuleV021GoldenRerun"
-PROGRAM_VERSION = "0.2.0"
+PROGRAM_VERSION = "0.3.0"
 B7Q_BASENAME = "u002_u22b7q_full_geometry_relink_and_profile_v0_1.py.txt"
 B7A_BASENAME = "u002_u22b7a_camera_lateral_evidence_profiler_v0_3.py.txt"
+LEGACY_B7A_BASENAME = "u002_u22b7a_camera_lateral_evidence_profiler_v0_2.py.txt"
+CURRENT_GUIDE_BASENAME = "UDP002_U22B7U_START_HERE_v0_4_2026-08-24.txt"
 FAILED_RUN_ID = "U22B7Q_GEOMETRY_RELINK_F41380_41780_V01"
 RUN_ID = "U22B7U_GEOMETRY_RELINK_F41380_41780_V04"
 FRAME_START = 41380
@@ -175,6 +179,119 @@ def dependency_candidates(basename: str) -> List[Path]:
     ]
 
 
+def active_temp_basenames() -> set[str]:
+    """Return the only top-level files allowed in 04_TEMP before execution."""
+
+    return {
+        Path(__file__).name,
+        CURRENT_GUIDE_BASENAME,
+        B7Q_BASENAME,
+        B7A_BASENAME,
+        LEGACY_B7A_BASENAME,
+    }
+
+
+def tree_totals(path: Path) -> Tuple[int, int]:
+    """Count regular files and bytes without following symbolic links."""
+
+    if path.is_file() and not path.is_symlink():
+        return 1, path.stat().st_size
+    if not path.is_dir() or path.is_symlink():
+        return 0, 0
+    count = 0
+    size = 0
+    for child in path.rglob("*"):
+        if child.is_file() and not child.is_symlink():
+            count += 1
+            size += child.stat().st_size
+    return count, size
+
+
+def prepare_temp_workspace(
+    workspace_root: Path,
+    session_token: Optional[str] = None,
+) -> Tuple[str, Optional[Path]]:
+    """Move every stale top-level TEMP item into one traceable archive session."""
+
+    temp_root = workspace_root / "04_TEMP"
+    if not temp_root.is_dir() or temp_root.is_symlink():
+        raise RefreshError("TEMP_ROOT", temp_root, "PREPARE")
+    archive_root = temp_root / "A-Archive"
+    archive_root.mkdir(parents=True, exist_ok=True)
+    allowed = active_temp_basenames()
+    stale = sorted(
+        (
+            path
+            for path in temp_root.iterdir()
+            if path.name != "A-Archive" and path.name not in allowed
+        ),
+        key=lambda path: path.name.casefold(),
+    )
+    kept = sum((temp_root / name).exists() for name in allowed)
+    if not stale:
+        return f"B7UCLEAN N-D0-F0-M0-K{kept}-A0-X0 C-0", None
+
+    token = session_token or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    session_root = archive_root / ("U22B7U_PREPARE_" + machine_token(token, 32))
+    suffix = 1
+    while session_root.exists():
+        session_root = archive_root / (
+            "U22B7U_PREPARE_" + machine_token(token, 24) + f"_{suffix:02d}"
+        )
+        suffix += 1
+    session_root.mkdir(parents=True)
+
+    records: List[Dict[str, object]] = []
+    directory_count = 0
+    file_count = 0
+    payload_files = 0
+    payload_bytes = 0
+    for source in stale:
+        if source.is_symlink():
+            raise RefreshError("TEMP_SYMLINK", source.name, "PREPARE")
+        contained_files, contained_bytes = tree_totals(source)
+        kind = "DIRECTORY" if source.is_dir() else "FILE"
+        directory_count += int(kind == "DIRECTORY")
+        file_count += int(kind == "FILE")
+        payload_files += contained_files
+        payload_bytes += contained_bytes
+        destination = session_root / source.name
+        if destination.exists():
+            raise RefreshError("ARCHIVE_COLLISION", source.name, "PREPARE")
+        shutil.move(str(source), str(destination))
+        records.append(
+            {
+                "SourceBasename": source.name,
+                "ArchivedRelativePath": destination.relative_to(temp_root).as_posix(),
+                "Kind": kind,
+                "ContainedFiles": contained_files,
+                "Bytes": contained_bytes,
+            }
+        )
+
+    manifest = {
+        "ProgramId": PROGRAM_ID,
+        "ProgramVersion": PROGRAM_VERSION,
+        "CompletionCode": 0,
+        "WorkspaceRoot": str(workspace_root.resolve()),
+        "TempRoot": str(temp_root.resolve()),
+        "ArchiveSession": str(session_root.resolve()),
+        "AllowedActiveBasenames": sorted(allowed),
+        "MovedItems": records,
+        "MovedDirectories": directory_count,
+        "MovedTopLevelFiles": file_count,
+        "PayloadFiles": payload_files,
+        "PayloadBytes": payload_bytes,
+        "Policy": "MOVE_STALE_TOP_LEVEL_ITEMS; NEVER_DELETE; PRESERVE_A_ARCHIVE",
+    }
+    write_json_atomic(session_root / "u22b7u_temp_cleanup_manifest.json", manifest)
+    capsule = (
+        f"B7UCLEAN N-D{directory_count}-F{file_count}-M{len(records)}"
+        f"-K{kept}-A1-X0 C-0"
+    )
+    return capsule, session_root
+
+
 def runtime_preflight(
     c_code_root: Path,
     workspace_root: Path,
@@ -257,6 +374,23 @@ def runtime_preflight(
             f"-X{int(not passed)} C-{'0' if passed else '7'}"
         )
         index += 1
+
+    temp_root = workspace_root / "04_TEMP"
+    extras = []
+    if temp_root.is_dir():
+        extras = sorted(
+            path.name
+            for path in temp_root.iterdir()
+            if path.name != "A-Archive"
+            and path.name not in active_temp_basenames()
+        )
+    hygiene = temp_root.is_dir() and not extras
+    results.append(hygiene)
+    print(
+        f"B7UPF I{index:02d}-KTEMPHYGIENE-TD-N{len(extras)}-E{int(hygiene)}"
+        f"-X{int(not hygiene)} C-{'0' if hygiene else '7'}"
+    )
+    index += 1
 
     missing = len(results) - sum(results)
     print(
@@ -1049,7 +1183,7 @@ def self_test() -> None:
         check("T17_RANGE", FRAME_END - FRAME_START + 1 == 401)
         check("T18_ROLE_COUNT", len(ROLE_IDENTITIES) == 7)
         check("T19_PROGRAM", PROGRAM_ID.startswith("UDP002"))
-        check("T20_VERSION", PROGRAM_VERSION == "0.2.0")
+        check("T20_VERSION", PROGRAM_VERSION == "0.3.0")
         check("T21_DEPENDENCIES", B7Q_BASENAME.endswith(".py.txt"))
         check("T22_DIAGNOSTIC", "u22b7u_failure_diagnostic.json" in Path(__file__).read_text(encoding="utf-8"))
         check(
@@ -1078,9 +1212,40 @@ def self_test() -> None:
             ),
         )
         check("T24_CAPSULE", len("B7U N-I22-B7-M21-A2-F401-G401-R0-P0-X0 C-0") < 100)
-    if len(checks) != 42:
+
+        cleanup_workspace = root / "C-CODE/U-UDP002"
+        cleanup_temp = cleanup_workspace / "04_TEMP"
+        cleanup_temp.mkdir(parents=True)
+        for name in active_temp_basenames():
+            (cleanup_temp / name).write_text("fixture", encoding="utf-8")
+        (cleanup_temp / "OLD_FILE.txt").write_text("old", encoding="utf-8")
+        (cleanup_temp / "OLD_OUTPUT").mkdir()
+        (cleanup_temp / "OLD_OUTPUT/evidence.json").write_text("{}", encoding="utf-8")
+        cleanup_capsule, cleanup_archive = prepare_temp_workspace(
+            cleanup_workspace,
+            "SELFTEST",
+        )
+        check("T25_CLEANUP_CAPSULE", cleanup_capsule.endswith("C-0"))
+        check("T26_CLEANUP_ARCHIVE", cleanup_archive is not None and cleanup_archive.is_dir())
+        check("T27_CLEANUP_FILE", not (cleanup_temp / "OLD_FILE.txt").exists())
+        check("T28_CLEANUP_DIRECTORY", not (cleanup_temp / "OLD_OUTPUT").exists())
+        check(
+            "T29_CLEANUP_ACTIVE_PRESERVED",
+            all((cleanup_temp / name).is_file() for name in active_temp_basenames()),
+        )
+        check(
+            "T30_CLEANUP_MANIFEST",
+            cleanup_archive is not None
+            and (cleanup_archive / "u22b7u_temp_cleanup_manifest.json").is_file(),
+        )
+        replay_capsule, replay_archive = prepare_temp_workspace(
+            cleanup_workspace,
+            "SELFTEST_REPLAY",
+        )
+        check("T31_CLEANUP_IDEMPOTENT", "-M0-" in replay_capsule and replay_archive is None)
+    if len(checks) != 49:
         raise AssertionError("SELFTEST_COUNT")
-    print("UDP002-U22B7U-SELFTEST-PASS-42 C-0")
+    print("UDP002-U22B7U-SELFTEST-PASS-49 C-0")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -1089,6 +1254,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--unit-test-only", action="store_true")
+    parser.add_argument("--prepare-run", action="store_true")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--c-code-root", default=".")
     parser.add_argument("--workspace-root", default="U-UDP002")
@@ -1105,6 +1271,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.unit_test_only:
             self_test()
             return 0
+        if args.prepare_run:
+            capsule, _ = prepare_temp_workspace(Path(args.workspace_root).resolve())
+            print(capsule)
+            return 0
         if args.self_test:
             self_test()
             return 0 if runtime_preflight(
@@ -1114,6 +1284,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             ) else 7
         if not args.execute:
             raise RefreshError("MODE_REQUIRED", "USE_EXECUTE", "CLI")
+        if not runtime_preflight(
+            Path(args.c_code_root).resolve(),
+            Path(args.workspace_root).resolve(),
+            Path(args.b7p2_root).resolve(),
+        ):
+            raise RefreshError("RUNTIME_PREFLIGHT", "SEE_B7UPF", "PREFLIGHT")
         line1, line2 = execute(
             Path(args.c_code_root).resolve(),
             Path(args.workspace_root).resolve(),
