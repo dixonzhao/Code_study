@@ -1,0 +1,1053 @@
+#!/usr/bin/env python3
+"""Build and execute the first controlled U002 S0-to-S7 Golden Run.
+
+The program composes one immutable Run configuration from two already accepted
+company-side Runs:
+
+* U22B11 supplies the accepted U001 package, governed signal profile, frame
+  range, S0 intake and Camera S1 reconstruction Module 0.3.0.
+* U22B5 supplies the accepted Radar S1 and S2-to-S7 analysis policy.
+
+No source configuration, source Run, Module or U001 package is modified.  The
+new configuration is persisted under a new RunId, all nine Modules are audited,
+the standard U002 preflight/executor/artifact-store chain is used, and every
+produced Artifact plus the U003 review package is validated fail-closed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+import math
+from pathlib import Path
+import re
+import subprocess
+import sys
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+
+PROGRAM_ID = "UDP002.U22B12.FullS0S7GoldenRun"
+PROGRAM_VERSION = "0.1.0"
+CONTRACT_VERSION = "U22.0.1"
+
+DEFAULT_B11_RUN_ID = "U22B11_GEOMETRY_MODULE_V030_F41380_41780_V01"
+DEFAULT_B5_RUN_ID = "U22B5_TC001_F41480_41750_V01"
+DEFAULT_RUN_ID = "U22B12_GOLDEN_TC001_F41380_41780_V01"
+
+CORE_ROOT = Path("01_PROGRAMS/core")
+REGISTRY = CORE_ROOT / "u002_u22_module_registry_v0_1.py"
+QUALIFICATION = CORE_ROOT / "u002_u22_module_qualification_v0_1.py"
+PREFLIGHT = CORE_ROOT / "u002_u22_engine_preflight_v0_1.py"
+EXECUTOR = CORE_ROOT / "u002_u22_stage_executor_v0_1.py"
+ARTIFACT_STORE = CORE_ROOT / "u002_u22_artifact_store_v0_1.py"
+
+EXPECTED_PLAN = (
+    ("S0", "CameraRadar.S0.U001ControlledProfileIntake", "0.1.1"),
+    ("S1", "CameraRadar.S1.CameraTargetContinuityArbitration", "0.3.0"),
+    ("S1", "CameraRadar.S1.RadarMeasurementValidity", "0.1.0"),
+    ("S2", "CameraRadar.S2.ComparisonPopulation", "0.1.0"),
+    ("S3", "CameraRadar.S3.SignedDiscrepancy", "0.1.0"),
+    ("S4", "CameraRadar.S4.DistanceBinMedianBaseline", "0.1.0"),
+    ("S5", "CameraRadar.S5.RobustResidualEvidence", "0.1.0"),
+    ("S6", "CameraRadar.S6.RobustScoreCandidateSynthesis", "0.1.0"),
+    ("S7", "CameraRadar.S7.U003ReviewPackageExport", "0.1.0"),
+)
+
+EXPECTED_ARTIFACT_TYPES = (
+    "U001_INTAKE_ACCEPTED",
+    "CAMERA_TARGET_RECONSTRUCTION",
+    "RADAR_VALIDITY",
+    "COMPARISON_POPULATION",
+    "PRIMARY_OUTCOME",
+    "BASELINE_RESIDUAL",
+    "ROBUST_RESIDUAL_EVIDENCE",
+    "ANOMALY_CANDIDATES",
+    "U003_REVIEW_PACKAGE",
+)
+
+QUALITY_FILENAMES = {
+    "CAMERA_TARGET_RECONSTRUCTION": "camera_target_reconstruction_quality.json",
+    "RADAR_VALIDITY": "radar_validity_quality.json",
+    "COMPARISON_POPULATION": "comparison_population_quality.json",
+    "PRIMARY_OUTCOME": "primary_outcome_quality.json",
+    "BASELINE_RESIDUAL": "baseline_residual_quality.json",
+    "ROBUST_RESIDUAL_EVIDENCE": "robust_residual_evidence_quality.json",
+    "ANOMALY_CANDIDATES": "anomaly_candidates_quality.json",
+}
+
+REVIEW_CORE_COLUMNS = [
+    "FrameCount",
+    "CandidateIds",
+    "Camera1Distance",
+    "Camera3Distance",
+    "CanonicalCameraDistance",
+    "RadarDistance",
+    "CameraRadarDiscrepancy",
+    "CameraRadarResidual",
+    "RobustAnomalyScore",
+    "RadarMeasurementValid",
+]
+
+
+class GoldenRunError(RuntimeError):
+    """Represent one deterministic B12 failure."""
+
+    def __init__(self, reason: object, detail: object = "NA", stage: object = "B12"):
+        self.reason = token(reason, 80)
+        self.detail = token(detail, 160)
+        self.stage = token(stage, 24)
+        super().__init__(self.reason)
+
+
+def token(value: object, limit: int = 100) -> str:
+    """Convert diagnostic text to one bounded machine token."""
+
+    text = re.sub(r"[^A-Z0-9_.-]+", "_", str(value).upper()).strip("_")
+    return (text or "UNKNOWN")[:limit]
+
+
+def canonical_bytes(value: object) -> bytes:
+    text = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+        allow_nan=False,
+    )
+    return (text + "\n").encode("utf-8")
+
+
+def write_json_atomic(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".writing")
+    if temporary.exists():
+        raise GoldenRunError("TEMP_FILE_EXISTS", path, "WRITE")
+    temporary.write_bytes(canonical_bytes(value))
+    temporary.replace(path)
+
+
+def write_text_atomic(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".writing")
+    if temporary.exists():
+        raise GoldenRunError("TEMP_FILE_EXISTS", path, "WRITE")
+    temporary.write_text(value, encoding="utf-8", newline="\n")
+    temporary.replace(path)
+
+
+def load_json(path: Path, label: str) -> Dict[str, object]:
+    if not path.is_file() or path.is_symlink():
+        raise GoldenRunError(label + "_MISSING", path, "READ")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as error:
+        raise GoldenRunError(label + "_JSON", path, "READ") from error
+    if not isinstance(value, dict):
+        raise GoldenRunError(label + "_TYPE", path, "READ")
+    return value
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def resolve_path(root: Path, value: object) -> Path:
+    path = Path(str(value))
+    if not path.is_absolute():
+        path = root / path
+    return path.resolve()
+
+
+def require_workspace(path: Path) -> Path:
+    root = path.resolve()
+    if not root.is_dir() or root.name not in {"U-UDP002", "UDP002"}:
+        raise GoldenRunError("WORKSPACE_ROOT", root, "WORKSPACE")
+    for relative in (REGISTRY, QUALIFICATION, PREFLIGHT, EXECUTOR, ARTIFACT_STORE):
+        candidate = root / relative
+        if not candidate.is_file() or candidate.is_symlink():
+            raise GoldenRunError("CORE_PROGRAM_MISSING", relative, "WORKSPACE")
+    return root
+
+
+def plan_identity(configuration: Mapping[str, object]) -> Tuple[Tuple[str, str, str], ...]:
+    plan = configuration.get("ModulePlan")
+    if not isinstance(plan, list):
+        raise GoldenRunError("MODULE_PLAN_TYPE", "NOT_LIST", "CONFIG")
+    result: List[Tuple[str, str, str]] = []
+    for index, item in enumerate(plan, 1):
+        if not isinstance(item, dict):
+            raise GoldenRunError("MODULE_PLAN_ITEM", index, "CONFIG")
+        if item.get("Sequence") != index:
+            raise GoldenRunError("MODULE_SEQUENCE", index, "CONFIG")
+        result.append(
+            (
+                str(item.get("Stage")),
+                str(item.get("ModuleId")),
+                str(item.get("ModuleVersion")),
+            )
+        )
+    return tuple(result)
+
+
+def module_item(
+    configuration: Mapping[str, object],
+    module_id: str,
+) -> Dict[str, object]:
+    plan = configuration.get("ModulePlan")
+    if not isinstance(plan, list):
+        raise GoldenRunError("MODULE_PLAN_TYPE", module_id, "CONFIG")
+    matches = [item for item in plan if isinstance(item, dict) and item.get("ModuleId") == module_id]
+    if len(matches) != 1:
+        raise GoldenRunError("MODULE_ID_COUNT", f"{module_id}:{len(matches)}", "CONFIG")
+    return matches[0]
+
+
+def validate_b11_configuration(value: Mapping[str, object]) -> None:
+    if value.get("ContractVersion") != CONTRACT_VERSION:
+        raise GoldenRunError("B11_CONTRACT", value.get("ContractVersion"), "CONFIG")
+    identity = plan_identity(value)
+    if identity != EXPECTED_PLAN[:2]:
+        raise GoldenRunError("B11_PLAN_IDENTITY", identity, "CONFIG")
+    if value.get("RunScope") != "FRAME_RANGE":
+        raise GoldenRunError("B11_RUN_SCOPE", value.get("RunScope"), "CONFIG")
+    start = value.get("FrameStart")
+    end = value.get("FrameEnd")
+    if not isinstance(start, int) or not isinstance(end, int) or start > end:
+        raise GoldenRunError("B11_FRAME_RANGE", f"{start}:{end}", "CONFIG")
+    camera = module_item(value, EXPECTED_PLAN[1][1])
+    configuration = camera.get("Configuration")
+    if not isinstance(configuration, dict):
+        raise GoldenRunError("B11_CAMERA_CONFIGURATION", "TYPE", "CONFIG")
+    expected_geometry = {
+        "MaxReacquisitionAbsLateralMeters": 0.75,
+        "MinimumCenterlineAdvantageMeters": 1.0,
+        "GeometryConfirmFrames": 3,
+    }
+    for key, expected in expected_geometry.items():
+        if configuration.get(key) != expected:
+            raise GoldenRunError("B11_GEOMETRY_POLICY", key, "CONFIG")
+
+
+def validate_b5_configuration(value: Mapping[str, object]) -> None:
+    if value.get("ContractVersion") != CONTRACT_VERSION:
+        raise GoldenRunError("B5_CONTRACT", value.get("ContractVersion"), "CONFIG")
+    expected_b5 = list(EXPECTED_PLAN)
+    expected_b5[1] = ("S1", "CameraRadar.S1.CameraTargetContinuityArbitration", "0.2.0")
+    if plan_identity(value) != tuple(expected_b5):
+        raise GoldenRunError("B5_PLAN_IDENTITY", plan_identity(value), "CONFIG")
+    outcome = value.get("PrimaryOutcome")
+    if not isinstance(outcome, dict):
+        raise GoldenRunError("B5_PRIMARY_OUTCOME", "TYPE", "CONFIG")
+    if outcome.get("Formula") != "RadarDistance-CanonicalCameraDistance":
+        raise GoldenRunError("B5_OUTCOME_FORMULA", outcome.get("Formula"), "CONFIG")
+    if value.get("CandidatePolicy") != "CameraRadar.S6.RobustScoreCandidateSynthesis@0.1.0":
+        raise GoldenRunError("B5_CANDIDATE_POLICY", value.get("CandidatePolicy"), "CONFIG")
+
+
+def require_accepted_source_run(
+    workspace_root: Path,
+    source_configuration_path: Path,
+    value: Mapping[str, object],
+    label: str,
+) -> Path:
+    run_id = str(value.get("RunId", ""))
+    if not run_id:
+        raise GoldenRunError(label + "_RUN_ID", "BLANK", "SOURCE")
+    run_root = workspace_root / "07_OUTPUT" / run_id
+    status = load_json(run_root / "run_status.json", label + "_RUN_STATUS")
+    if status.get("Status") != "SUCCEEDED":
+        raise GoldenRunError(label + "_RUN_STATUS", status.get("Status"), "SOURCE")
+    recorded = run_root / "00_CONFIG/run_configuration.json"
+    if not recorded.is_file() or recorded.read_bytes() != source_configuration_path.read_bytes():
+        raise GoldenRunError(label + "_CONFIG_IDENTITY", recorded, "SOURCE")
+    return run_root
+
+
+def validate_binding_profile(
+    workspace_root: Path,
+    b11: Mapping[str, object],
+) -> Tuple[str, str, str]:
+    camera = module_item(b11, "CameraRadar.S1.CameraTargetContinuityArbitration")
+    configuration = camera["Configuration"]
+    profile_relative = str(configuration.get("BindingProfilePath", ""))
+    profile_hash = str(configuration.get("BindingProfileSha256", ""))
+    profile_path = resolve_path(workspace_root, profile_relative)
+    if not profile_path.is_file() or profile_path.is_symlink():
+        raise GoldenRunError("B11_PROFILE_MISSING", profile_relative, "PROFILE")
+    if sha256_file(profile_path) != profile_hash:
+        raise GoldenRunError("B11_PROFILE_HASH", profile_relative, "PROFILE")
+    profile = load_json(profile_path, "B11_PROFILE")
+    identity = str(profile.get("BindingProfileId", "")) + "@" + str(
+        profile.get("BindingProfileVersion", "")
+    )
+    if identity != b11.get("SignalProfile"):
+        raise GoldenRunError("B11_SIGNAL_PROFILE_IDENTITY", identity, "PROFILE")
+    return profile_relative, profile_hash, identity
+
+
+def build_golden_configuration(
+    b11: Mapping[str, object],
+    b5: Mapping[str, object],
+    run_id: str,
+) -> Dict[str, object]:
+    """Compose S0/S1 from B11 with Radar S1 and S2-S7 from B5."""
+
+    validate_b11_configuration(b11)
+    validate_b5_configuration(b5)
+    value = json.loads(json.dumps(b11))
+    b5_plan = b5["ModulePlan"]
+    value["ModulePlan"] = json.loads(json.dumps(value["ModulePlan"] + b5_plan[2:]))
+    for sequence, item in enumerate(value["ModulePlan"], 1):
+        item["Sequence"] = sequence
+
+    camera = module_item(value, "CameraRadar.S1.CameraTargetContinuityArbitration")
+    radar = module_item(value, "CameraRadar.S1.RadarMeasurementValidity")
+    camera_configuration = camera.get("Configuration")
+    radar_configuration = radar.get("Configuration")
+    if not isinstance(camera_configuration, dict) or not isinstance(radar_configuration, dict):
+        raise GoldenRunError("S1_CONFIGURATION_TYPE", "CAMERA_OR_RADAR", "MERGE")
+    radar_configuration["BindingProfilePath"] = camera_configuration["BindingProfilePath"]
+    radar_configuration["BindingProfileSha256"] = camera_configuration["BindingProfileSha256"]
+
+    value["RunId"] = run_id
+    value["RunPurpose"] = "EVALUATION"
+    value["RunScope"] = "FRAME_RANGE"
+    value["PrimaryOutcome"] = json.loads(json.dumps(b5["PrimaryOutcome"]))
+    value["CandidatePolicy"] = b5["CandidatePolicy"]
+    value["OutputSelection"] = list(EXPECTED_ARTIFACT_TYPES)
+    if plan_identity(value) != EXPECTED_PLAN:
+        raise GoldenRunError("GOLDEN_PLAN_IDENTITY", plan_identity(value), "MERGE")
+    return value
+
+
+def persist_immutable(path: Path, value: Mapping[str, object]) -> str:
+    payload = canonical_bytes(value)
+    if path.exists():
+        if not path.is_file() or path.read_bytes() != payload:
+            raise GoldenRunError("TARGET_CONFIG_CONFLICT", path, "PERSIST")
+        return "REPLAY"
+    write_json_atomic(path, value)
+    return "CREATED"
+
+
+def run_process(command: Sequence[str], timeout: int) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        list(command),
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def require_success(
+    result: subprocess.CompletedProcess,
+    label: str,
+    diagnostics: List[Dict[str, object]],
+) -> None:
+    diagnostics.append(
+        {
+            "Step": label,
+            "ReturnCode": result.returncode,
+            "StdoutTail": result.stdout[-1600:],
+            "StderrTail": result.stderr[-1600:],
+        }
+    )
+    if result.returncode != 0 or "C-0" not in result.stdout:
+        detail = (result.stdout + " " + result.stderr)[-300:]
+        raise GoldenRunError(label + "_FAILED", detail, "PROCESS")
+
+
+def audit_module_set(
+    workspace_root: Path,
+    timeout: int,
+    diagnostics: List[Dict[str, object]],
+) -> None:
+    refresh = run_process(
+        [
+            sys.executable,
+            str(workspace_root / REGISTRY),
+            "--refresh",
+            "--workspace-root",
+            str(workspace_root),
+        ],
+        180,
+    )
+    require_success(refresh, "REGISTRY_REFRESH", diagnostics)
+
+    for stage, module_id, version in EXPECTED_PLAN:
+        identity = module_id + "@" + version
+        result = run_process(
+            [
+                sys.executable,
+                str(workspace_root / QUALIFICATION),
+                "--audit-module",
+                identity,
+                "--workspace-root",
+                str(workspace_root),
+                "--timeout-seconds",
+                str(timeout),
+            ],
+            timeout + 60,
+        )
+        require_success(result, "AUDIT_" + stage + "_" + module_id.split(".")[-1], diagnostics)
+
+    availability = run_process(
+        [
+            sys.executable,
+            str(workspace_root / QUALIFICATION),
+            "--refresh-availability",
+            "--workspace-root",
+            str(workspace_root),
+        ],
+        180,
+    )
+    require_success(availability, "AVAILABILITY_REFRESH", diagnostics)
+
+
+def execute_or_replay(
+    workspace_root: Path,
+    configuration_path: Path,
+    run_id: str,
+    module_timeout: int,
+    diagnostics: List[Dict[str, object]],
+) -> Tuple[Path, bool]:
+    run_root = workspace_root / "07_OUTPUT" / run_id
+    replay = False
+    if run_root.exists():
+        status = load_json(run_root / "run_status.json", "TARGET_RUN_STATUS")
+        recorded = run_root / "00_CONFIG/run_configuration.json"
+        if not recorded.is_file() or recorded.read_bytes() != configuration_path.read_bytes():
+            raise GoldenRunError("TARGET_RUN_CONFIG_CONFLICT", run_id, "RUN")
+        if status.get("Status") != "SUCCEEDED":
+            raise GoldenRunError("TARGET_RUN_NOT_SUCCEEDED", status.get("Status"), "RUN")
+        replay = True
+    else:
+        preflight = run_process(
+            [
+                sys.executable,
+                str(workspace_root / PREFLIGHT),
+                "--prepare-run",
+                str(configuration_path),
+                "--workspace-root",
+                str(workspace_root),
+            ],
+            300,
+        )
+        require_success(preflight, "RUN_PREFLIGHT", diagnostics)
+
+    execution = run_process(
+        [
+            sys.executable,
+            str(workspace_root / EXECUTOR),
+            "--execute-run",
+            str(run_root),
+            "--workspace-root",
+            str(workspace_root),
+            "--module-timeout-seconds",
+            str(module_timeout),
+        ],
+        module_timeout * len(EXPECTED_PLAN) + 300,
+    )
+    require_success(execution, "S0_S7_EXECUTION", diagnostics)
+
+    audit = run_process(
+        [
+            sys.executable,
+            str(workspace_root / ARTIFACT_STORE),
+            "--audit-run",
+            "--workspace-root",
+            str(workspace_root),
+            "--run-root",
+            str(run_root),
+        ],
+        600,
+    )
+    require_success(audit, "ARTIFACT_STORE_AUDIT", diagnostics)
+    return run_root, replay
+
+
+def artifact_records(run_root: Path) -> Dict[str, Tuple[Path, Dict[str, object]]]:
+    index = load_json(run_root / "run_artifact_index_v0_1.json", "ARTIFACT_INDEX")
+    artifacts = index.get("Artifacts")
+    if not isinstance(artifacts, list) or len(artifacts) != len(EXPECTED_ARTIFACT_TYPES):
+        raise GoldenRunError("ARTIFACT_TOTAL", len(artifacts or []), "ARTIFACT")
+    records: Dict[str, Tuple[Path, Dict[str, object]]] = {}
+    observed: List[str] = []
+    for item in artifacts:
+        if not isinstance(item, dict):
+            raise GoldenRunError("ARTIFACT_INDEX_ITEM", "TYPE", "ARTIFACT")
+        artifact_type = str(item.get("ArtifactType"))
+        observed.append(artifact_type)
+        if artifact_type in records:
+            raise GoldenRunError("ARTIFACT_DUPLICATE", artifact_type, "ARTIFACT")
+        manifest_path = run_root / str(item.get("ManifestRelativePath"))
+        manifest = load_json(manifest_path, "ARTIFACT_MANIFEST")
+        if manifest.get("ArtifactType") != artifact_type:
+            raise GoldenRunError("ARTIFACT_TYPE_IDENTITY", artifact_type, "ARTIFACT")
+        if item.get("ManifestSha256") != sha256_file(manifest_path):
+            raise GoldenRunError("ARTIFACT_MANIFEST_HASH", artifact_type, "ARTIFACT")
+        records[artifact_type] = (manifest_path, manifest)
+    if tuple(observed) != EXPECTED_ARTIFACT_TYPES:
+        raise GoldenRunError("ARTIFACT_ORDER", observed, "ARTIFACT")
+    return records
+
+
+def payload_path_by_name(
+    manifest_path: Path,
+    manifest: Mapping[str, object],
+    filename: str,
+) -> Path:
+    payloads = manifest.get("Payloads")
+    if not isinstance(payloads, list):
+        raise GoldenRunError("PAYLOAD_LIST", filename, "ARTIFACT")
+    matches = [item for item in payloads if isinstance(item, dict) and item.get("RelativePath") == filename]
+    if len(matches) != 1:
+        raise GoldenRunError("PAYLOAD_COUNT", f"{filename}:{len(matches)}", "ARTIFACT")
+    path = manifest_path.parent / filename
+    if not path.is_file() or path.is_symlink():
+        raise GoldenRunError("PAYLOAD_MISSING", filename, "ARTIFACT")
+    if matches[0].get("Sha256") != sha256_file(path):
+        raise GoldenRunError("PAYLOAD_HASH", filename, "ARTIFACT")
+    return path
+
+
+def primary_csv_path(
+    manifest_path: Path,
+    manifest: Mapping[str, object],
+) -> Path:
+    payloads = manifest.get("Payloads")
+    if not isinstance(payloads, list):
+        raise GoldenRunError("PRIMARY_PAYLOAD_LIST", manifest.get("ArtifactType"), "ARTIFACT")
+    matches = [
+        item
+        for item in payloads
+        if isinstance(item, dict)
+        and item.get("PayloadKind") == "PRIMARY"
+        and item.get("MediaType") == "text/csv"
+    ]
+    if len(matches) != 1:
+        raise GoldenRunError("PRIMARY_PAYLOAD_COUNT", manifest.get("ArtifactType"), "ARTIFACT")
+    return payload_path_by_name(manifest_path, manifest, str(matches[0]["RelativePath"]))
+
+
+def read_csv(path: Path) -> Tuple[List[str], List[Dict[str, str]]]:
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        return list(reader.fieldnames or []), [dict(row) for row in reader]
+
+
+def require_int(value: object, label: str) -> int:
+    if isinstance(value, bool):
+        raise GoldenRunError(label, value, "COUNT")
+    try:
+        number = int(value)
+    except Exception as error:
+        raise GoldenRunError(label, value, "COUNT") from error
+    return number
+
+
+def validate_candidates(
+    path: Path,
+    maximum_candidates: int,
+) -> Tuple[List[Dict[str, str]], int]:
+    fields, rows = read_csv(path)
+    required = {
+        "CandidateId",
+        "PriorityRank",
+        "EvidenceStartFrame",
+        "PeakFrameCount",
+        "EvidenceEndFrame",
+        "ReviewStartFrame",
+        "ReviewEndFrame",
+        "PeakRobustScore",
+        "CandidateStatus",
+        "RootCauseClaim",
+    }
+    if not required.issubset(set(fields)):
+        raise GoldenRunError("CANDIDATE_HEADERS", sorted(required - set(fields)), "CANDIDATE")
+    if len(rows) > maximum_candidates:
+        raise GoldenRunError("CANDIDATE_CAPACITY", len(rows), "CANDIDATE")
+    identities: set[str] = set()
+    ranks: set[int] = set()
+    for row in rows:
+        identity = row["CandidateId"].strip()
+        rank = require_int(row["PriorityRank"], "CANDIDATE_RANK")
+        if not identity or identity in identities or rank in ranks:
+            raise GoldenRunError("CANDIDATE_ID_OR_RANK", identity, "CANDIDATE")
+        identities.add(identity)
+        ranks.add(rank)
+        start = require_int(row["EvidenceStartFrame"], "EVIDENCE_START")
+        peak = require_int(row["PeakFrameCount"], "PEAK_FRAME")
+        end = require_int(row["EvidenceEndFrame"], "EVIDENCE_END")
+        review_start = require_int(row["ReviewStartFrame"], "REVIEW_START")
+        review_end = require_int(row["ReviewEndFrame"], "REVIEW_END")
+        if not review_start <= start <= peak <= end <= review_end:
+            raise GoldenRunError("CANDIDATE_WINDOW_ORDER", identity, "CANDIDATE")
+        score = float(row["PeakRobustScore"])
+        if not math.isfinite(score) or score < 0.0:
+            raise GoldenRunError("CANDIDATE_SCORE", identity, "CANDIDATE")
+        if row["CandidateStatus"] != "INVESTIGATION_CANDIDATE":
+            raise GoldenRunError("CANDIDATE_STATUS", identity, "CANDIDATE")
+        if row["RootCauseClaim"].strip() not in {"0", "0.0", "false", "False"}:
+            raise GoldenRunError("CANDIDATE_ROOT_CAUSE", identity, "CANDIDATE")
+    if ranks and ranks != set(range(1, len(rows) + 1)):
+        raise GoldenRunError("CANDIDATE_RANK_SEQUENCE", ranks, "CANDIDATE")
+    first_peak = require_int(rows[0]["PeakFrameCount"], "FIRST_PEAK") if rows else 0
+    return rows, first_peak
+
+
+def validate_review_package(
+    manifest_path: Path,
+    manifest: Mapping[str, object],
+    candidates: Sequence[Mapping[str, str]],
+) -> Dict[str, int]:
+    metadata = manifest.get("Metadata")
+    if not isinstance(metadata, dict):
+        raise GoldenRunError("REVIEW_METADATA", "TYPE", "REVIEW")
+    for key, expected in (
+        ("U003CompatibleManualLoad", True),
+        ("CandidateIsConfirmedEvent", False),
+        ("RootCauseClaim", False),
+    ):
+        if metadata.get(key) is not expected:
+            raise GoldenRunError("REVIEW_METADATA_" + key, metadata.get(key), "REVIEW")
+
+    queue_path = payload_path_by_name(manifest_path, manifest, "review_queue.csv")
+    data_path = payload_path_by_name(manifest_path, manifest, "review_data.csv")
+    detail_path = payload_path_by_name(manifest_path, manifest, "review_evidence_detail.csv")
+    validation_path = payload_path_by_name(manifest_path, manifest, "review_package_validation.json")
+    package_manifest_path = payload_path_by_name(manifest_path, manifest, "review_manifest.json")
+
+    queue_fields, queue_rows = read_csv(queue_path)
+    data_fields, data_rows = read_csv(data_path)
+    detail_fields, detail_rows = read_csv(detail_path)
+    validation = load_json(validation_path, "REVIEW_VALIDATION")
+    package_manifest = load_json(package_manifest_path, "REVIEW_MANIFEST")
+
+    queue_required = {
+        "EventID",
+        "StartFrameCount",
+        "PeakFrameCount",
+        "EndFrameCount",
+        "ReviewResult",
+        "ReviewMemo",
+        "CandidateId",
+        "CandidateRank",
+        "PriorityClass",
+        "CandidateStatus",
+        "RootCauseClaim",
+    }
+    if not queue_required.issubset(set(queue_fields)):
+        raise GoldenRunError("REVIEW_QUEUE_HEADERS", sorted(queue_required - set(queue_fields)), "REVIEW")
+    if len(queue_rows) != len(candidates):
+        raise GoldenRunError("REVIEW_QUEUE_COUNT", len(queue_rows), "REVIEW")
+    candidate_by_id = {row["CandidateId"]: row for row in candidates}
+    for queue in queue_rows:
+        identity = queue["CandidateId"]
+        if identity not in candidate_by_id or queue["EventID"] != identity:
+            raise GoldenRunError("REVIEW_QUEUE_IDENTITY", identity, "REVIEW")
+        if queue["ReviewResult"] or queue["ReviewMemo"]:
+            raise GoldenRunError("REVIEW_HUMAN_FIELDS_NOT_BLANK", identity, "REVIEW")
+        if queue["CandidateStatus"] != "INVESTIGATION_CANDIDATE":
+            raise GoldenRunError("REVIEW_QUEUE_STATUS", identity, "REVIEW")
+        if queue["RootCauseClaim"] not in {"0", "0.0", "false", "False"}:
+            raise GoldenRunError("REVIEW_QUEUE_ROOT_CAUSE", identity, "REVIEW")
+
+    if data_fields != REVIEW_CORE_COLUMNS:
+        raise GoldenRunError("REVIEW_DATA_PROFILE", data_fields, "REVIEW")
+    if len(data_rows) != len(detail_rows):
+        raise GoldenRunError("REVIEW_ROW_ACCOUNTING", f"{len(data_rows)}:{len(detail_rows)}", "REVIEW")
+    if detail_fields and detail_fields[0] != "FrameCount":
+        raise GoldenRunError("REVIEW_DETAIL_PROFILE", detail_fields[0], "REVIEW")
+    frames = [require_int(row["FrameCount"], "REVIEW_FRAME") for row in data_rows]
+    if frames != sorted(set(frames)):
+        raise GoldenRunError("REVIEW_FRAME_DOMAIN", len(frames), "REVIEW")
+    candidate_peaks = {require_int(row["PeakFrameCount"], "CANDIDATE_PEAK") for row in candidates}
+    if not candidate_peaks.issubset(set(frames)):
+        raise GoldenRunError("REVIEW_PEAK_COVERAGE", candidate_peaks - set(frames), "REVIEW")
+
+    if validation.get("Status") != "PASS":
+        raise GoldenRunError("REVIEW_VALIDATION_STATUS", validation.get("Status"), "REVIEW")
+    integer_checks = {
+        "CandidateCount": len(queue_rows),
+        "ReviewDataRowCount": len(data_rows),
+        "DetailDataRowCount": len(detail_rows),
+        "HumanReviewColumnCount": len(data_fields),
+    }
+    for key, expected in integer_checks.items():
+        if require_int(validation.get(key), "REVIEW_" + key) != expected:
+            raise GoldenRunError("REVIEW_VALIDATION_" + key, validation.get(key), "REVIEW")
+    if validation.get("RootCauseClaim") is not False:
+        raise GoldenRunError("REVIEW_VALIDATION_ROOT_CAUSE", validation.get("RootCauseClaim"), "REVIEW")
+
+    file_hashes = validation.get("FileHashes")
+    if not isinstance(file_hashes, dict):
+        raise GoldenRunError("REVIEW_FILE_HASHES", "TYPE", "REVIEW")
+    for filename, path in (
+        ("review_queue.csv", queue_path),
+        ("review_data.csv", data_path),
+        ("review_evidence_detail.csv", detail_path),
+    ):
+        if file_hashes.get(filename) != sha256_file(path):
+            raise GoldenRunError("REVIEW_FILE_HASH", filename, "REVIEW")
+
+    if package_manifest.get("Contract") != "U002_U003_REVIEW_PACKAGE":
+        raise GoldenRunError("REVIEW_MANIFEST_CONTRACT", package_manifest.get("Contract"), "REVIEW")
+    if package_manifest.get("CoreReviewColumns") != REVIEW_CORE_COLUMNS:
+        raise GoldenRunError("REVIEW_MANIFEST_COLUMNS", "MISMATCH", "REVIEW")
+    boundaries = package_manifest.get("SemanticBoundaries")
+    if not isinstance(boundaries, dict):
+        raise GoldenRunError("REVIEW_SEMANTIC_BOUNDARIES", "TYPE", "REVIEW")
+    for key in ("CandidateIsConfirmedEvent", "RadarIsGroundTruth", "RootCauseClaim"):
+        if boundaries.get(key) is not False:
+            raise GoldenRunError("REVIEW_BOUNDARY_" + key, boundaries.get(key), "REVIEW")
+
+    return {
+        "ReviewRows": len(data_rows),
+        "ReviewWindows": require_int(validation.get("MergedReviewWindowCount"), "REVIEW_WINDOWS"),
+        "ReviewColumns": len(data_fields),
+    }
+
+
+def validate_golden_artifacts(
+    run_root: Path,
+    expected_frames: int,
+    maximum_candidates: int,
+) -> Dict[str, int]:
+    status = load_json(run_root / "run_status.json", "RUN_STATUS")
+    if status.get("Status") != "SUCCEEDED":
+        raise GoldenRunError("RUN_STATUS", status.get("Status"), "ARTIFACT")
+    records = artifact_records(run_root)
+
+    qualities: Dict[str, Dict[str, object]] = {}
+    for artifact_type, filename in QUALITY_FILENAMES.items():
+        manifest_path, manifest = records[artifact_type]
+        quality_path = payload_path_by_name(manifest_path, manifest, filename)
+        qualities[artifact_type] = load_json(quality_path, "QUALITY_" + artifact_type)
+
+    frame_count_keys = {
+        "CAMERA_TARGET_RECONSTRUCTION": "FrameRows",
+        "RADAR_VALIDITY": "FrameRows",
+        "COMPARISON_POPULATION": "FrameRows",
+        "PRIMARY_OUTCOME": "FrameRows",
+        "BASELINE_RESIDUAL": "FrameRows",
+        "ROBUST_RESIDUAL_EVIDENCE": "FrameRows",
+        "ANOMALY_CANDIDATES": "FrameRows",
+    }
+    for artifact_type, key in frame_count_keys.items():
+        observed = require_int(qualities[artifact_type].get(key), artifact_type + "_FRAME_ROWS")
+        if observed != expected_frames:
+            raise GoldenRunError("FRAME_ROW_COUNT", f"{artifact_type}:{observed}", "ARTIFACT")
+
+    candidate_manifest_path, candidate_manifest = records["ANOMALY_CANDIDATES"]
+    candidate_path = primary_csv_path(candidate_manifest_path, candidate_manifest)
+    candidates, first_peak = validate_candidates(candidate_path, maximum_candidates)
+    candidate_quality = qualities["ANOMALY_CANDIDATES"]
+    exported = require_int(candidate_quality.get("CandidateCountExported"), "CANDIDATES_EXPORTED")
+    if exported != len(candidates):
+        raise GoldenRunError("CANDIDATE_COUNT_ACCOUNTING", f"{exported}:{len(candidates)}", "CANDIDATE")
+
+    review_manifest_path, review_manifest = records["U003_REVIEW_PACKAGE"]
+    review_counts = validate_review_package(review_manifest_path, review_manifest, candidates)
+    formal_rows = require_int(
+        qualities["COMPARISON_POPULATION"].get("FormalEligibleRows"),
+        "FORMAL_ELIGIBLE_ROWS",
+    )
+    evidence_rows = require_int(
+        qualities["ROBUST_RESIDUAL_EVIDENCE"].get("EvidenceValidRows"),
+        "EVIDENCE_VALID_ROWS",
+    )
+    radar_loss_rows = require_int(
+        qualities["RADAR_VALIDITY"].get("RadarTargetLossEvidenceRows"),
+        "RADAR_LOSS_ROWS",
+    )
+    canonical_valid_rows = require_int(
+        qualities["CAMERA_TARGET_RECONSTRUCTION"].get("CanonicalValidRows"),
+        "CANONICAL_VALID_ROWS",
+    )
+    if evidence_rows != formal_rows:
+        raise GoldenRunError("FORMAL_EVIDENCE_ACCOUNTING", f"{formal_rows}:{evidence_rows}", "ARTIFACT")
+    return {
+        "ArtifactCount": len(records),
+        "FrameRows": expected_frames,
+        "FormalEligibleRows": formal_rows,
+        "EvidenceValidRows": evidence_rows,
+        "CanonicalValidRows": canonical_valid_rows,
+        "RadarLossRows": radar_loss_rows,
+        "CandidateCount": len(candidates),
+        "ReviewRows": review_counts["ReviewRows"],
+        "ReviewWindows": review_counts["ReviewWindows"],
+        "ReviewColumns": review_counts["ReviewColumns"],
+        "FirstPeakFrame": first_peak,
+        "ValidityBranchGap": int(radar_loss_rows > 0),
+    }
+
+
+def mock_b11() -> Dict[str, object]:
+    return {
+        "CandidatePolicy": None,
+        "ContractVersion": CONTRACT_VERSION,
+        "FrameStart": 41380,
+        "FrameEnd": 41780,
+        "InputPackage": "03_CASES/TEST",
+        "ModulePlan": [
+            {
+                "Sequence": 1,
+                "Stage": "S0",
+                "ModuleId": EXPECTED_PLAN[0][1],
+                "ModuleVersion": EXPECTED_PLAN[0][2],
+                "Configuration": {},
+            },
+            {
+                "Sequence": 2,
+                "Stage": "S1",
+                "ModuleId": EXPECTED_PLAN[1][1],
+                "ModuleVersion": EXPECTED_PLAN[1][2],
+                "Configuration": {
+                    "BindingProfilePath": "02_CONFIG/signal_profiles/test.json",
+                    "BindingProfileSha256": "a" * 64,
+                    "MaxReacquisitionAbsLateralMeters": 0.75,
+                    "MinimumCenterlineAdvantageMeters": 1.0,
+                    "GeometryConfirmFrames": 3,
+                },
+            },
+        ],
+        "OutputSelection": list(EXPECTED_ARTIFACT_TYPES[:2]),
+        "RunId": DEFAULT_B11_RUN_ID,
+        "RunPurpose": "EVALUATION",
+        "RunScope": "FRAME_RANGE",
+        "SignalProfile": "TEST@0.3.0",
+    }
+
+
+def mock_b5() -> Dict[str, object]:
+    value = mock_b11()
+    value["RunId"] = DEFAULT_B5_RUN_ID
+    value["FrameStart"] = 41480
+    value["FrameEnd"] = 41750
+    value["ModulePlan"][1]["ModuleVersion"] = "0.2.0"
+    value["ModulePlan"][1]["Configuration"] = {
+        "BindingProfilePath": "old.json",
+        "BindingProfileSha256": "b" * 64,
+    }
+    configurations = {
+        EXPECTED_PLAN[2][1]: {"BindingProfilePath": "old.json", "BindingProfileSha256": "b" * 64},
+        EXPECTED_PLAN[5][1]: {"BinWidthMeters": 5.0, "MinimumBinSamples": 5},
+        EXPECTED_PLAN[6][1]: {"ScaleFloorMeters": 0.05},
+        EXPECTED_PLAN[7][1]: {"MaximumCandidates": 40},
+        EXPECTED_PLAN[8][1]: {"ReviewDataProfile": "CAMERA_RADAR_CORE_V0_1"},
+    }
+    for sequence, (stage, module_id, version) in enumerate(EXPECTED_PLAN[2:], 3):
+        value["ModulePlan"].append(
+            {
+                "Sequence": sequence,
+                "Stage": stage,
+                "ModuleId": module_id,
+                "ModuleVersion": version,
+                "Configuration": configurations.get(module_id, {}),
+            }
+        )
+    value["PrimaryOutcome"] = {
+        "Formula": "RadarDistance-CanonicalCameraDistance",
+        "Name": "CameraRadarDiscrepancy",
+        "Purpose": "EXPLORATORY",
+        "Sign": "REFERENCE-TARGET",
+        "Unit": "m",
+    }
+    value["CandidatePolicy"] = "CameraRadar.S6.RobustScoreCandidateSynthesis@0.1.0"
+    value["OutputSelection"] = list(EXPECTED_ARTIFACT_TYPES)
+    return value
+
+
+def self_test() -> str:
+    checks: List[bool] = []
+
+    def check(value: bool) -> None:
+        if not value:
+            raise GoldenRunError("SELFTEST_ASSERTION", len(checks) + 1, "SELFTEST")
+        checks.append(True)
+
+    b11 = mock_b11()
+    b5 = mock_b5()
+    validate_b11_configuration(b11)
+    validate_b5_configuration(b5)
+    golden = build_golden_configuration(b11, b5, "TEST_GOLDEN")
+
+    check(PROGRAM_ID.startswith("UDP002"))
+    check(PROGRAM_VERSION == "0.1.0")
+    check(CONTRACT_VERSION == "U22.0.1")
+    check(len(EXPECTED_PLAN) == 9)
+    check(len(EXPECTED_ARTIFACT_TYPES) == 9)
+    check(plan_identity(golden) == EXPECTED_PLAN)
+    check(golden["RunId"] == "TEST_GOLDEN")
+    check(golden["RunPurpose"] == "EVALUATION")
+    check(golden["RunScope"] == "FRAME_RANGE")
+    check(golden["FrameStart"] == 41380)
+    check(golden["FrameEnd"] == 41780)
+    check(golden["InputPackage"] == b11["InputPackage"])
+    check(golden["SignalProfile"] == b11["SignalProfile"])
+    check(golden["PrimaryOutcome"] == b5["PrimaryOutcome"])
+    check(golden["CandidatePolicy"] == b5["CandidatePolicy"])
+    check(golden["OutputSelection"] == list(EXPECTED_ARTIFACT_TYPES))
+    camera = module_item(golden, EXPECTED_PLAN[1][1])["Configuration"]
+    radar = module_item(golden, EXPECTED_PLAN[2][1])["Configuration"]
+    check(camera["BindingProfilePath"] == radar["BindingProfilePath"])
+    check(camera["BindingProfileSha256"] == radar["BindingProfileSha256"])
+    check(camera["MaxReacquisitionAbsLateralMeters"] == 0.75)
+    check(camera["MinimumCenterlineAdvantageMeters"] == 1.0)
+    check(camera["GeometryConfirmFrames"] == 3)
+    check(module_item(golden, EXPECTED_PLAN[5][1])["Configuration"]["BinWidthMeters"] == 5.0)
+    check(module_item(golden, EXPECTED_PLAN[7][1])["Configuration"]["MaximumCandidates"] == 40)
+    check(module_item(golden, EXPECTED_PLAN[8][1])["Configuration"]["ReviewDataProfile"] == "CAMERA_RADAR_CORE_V0_1")
+    check(token("a b/c") == "A_B_C")
+    check(len(hashlib.sha256(b"x").hexdigest()) == 64)
+    check(len(canonical_bytes(golden)) > 100)
+    check(REGISTRY.suffix == ".py")
+    check(EXECUTOR.suffix == ".py")
+    check(REVIEW_CORE_COLUMNS[0] == "FrameCount")
+    check(REVIEW_CORE_COLUMNS[-1] == "RadarMeasurementValid")
+    check(DEFAULT_RUN_ID.endswith("V01"))
+    if len(checks) != 32:
+        raise GoldenRunError("SELFTEST_COUNT", len(checks), "SELFTEST")
+    return "B12ST PASS-32 C-0"
+
+
+def execute(args: argparse.Namespace) -> Tuple[str, Dict[str, object]]:
+    workspace_root = require_workspace(Path(args.workspace_root))
+    b11_path = resolve_path(workspace_root, args.b11_config)
+    b5_path = resolve_path(workspace_root, args.b5_config)
+    b11 = load_json(b11_path, "B11_CONFIG")
+    b5 = load_json(b5_path, "B5_CONFIG")
+    validate_b11_configuration(b11)
+    validate_b5_configuration(b5)
+    b11_run_root = require_accepted_source_run(workspace_root, b11_path, b11, "B11")
+    b5_run_root = require_accepted_source_run(workspace_root, b5_path, b5, "B5")
+    profile_relative, profile_hash, profile_identity = validate_binding_profile(workspace_root, b11)
+    input_package = resolve_path(workspace_root, b11.get("InputPackage"))
+    if not input_package.is_dir() or input_package.is_symlink():
+        raise GoldenRunError("INPUT_PACKAGE_MISSING", input_package, "SOURCE")
+
+    golden = build_golden_configuration(b11, b5, args.run_id)
+    target_configuration_path = workspace_root / "02_CONFIG/run_configs" / (args.run_id + ".json")
+    disposition = persist_immutable(target_configuration_path, golden)
+    diagnostics: List[Dict[str, object]] = []
+    audit_module_set(workspace_root, args.module_timeout_seconds, diagnostics)
+    run_root, replay = execute_or_replay(
+        workspace_root,
+        target_configuration_path,
+        args.run_id,
+        args.module_timeout_seconds,
+        diagnostics,
+    )
+    expected_frames = int(golden["FrameEnd"]) - int(golden["FrameStart"]) + 1
+    maximum_candidates = int(
+        module_item(golden, "CameraRadar.S6.RobustScoreCandidateSynthesis")["Configuration"]["MaximumCandidates"]
+    )
+    counts = validate_golden_artifacts(run_root, expected_frames, maximum_candidates)
+    review_manifest_path, _ = artifact_records(run_root)["U003_REVIEW_PACKAGE"]
+
+    report: Dict[str, object] = {
+        "ProgramId": PROGRAM_ID,
+        "ProgramVersion": PROGRAM_VERSION,
+        "CompletionCode": 0,
+        "Status": "STRUCTURALLY_ACCEPTED",
+        "RunId": args.run_id,
+        "RunRoot": str(run_root),
+        "RunConfiguration": str(target_configuration_path),
+        "RunConfigurationSha256": sha256_file(target_configuration_path),
+        "ConfigurationDisposition": disposition,
+        "RunReplay": replay,
+        "SourceRuns": {
+            "B11": str(b11_run_root),
+            "B5": str(b5_run_root),
+        },
+        "FrozenSignalProfile": {
+            "Identity": profile_identity,
+            "Path": profile_relative,
+            "Sha256": profile_hash,
+        },
+        "Counts": counts,
+        "U003ReviewPackageRoot": str(review_manifest_path.parent),
+        "Diagnostics": diagnostics,
+        "SemanticBoundaries": {
+            "RadarIsGroundTruth": False,
+            "CandidateIsConfirmedEvent": False,
+            "RootCauseClaim": False,
+            "InvalidRadarRowsEnterDiscrepancy": False,
+        },
+        "DesignGap": (
+            "RADAR_VALIDITY_TRANSITION_CANDIDATE_BRANCH_NOT_IMPLEMENTED"
+            if counts["ValidityBranchGap"]
+            else "NONE_OBSERVED_IN_THIS_RANGE"
+        ),
+        "NextAction": "LOAD_GENERATED_U003_REVIEW_PACKAGE_AND_REVIEW_EXPORTED_CANDIDATES",
+    }
+    report_path = workspace_root / "04_TEMP/U22B12_GOLDEN_RUN_OUTPUT/u22b12_golden_run_report.json"
+    write_json_atomic(report_path, report)
+    capsule = (
+        f"B12G N-M9-A{counts['ArtifactCount']}-F{counts['FrameRows']}"
+        f"-R{counts['FormalEligibleRows']}-V{counts['EvidenceValidRows']}"
+        f"-L{counts['RadarLossRows']}-C{counts['CandidateCount']}"
+        f"-W{counts['ReviewWindows']}-P{counts['FirstPeakFrame']}"
+        f"-D{counts['ValidityBranchGap']}-X0 C-0"
+    )
+    write_text_atomic(
+        workspace_root / "04_TEMP/U22B12_GOLDEN_RUN_OUTPUT/u22b12_return_capsule.txt",
+        capsule + "\n",
+    )
+    return capsule, report
+
+
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--execute", action="store_true")
+    parser.add_argument("--workspace-root", default="U-UDP002")
+    parser.add_argument(
+        "--b11-config",
+        default="02_CONFIG/run_configs/" + DEFAULT_B11_RUN_ID + ".json",
+    )
+    parser.add_argument(
+        "--b5-config",
+        default="02_CONFIG/run_configs/" + DEFAULT_B5_RUN_ID + ".json",
+    )
+    parser.add_argument("--run-id", default=DEFAULT_RUN_ID)
+    parser.add_argument("--module-timeout-seconds", type=int, default=900)
+    return parser.parse_args(sys.argv[1:] if argv is None else argv)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = parse_args(argv)
+    try:
+        if args.self_test:
+            print(self_test())
+            return 0
+        if args.module_timeout_seconds < 1 or args.module_timeout_seconds > 86400:
+            raise GoldenRunError("MODULE_TIMEOUT_RANGE", args.module_timeout_seconds, "ARGUMENT")
+        capsule, _ = execute(args)
+        print(capsule)
+        return 0
+    except Exception as error:
+        if isinstance(error, GoldenRunError):
+            reason = error.reason
+            detail = error.detail
+            stage = error.stage
+        else:
+            reason = token(type(error).__name__, 80)
+            detail = token(str(error), 160)
+            stage = "UNHANDLED"
+        print(f"B12GE K-{reason}-J{stage}-X1 C-7")
+        print(f"B12GD D-{detail}-X0 C-0")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
