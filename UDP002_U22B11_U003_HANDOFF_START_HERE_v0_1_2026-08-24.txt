@@ -1,0 +1,69 @@
+UDP002 U22B11 -> U003 人工验收指南 v0.1
+日期：2026-08-24
+
+一、目的
+
+机器重放已经通过。本步骤只做一项人工视频确认，不再修改算法参数。
+
+需要确认：
+
+1. FrameCount 41638 附近，偏离中心的 Camera 1 没有被误选为跟车目标；
+2. Camera 3 约在 41648 恢复有效且接近中心后，Canonical 在连续三帧确认后的 41650 恢复。
+
+
+二、文件放置与运行
+
+将下面程序下载到：
+
+C-CODE\U-UDP002\04_TEMP
+
+u002_u22b11_u003_handoff_builder_v0_1.py.txt
+
+从 C-CODE 根目录运行：
+
+python U-UDP002\04_TEMP\u002_u22b11_u003_handoff_builder_v0_1.py.txt --self-test
+
+预期：
+
+UDP002-U22B11-U003-HANDOFF-SELFTEST-PASS-12 C-0
+
+随后运行正式生成：
+
+python U-UDP002\04_TEMP\u002_u22b11_u003_handoff_builder_v0_1.py.txt
+
+成功输出：
+
+B11H N-Q1-F41-K10-S41635-P41650-E41660-X0 C-0
+
+并生成：
+
+U-UDP002\04_TEMP\U22B11_U003_HANDOFF\review_queue.csv
+U-UDP002\04_TEMP\U22B11_U003_HANDOFF\review_data.csv
+
+
+三、U003 操作
+
+1. 启动 U003 FrameCount Video Reviewer。
+2. 加载本次实测视频并沿用已确认的 FrameCount 映射。
+3. Load Event CSV：选择 review_queue.csv。
+4. Load Review Data CSV：选择 review_data.csv。
+5. 打开事件 B11V01，重点查看 41638-41660。
+
+
+四、人工判定
+
+Q1：视频中的实际跟踪对象与 Camera 3 一致，且 Module 没有选择横向偏离的 Camera 1？
+
+Q2：Camera 3 恢复后，41650 的 Canonical 恢复是否与视频/数据趋势一致？
+
+回答编码：
+
+1 = 是，符合预期
+2 = 否，不符合预期
+3 = 视频或数据不足，无法判断
+
+只回传：
+
+B11V Q1-<码> Q2-<码>
+
+若 Q1=1 且 Q2=1：Module 0.3.0 正式冻结，下一步直接进入全 S0-S7 Golden Run。
