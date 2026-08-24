@@ -1,0 +1,111 @@
+UDP002 U22B7P Full-Case Geometry 实体化
+版本：0.1
+日期：2026-08-24
+
+一、当前结论
+
+B7N 返回：
+
+B7N N-P26-G1-F0-R9-L0-C1-S1-E1-D2-X0 C-0
+
+说明：
+
+- 26 个 U001 包中只有 1 个含完整 Camera 1/3 geometry；
+- 该包只是 bounded smoke，不是 Full Case；
+- 9 个 S1 Run 都没有引用 geometry 包；
+- B13 Controlled Profile、Source/DBC 和 U001 runtime 均已齐备。
+
+因此 B7P 只做一件事：使用已验证的 B13 Profile，把完整 Raw CAN 转换成
+新的 Full-Case U001 geometry 六文件包。
+
+二、安全边界
+
+B7P：
+
+- 不覆盖 U-UDP001\02_CONTROL；
+- 不激活 Candidate Profile；
+- 不修改已有 U001/U002 Run；
+- 在新输出目录创建隔离 shadow runtime；
+- MaxSourceRows=0，表示读取完整 source；
+- 如旧 G7 在八个上游 Stage 成功后失败，自动使用已批准 G7 v0.5 recovery；
+- 最终独立确认 C22、V21、四个 Camera geometry identity、FrameRows>=50000；
+- 失败时保留完整 JSON、stdout、stderr，不需要另跑 probe。
+
+三、下载与解压
+
+Public repo 中有：
+
+1. 本执行指南（单独文件）；
+2. UDP002_U22B7P_FULL_GEOMETRY_MATERIALIZATION_BUNDLE_v0_1.zip。
+
+把 ZIP 内四个文件直接解压到：
+
+C-CODE\U-UDP002\04_TEMP
+
+四个文件必须在 04_TEMP 同一层：
+
+1. u002_u22b7p_full_geometry_materialization_controller_v0_1.py.txt
+2. u001_u22b1b14_isolated_profile_smoke_runner_v0_1.py.txt
+3. u001_output_package_assembler_v0_4.py.txt
+4. u001_output_package_assembler_v0_5.py.txt
+
+不要放入新的子文件夹。
+
+四、Self-test
+
+从 C-CODE 根目录使用 CMD：
+
+python U-UDP002\04_TEMP\u002_u22b7p_full_geometry_materialization_controller_v0_1.py.txt --self-test
+
+最后预期：
+
+UDP002-U22B7P-SELFTEST-PASS-20 C-0
+
+依赖程序会额外显示各自 PASS，属于正常现象。Self-test 正常时不用回传。
+
+五、Full-Case 正式运行
+
+确认下面输出目录不存在，然后从 C-CODE 执行一整行：
+
+python U-UDP002\04_TEMP\u002_u22b7p_full_geometry_materialization_controller_v0_1.py.txt --run-full --c-code-root . --output-root U-UDP001\03_CASES\TC001_20260422\02_RUNS\U22B7P_FULL_GEOMETRY_V01
+
+这是 Full CAN decode，可能运行较长时间。运行期间不要关闭 CMD、不要移动
+U-UDP001/002 文件，不要重复启动第二个相同 Run。
+
+六、运行结束后的目录确认
+
+从 C-CODE 执行：
+
+dir U-UDP001\03_CASES\TC001_20260422\02_RUNS\U22B7P_FULL_GEOMETRY_V01
+
+成功时应看到：
+
+- U22B7P_COMPLETE.marker
+- u22b7p_full_materialization_manifest.json
+- u22b7p_return_capsule.txt
+- 00_ISOLATED_UDP001 至 04_DIAGNOSTICS
+- 若使用 G7 recovery，还会有 05_G7V05_RECOVERY
+
+七、回传
+
+回传 u22b7p_return_capsule.txt 的两行即可，例如：
+
+B7P N-U...-F...-C22-V21-G4-R1-H1-X0 C-0
+B7PI S-FULL_CASE_GEOMETRY_PACKAGE_READY-L0-A0-NEXT_LINK_U002 C-0
+
+R0：旧 G7 直接成功。
+R1：八个上游 Stage 成功后使用了已批准 G7 v0.5 recovery。
+两者都可验收。
+
+失败时回传 B7PE 与 MEMO1 两行；详细原因已在输出目录，无需额外 probe。
+
+八、B7P 之后
+
+B7P C-0 后不会立即修改旧 Golden Run。下一节点将：
+
+1. 验收 Full geometry 包；
+2. 创建新的 U002 Run，明确链接该包；
+3. 重跑 B7A geometry evidence；
+4. 然后才版本化 S1 geometry-assisted reacquisition。
+
+END OF GUIDE
