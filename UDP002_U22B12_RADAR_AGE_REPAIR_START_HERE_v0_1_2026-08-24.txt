@@ -1,0 +1,93 @@
+UDP002 U22B12 Radar nullable-age 修正与 Golden Run V02 执行指南
+版本：v0.1
+日期：2026-08-24
+执行环境：Windows CMD
+执行起点：C-CODE
+
+一、这一步解决什么
+
+B12 V01 已经准确定位到：
+
+Sequence 3 / S1 / CameraRadar.S1.RadarMeasurementValidity 0.1.0
+
+旧模块把 U001 中所有 `Signal__age` 强制解析为整数。实际契约允许：
+
+- signal valid = false 且 age 为空：合法，表示从未出现过有效更新；
+- signal valid = true 且 age 为空：非法；
+- age 非空时：必须是非负整数；
+- 禁止把空 age 补成 0。
+
+本包安装 RadarMeasurementValidity 0.1.1，并使用新 RunId 执行完整 S0-S7。
+旧模块 0.1.0 和失败的 V01 Run 均保留，不覆盖、不续跑。
+
+二、下载后应有的两个文件
+
+请把下面两个文件下载到：
+
+C-CODE\U-UDP002\04_TEMP
+
+1. UDP002_U22B12_RADAR_AGE_REPAIR_PACKAGE_v0_1_2026-08-24.zip
+2. 本执行指南
+
+三、解压
+
+在 CMD 中从 C-CODE 执行：
+
+mkdir U-UDP002\04_TEMP\UDP002_U22B12_RADAR_AGE_REPAIR
+
+tar -xf U-UDP002\04_TEMP\UDP002_U22B12_RADAR_AGE_REPAIR_PACKAGE_v0_1_2026-08-24.zip -C U-UDP002\04_TEMP\UDP002_U22B12_RADAR_AGE_REPAIR
+
+检查主程序存在：
+
+if exist U-UDP002\04_TEMP\UDP002_U22B12_RADAR_AGE_REPAIR\u002_u22b12_full_s0_s7_golden_run_v0_2.py.txt (echo RUNNER-OK) else (echo RUNNER-MISSING)
+
+检查模块存在：
+
+if exist U-UDP002\04_TEMP\UDP002_U22B12_RADAR_AGE_REPAIR\RadarMeasurementValidity\0.1.1\module_manifest.json (echo MODULE-OK) else (echo MODULE-MISSING)
+
+四、主程序自测
+
+python U-UDP002\04_TEMP\UDP002_U22B12_RADAR_AGE_REPAIR\u002_u22b12_full_s0_s7_golden_run_v0_2.py.txt --self-test
+
+预期：
+
+B12ST PASS-32 C-0
+
+五、安装 0.1.1 并执行完整 Golden Run V02
+
+python U-UDP002\04_TEMP\UDP002_U22B12_RADAR_AGE_REPAIR\u002_u22b12_full_s0_s7_golden_run_v0_2.py.txt --execute --workspace-root U-UDP002 --b11-config 02_CONFIG\run_configs\U22B11_GEOMETRY_MODULE_V030_F41380_41780_V01.json --b5-config 02_CONFIG\run_configs\U22B5_TC001_F41480_41750_V01.json --run-id U22B12_GOLDEN_TC001_F41380_41780_V02 --radar-module-source 04_TEMP\UDP002_U22B12_RADAR_AGE_REPAIR\RadarMeasurementValidity\0.1.1 --module-timeout-seconds 900
+
+程序会自动完成：
+
+1. 验证 0.1.1 模块五文件及身份；
+2. 以 side-by-side 方式安装 0.1.1；
+3. 运行模块 24 项 semantic self-test；
+4. qualification / audit / availability refresh；
+5. 从已验收 B11 与 B5 配置生成不可变 V02 配置；
+6. 执行 S0-S7；
+7. 审计 9 个 Artifact；
+8. 验证 U003 review package；
+9. 输出短回传码和详细 JSON 报告。
+
+六、检查输出
+
+检查 Return Capsule：
+
+type U-UDP002\04_TEMP\U22B12_RADAR_AGE_REPAIR_OUTPUT\u22b12_v02_return_capsule.txt
+
+检查 Run 目录：
+
+if exist U-UDP002\07_OUTPUT\U22B12_GOLDEN_TC001_F41380_41780_V02\run_status.json (echo RUN-OUTPUT-OK) else (echo RUN-OUTPUT-MISSING)
+
+成功时只回传一行 B12G 机器码。
+
+失败时回传终端最后两行：B12GE 与 B12GD。
+
+七、预期结果与停止规则
+
+成功格式：
+
+B12G N-M9-A9-F...-R...-V...-L...-C...-W...-P...-D...-X0 C-0
+
+如果出现 C-7：停止，不手工修改模块、Core、配置或失败 Run；只回传 B12GE/B12GD。
+
