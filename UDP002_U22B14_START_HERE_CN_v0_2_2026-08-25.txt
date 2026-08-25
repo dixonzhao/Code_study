@@ -10,6 +10,15 @@ UDP002 U22B14 执行指南
 3. 同时按Camera距离分层，避免把距离影响误认为角度影响；
 4. 生成可直接载入U003的方位角复核表。
 
+v0.2接口修正
+------------
+B14不再假设S1输出单列SelectedCameraLateralPosition。它按S1 v0.3正式接口：
+
+- 读取SelectedCameraRole；
+- CAMERA_1_DISTANCE对应Camera1LateralPosition与Camera1LateralEligible；
+- CAMERA_3_DISTANCE对应Camera3LateralPosition与Camera3LateralEligible；
+- 不支持的Role、无效Eligibility或缺列一律停止生成该帧Bearing证据，不猜列、不补零、不跨帧保持。
+
 本节点不设定15度或其他角度阈值，也不宣称Radar故障或Root Cause。
 
 
@@ -19,8 +28,8 @@ UDP002 U22B14 执行指南
 
 C-CODE\U-UDP002\04_TEMP
 
-- u002_u22b14_target_bearing_association_v0_1.py.txt
-- u002_u22b14_target_bearing_association_algorithm_card_v0_1.json
+- u002_u22b14_target_bearing_association_v0_2.py.txt
+- u002_u22b14_target_bearing_association_algorithm_card_v0_2.json
 
 从C-CODE目录打开CMD。B13D来源Run必须为：
 
@@ -31,22 +40,22 @@ CMD执行——最多三行
 -------------------
 1. 准备检查：
 
-python U-UDP002\04_TEMP\u002_u22b14_target_bearing_association_v0_1.py.txt --prepare --workspace-root U-UDP002 --source-run-id U22B13D_TC001_FULL_VIDEO_REVIEW_V01 --algorithm-card U-UDP002\04_TEMP\u002_u22b14_target_bearing_association_algorithm_card_v0_1.json
+python U-UDP002\04_TEMP\u002_u22b14_target_bearing_association_v0_2.py.txt --prepare --workspace-root U-UDP002 --source-run-id U22B13D_TC001_FULL_VIDEO_REVIEW_V01 --algorithm-card U-UDP002\04_TEMP\u002_u22b14_target_bearing_association_algorithm_card_v0_2.json
 
 2. 自测：
 
-python U-UDP002\04_TEMP\u002_u22b14_target_bearing_association_v0_1.py.txt --self-test
+python U-UDP002\04_TEMP\u002_u22b14_target_bearing_association_v0_2.py.txt --self-test
 
 3. 全视频执行：
 
-python U-UDP002\04_TEMP\u002_u22b14_target_bearing_association_v0_1.py.txt --execute --workspace-root U-UDP002 --source-run-id U22B13D_TC001_FULL_VIDEO_REVIEW_V01 --algorithm-card U-UDP002\04_TEMP\u002_u22b14_target_bearing_association_algorithm_card_v0_1.json
+python U-UDP002\04_TEMP\u002_u22b14_target_bearing_association_v0_2.py.txt --execute --workspace-root U-UDP002 --source-run-id U22B13D_TC001_FULL_VIDEO_REVIEW_V01 --algorithm-card U-UDP002\04_TEMP\u002_u22b14_target_bearing_association_algorithm_card_v0_2.json
 
 
 成功结果
 --------
 自测：
 
-U22B14-SELFTEST-PASS-28-C0
+U22B14-SELFTEST-PASS-35-C0
 
 执行结束：
 
@@ -57,7 +66,7 @@ B14-NF...-NE...-NI...-C16-B8-G64-X0-C0
 
 输出位置
 --------
-C-CODE\U-UDP002\07_OUTPUT\U22B14_TARGET_BEARING_ASSOCIATION_V01
+C-CODE\U-UDP002\07_OUTPUT\U22B14_TARGET_BEARING_ASSOCIATION_V02
 
 主要文件：
 
@@ -88,4 +97,3 @@ C-CODE\U-UDP002\07_OUTPUT\U22B14_TARGET_BEARING_ASSOCIATION_V01
 - C0010正前方短时无效必须保留为对照，不得删除。
 - 若某角度Bin曝光帧很少，不解释其失效率。
 - Camera Distance暂按纵向距离x解释，所以使用atan2(y, x)。若DBC确认其为斜距，公式必须改为asin(y/r)。
-
