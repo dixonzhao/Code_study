@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-U003 Evidence Review Workbench v0.9
+U003 Evidence Review Workbench v0.10
 
 Purpose
 -------
@@ -52,7 +52,7 @@ from pathlib import Path
 from typing import Any
 
 
-VERSION = "0.9"
+VERSION = "0.10"
 REVIEW_CODES = {
     "": "Not reviewed",
     "1": "Correct / expected",
@@ -144,15 +144,11 @@ def compact_event_number(event_id: str) -> int | None:
     return int(match.group(1))
 
 
-def compress_integer_ranges(values: list[int]) -> str:
-    """Compress sorted integers as ``1-4--7--9-11``.
-
-    Only the hyphen key is required for manual transcription. A double hyphen
-    separates non-contiguous runs; a single hyphen marks one contiguous range.
-    """
+def integer_range_tokens(values: list[int]) -> list[str]:
+    """Return compact contiguous range tokens such as ``1-4``, ``7`` and ``9-11``."""
 
     if not values:
-        return ""
+        return []
     ordered = sorted(set(values))
     ranges: list[str] = []
     start = previous = ordered[0]
@@ -163,7 +159,13 @@ def compress_integer_ranges(values: list[int]) -> str:
         ranges.append(str(start) if start == previous else f"{start}-{previous}")
         start = previous = value
     ranges.append(str(start) if start == previous else f"{start}-{previous}")
-    return "--".join(ranges)
+    return ranges
+
+
+def compress_integer_ranges(values: list[int]) -> str:
+    """Join compact ranges with underscores under return-code policy v0.4."""
+
+    return "_".join(integer_range_tokens(values))
 
 
 def build_review_return_capsule(events: list[ReviewEvent], export_stamp: str) -> str:
@@ -176,16 +178,17 @@ def build_review_return_capsule(events: list[ReviewEvent], export_stamp: str) ->
         and len(set(numeric_ids)) == len(numeric_ids)
     )
 
-    fields = [f"RV{export_stamp}", f"N{len(events)}", f"R{len(reviewed)}"]
+    fields = [f"RV{export_stamp}", f"N{len(events)}-R{len(reviewed)}"]
     for review_code in sorted({event.review_result for event in reviewed}):
         group = [event for event in reviewed if event.review_result == review_code]
         if numeric_mode:
             numbers = [compact_event_number(event.event_id) for event in group]
-            payload = compress_integer_ranges([number for number in numbers if number is not None])
+            for payload in integer_range_tokens([number for number in numbers if number is not None]):
+                fields.append(f"C{review_code}-{payload}")
         else:
-            payload = ",".join(event.event_id for event in group)
-        fields.append(f"C{review_code}-{payload}")
-    return "-".join(fields)
+            for event in group:
+                fields.append(f"C{review_code}-{event.event_id}")
+    return "_".join(fields)
 
 
 def read_delimited_file(path: Path) -> tuple[list[str], list[dict[str, str]]]:
@@ -1859,13 +1862,13 @@ def run_self_test() -> int:
     extra_events.append(ReviewEvent("C0010", 10, 10, review_result="4"))
     compact_events = events + extra_events
     capsule = build_review_return_capsule(compact_events, stamp)
-    ok(capsule == "RV260825T123456-N16-R16-C1-1-9--11-16-C4-10")
+    ok(capsule == "RV260825T123456_N16-R16_C1-1-9_C1-11-16_C4-10")
     ok(compact_event_number("C0010") == 10)
-    ok(compress_integer_ranges([1, 2, 3, 5, 8, 9]) == "1-3--5--8-9")
-    ok(VERSION == "0.9")
+    ok(compress_integer_ranges([1, 2, 3, 5, 8, 9]) == "1-3_5_8-9")
+    ok(VERSION == "0.10")
 
     assert checks == 25, checks
-    print("U003-V09-SELFTEST-PASS-25")
+    print("U003-V010-SELFTEST-PASS-25")
     return 0
 
 
