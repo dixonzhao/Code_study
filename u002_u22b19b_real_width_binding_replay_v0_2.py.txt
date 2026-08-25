@@ -26,7 +26,7 @@ from typing import Iterable, Mapping, Optional, Sequence
 
 
 PROGRAM_ID = "CameraRadar.B19B.RealWidthBindingReplay"
-PROGRAM_VERSION = "0.1.0"
+PROGRAM_VERSION = "0.2.0"
 MODULE_ID = "CameraRadar.S1.CameraTargetContinuityArbitration"
 BASELINE_VERSION = "0.3.0"
 CANDIDATE_VERSION = "0.4.0"
@@ -36,8 +36,8 @@ OUTPUT_RUN_ID = "U22B19B_S1_WIDTH_REAL_REPLAY_V01"
 PROFILE_RELATIVE = PurePosixPath(
     "02_CONFIG/signal_profiles/TC001_camera_radar_width_binding_v0_4.json"
 )
-PROGRAM_NAME = "u002_u22b19b_real_width_binding_replay_v0_1.py.txt"
-GUIDE_NAME = "UDP002_U22B19B_START_HERE_CN_v0_1_2026-08-25.txt"
+PROGRAM_NAME = "u002_u22b19b_real_width_binding_replay_v0_2.py.txt"
+GUIDE_NAME = "UDP002_U22B19B_START_HERE_CN_v0_2_2026-08-25.txt"
 WIDTH_ROLE_BY_DISTANCE = {
     "CAMERA_1_DISTANCE": "CAMERA_1_WIDTH",
     "CAMERA_3_DISTANCE": "CAMERA_3_WIDTH",
@@ -261,14 +261,17 @@ def resolve_profile(root: Path, selected_plan: Mapping[str, object]) -> tuple[Pa
     return path, profile
 
 
-def exact_catalog_rows(package: Path) -> tuple[list[dict[str, str]], list[str], Path, Path]:
-    """Read the accepted U001 catalog and locate immutable public tables."""
+def exact_catalog_rows(package: Path) -> tuple[list[dict[str, str]], list[str], Path]:
+    """Read the accepted U001 catalog and locate its immutable Frame View."""
 
     catalog_path = package / "u001_signal_catalog.csv"
     frame_path = package / "u001_frame_values.csv"
-    inventory_path = package / "u001_signal_inventory.csv"
-    if not frame_path.is_file() or not inventory_path.is_file():
-        raise B19BError("U001_PUBLIC_FILES")
+    missing = [
+        path.name for path in (catalog_path, frame_path)
+        if not path.is_file() or path.is_symlink()
+    ]
+    if missing:
+        raise B19BError("U001_PUBLIC_FILES", missing[0])
     with catalog_path.open("r", encoding="utf-8-sig", newline="") as stream:
         reader = csv.DictReader(stream)
         columns = list(reader.fieldnames or [])
@@ -281,7 +284,50 @@ def exact_catalog_rows(package: Path) -> tuple[list[dict[str, str]], list[str], 
     missing = sorted(required - set(columns))
     if missing:
         raise B19BError("CATALOG_COLUMN", missing[0])
-    return rows, columns, frame_path, inventory_path
+    return rows, columns, frame_path
+
+
+def resolve_s0_inventory(
+    source_root: Path,
+    source_request: Mapping[str, object],
+) -> Path:
+    """Resolve the exact S0 inventory declared by the persisted S1 request."""
+
+    artifacts = source_request.get("InputArtifacts")
+    if not isinstance(artifacts, list):
+        raise B19BError("SOURCE_INPUT_ARTIFACTS")
+    selected = [
+        item for item in artifacts
+        if isinstance(item, dict) and item.get("ArtifactType") == "U001_INTAKE_ACCEPTED"
+    ]
+    if len(selected) != 1:
+        raise B19BError("S0_ARTIFACT_COUNT", len(selected))
+    identity = selected[0]
+    relative = PurePosixPath(str(identity.get("ManifestRelativePath", "")))
+    if relative.is_absolute() or ".." in relative.parts:
+        raise B19BError("S0_MANIFEST_PATH")
+    manifest_path = source_root.joinpath(*relative.parts).resolve()
+    try:
+        manifest_path.relative_to(source_root.resolve())
+    except ValueError as error:
+        raise B19BError("S0_MANIFEST_ESCAPE") from error
+    expected_manifest_hash = str(identity.get("ManifestSha256", ""))
+    if sha256_file(manifest_path) != expected_manifest_hash:
+        raise B19BError("S0_MANIFEST_HASH")
+    manifest = load_json(manifest_path, "S0_MANIFEST")
+    payloads = manifest.get("Payloads")
+    inventory_payloads = [
+        item for item in payloads
+        if isinstance(item, dict) and item.get("RelativePath") == "u001_signal_inventory.csv"
+    ] if isinstance(payloads, list) else []
+    if len(inventory_payloads) != 1:
+        raise B19BError("S0_INVENTORY_PAYLOAD", len(inventory_payloads))
+    inventory = manifest_path.parent / "u001_signal_inventory.csv"
+    if not inventory.is_file() or inventory.is_symlink():
+        raise B19BError("S0_INVENTORY_FILE")
+    if sha256_file(inventory) != inventory_payloads[0].get("Sha256"):
+        raise B19BError("S0_INVENTORY_HASH")
+    return inventory.resolve()
 
 
 def one_binding(profile: Mapping[str, object], role: str) -> dict[str, object]:
@@ -506,10 +552,15 @@ def preflight(root: Path) -> dict[str, object]:
     context = source_golden_context(root)
     selected_plan = camera_plan(context["Plan"])
     _, baseline_profile = resolve_profile(root, selected_plan)
-    package = Path(str(context["Plan"].get("InputPackageResolved", ""))).resolve()
+    source_request_path, source_request = locate_source_request(context["SourceRoot"])
+    package = Path(str(source_request.get("InputPackage", ""))).resolve()
     if not package.is_dir():
         raise B19BError("INPUT_PACKAGE", package)
-    catalog_rows, _, frame_path, inventory_path = exact_catalog_rows(package)
+    planned_package_value = context["Plan"].get("InputPackageResolved")
+    if planned_package_value and Path(str(planned_package_value)).resolve() != package:
+        raise B19BError("INPUT_PACKAGE_IDENTITY")
+    catalog_rows, _, frame_path = exact_catalog_rows(package)
+    inventory_path = resolve_s0_inventory(context["SourceRoot"], source_request)
     profile = build_width_profile(baseline_profile, catalog_rows, context["WidthBindings"])
     if profile.get("SourceInventorySha256") != sha256_file(inventory_path):
         raise B19BError("PROFILE_INVENTORY_HASH")
@@ -521,7 +572,6 @@ def preflight(root: Path) -> dict[str, object]:
             if canonical + suffix not in header:
                 raise B19BError("FRAME_WIDTH_COLUMN", width_role + suffix)
         one_binding(profile, distance_role)
-    locate_source_request(context["SourceRoot"])
     locate_source_table(context["SourceRoot"])
     candidate_module_root(root)
     if (root / "07_OUTPUT" / OUTPUT_RUN_ID).exists():
@@ -530,6 +580,8 @@ def preflight(root: Path) -> dict[str, object]:
     context["InputPackage"] = package
     context["FramePath"] = frame_path
     context["InventoryPath"] = inventory_path
+    context["SourceRequestPath"] = source_request_path
+    context["SourceRequest"] = source_request
     return context
 
 
@@ -559,7 +611,8 @@ def execute(root: Path) -> str:
     context = preflight(root)
     profile_path = root.joinpath(*PROFILE_RELATIVE.parts)
     write_json_atomic(profile_path, context["ProfileCandidate"])
-    source_request_path, source_request = locate_source_request(context["SourceRoot"])
+    source_request_path = context["SourceRequestPath"]
+    source_request = context["SourceRequest"]
     _, old_table = locate_source_table(context["SourceRoot"])
     module_root = candidate_module_root(root)
     immutable = {

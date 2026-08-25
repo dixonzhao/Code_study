@@ -1,5 +1,5 @@
 UDP002 U22B19B 公司端执行指南（中文）
-版本：v0.1
+版本：v0.2
 日期：2026-08-25
 
 一、这一步在做什么
@@ -24,8 +24,8 @@ C-CODE\U-UDP002\04_TEMP
 
 文件：
 
-1. u002_u22b19b_real_width_binding_replay_v0_1.py.txt
-2. UDP002_U22B19B_START_HERE_CN_v0_1_2026-08-25.txt
+1. u002_u22b19b_real_width_binding_replay_v0_2.py.txt
+2. UDP002_U22B19B_START_HERE_CN_v0_2_2026-08-25.txt
 
 不要改文件名。不要把文件放入新的子文件夹。
 
@@ -36,9 +36,9 @@ C-CODE\U-UDP002\04_TEMP
 
 四、只执行以下三行
 
-python U-UDP002\04_TEMP\u002_u22b19b_real_width_binding_replay_v0_1.py.txt --prepare --workspace-root U-UDP002
-python U-UDP002\04_TEMP\u002_u22b19b_real_width_binding_replay_v0_1.py.txt --self-test --workspace-root U-UDP002
-python U-UDP002\04_TEMP\u002_u22b19b_real_width_binding_replay_v0_1.py.txt --execute --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b19b_real_width_binding_replay_v0_2.py.txt --prepare --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b19b_real_width_binding_replay_v0_2.py.txt --self-test --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b19b_real_width_binding_replay_v0_2.py.txt --execute --workspace-root U-UDP002
 
 说明：
 
@@ -82,3 +82,5 @@ B19BE_K<Reason>-D<Detail>_X1-C7
 - X0-C0。
 
 本节点只证明 Width 接口在真实数据上接入成功且不改变旧选择逻辑；它不证明 Width 已参与 Camera 选择，也不重新解释业务结论。
+
+v0.2 修正说明：U001 Frame View 与 Catalog 从原 v0.3 实际使用的 InputPackage 解析；Signal Inventory 从该请求指纹绑定的 S0 Artifact Manifest 解析。禁止假设 Inventory 位于 U001 Public Package 根目录。
