@@ -1,17 +1,19 @@
-UDP002 U22B19C 全量 Golden Run 执行指南（中文）
-版本：v0.4
+UDP002 U22B19C Golden Run 恢复验收指南（中文）
+版本：v0.5
 日期：2026-08-26
 
 一、目的
 
-B19C 使用 B19B 已通过真实数据验证的 S1 v0.4 和 Width Binding Profile，完整重跑现有 S0-S7 Pipeline。
+B19C 使用 B19B 已通过真实数据验证的 S1 v0.4 和 Width Binding Profile，验收已经完成执行的正式 Golden Run。
 
 本步骤不改变任何分析参数，不新增算法，不修改原 Golden Run。唯一受控变化为：
 
 - CameraTargetContinuityArbitration：v0.3.0 -> v0.4.0；
 - Binding Profile：切换为 B19B 生成并绑定 SHA-256 的 Width Profile。
 
-新 S1 输出必须与 B19B 已验证的 v0.4 重放文件 SHA-256 完全一致，并且必须生成完整 S0-S7 Artifact 与 U003 Review Package。
+新 S1 输出必须与 B19B 已验证的 v0.4 重放文件 SHA-256 完全一致，并且必须完整覆盖本次 resolved ModulePlan 与 U003 Review Package。
+
+重要：S0-S7是固定Stage槽位，不表示每次Run必须在八个槽位都安装Module。当前Radar-loss Golden Run正式选择的是S0、S1、S6、S7；S2-S5没有选择Module，因此4个实际Stage是正确结果。v0.5按resolved ModulePlan逐个核对Module Artifact，不再硬编码要求8个实际Stage。
 
 二、下载位置
 
@@ -19,8 +21,8 @@ B19C 使用 B19B 已通过真实数据验证的 S1 v0.4 和 Width Binding Profil
 
 C-CODE\U-UDP002\04_TEMP
 
-1. u002_u22b19c_full_golden_replay_v0_4.py.txt
-2. UDP002_U22B19C_START_HERE_CN_v0_4_2026-08-26.txt
+1. u002_u22b19c_full_golden_replay_v0_5.py.txt
+2. UDP002_U22B19C_START_HERE_CN_v0_5_2026-08-26.txt
 
 不要改名，不要新建子文件夹。
 
@@ -28,9 +30,9 @@ C-CODE\U-UDP002\04_TEMP
 
 当前目录必须为 C-CODE。
 
-python U-UDP002\04_TEMP\u002_u22b19c_full_golden_replay_v0_4.py.txt --prepare --workspace-root U-UDP002
-python U-UDP002\04_TEMP\u002_u22b19c_full_golden_replay_v0_4.py.txt --self-test --workspace-root U-UDP002
-python U-UDP002\04_TEMP\u002_u22b19c_full_golden_replay_v0_4.py.txt --execute --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b19c_full_golden_replay_v0_5.py.txt --prepare --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b19c_full_golden_replay_v0_5.py.txt --self-test --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b19c_full_golden_replay_v0_5.py.txt --execute --workspace-root U-UDP002
 
 四、输出规则
 
@@ -51,13 +53,13 @@ prepare 会显示多行人工可读检查结果，包括：
 
 prepare 最后一行应为：
 
-B19CP-M...-R...-P7-A...-L...-X0-C0
+B19CP-M...-R...-P7-E1-A...-L...-X0-C0
 
 如果是 C-0，不需要回传 prepare 的多行信息。
 
 self-test 仍只输出机器码；C-0不需要回传。
 
-execute 会完整执行 S0-S7。运行时间取决于现有 Pipeline 和公司电脑负载，请等待命令正常结束，不要中断。
+execute 会优先识别v0.4已经成功完成的V03 Run，并直接进行恢复验收，不会重复运行Module。正常情况下应在较短时间内完成。
 
 v0.2修正说明：v0.1错误地把Run Configuration文件直接传给Stage Executor。正式契约要求先由Engine Preflight创建PREPARED Run Root，再把该Run Root传给Stage Executor。v0.2已按此固定顺序执行，并在本地使用严格区分“配置文件”和“Run目录”的测试替身完成回归验证。
 
@@ -65,20 +67,24 @@ v0.3修正说明：v0.2使用了Schema不允许的RunPurpose。v0.3将新Run定�
 
 v0.4修正说明：v0.3在公司环境进入Engine Preflight时返回了信息不足的PermissionError。v0.4不修改任何分析算法，新增完整输出目录权限测试，并在旧Engine CLI丢失异常位置时，使用同一已安装Engine的公开函数按阶段重放Preflight。若CLI只是边界性失败而同一正式逻辑可完成，运行会记录F1并继续；若确有权限或文件问题，失败码会同时给出阶段、文件、errno、Windows error、代码行和函数。v0.4使用新的V03 Run Id，不覆盖V02残留。
 
+v0.5修正说明：v0.4成功执行了正式ModulePlan，但最终验收错误地要求八个Stage全部产生Artifact。v0.5改为逐个核对resolved ModulePlan中的Module身份、版本和Stage，空Stage槽位不再误判为丢失。v0.5直接恢复验收已完成的V03 Run，不重复进行耗时分析。
+
 五、只回传 execute 最后一行
 
 成功格式：
 
-B19C_N<Rows>-M<Modules>-A<Artifacts>-S<Stages>-W<WidthValid>-F<Fallback>-U1-D1-X0-C0
+B19C_N<Rows>-M<Modules>-A<Artifacts>-S<SelectedStages>-T8-W<WidthValid>-F<Fallback>-R<Recovery>-U1-D1-X0-C0
 
 字段：
 
 - N：S1 v0.4输出行数；
 - M：固定Pipeline中的Module数量；
 - A：新Run的Artifact数量；
-- S：完成的Stage数量，成功必须为8；
+- S：本次ModulePlan实际选择并完成的Stage数量；当前正式Run预期为4；
+- T：U002固定Stage taxonomy数量，固定为8；
 - W：有效Selected Width行数；
 - F：Engine Preflight CLI是否触发同逻辑的进程内诊断回退；正常为0，旧CLI边界PermissionError但正式逻辑通过时为1；
+- R：是否恢复验收已经完成的V03 Run；本次正常预期为1；
 - U：S7/U003 Review Package存在；
 - D：新S1表与B19B验证重放SHA-256完全一致；
 - X：阻塞问题数；
@@ -98,7 +104,7 @@ B19CE-KPERMISSION-DP<Phase>-F<File>-E<Errno>-W<WinError>-L<Line>-N<Function>-X1-
 
 B19C C-0说明：
 
-- U001 -> U002 S0-S7 -> U003 Review Package 的CLI路径已使用S1 v0.4完整贯通；
+- U001 -> U002已选择ModulePlan -> U003 Review Package 的CLI路径已使用S1 v0.4完整贯通；
 - Width证据已进入正式Artifact链，但仍未参与Camera选择；
 - 原Golden Run未被修改；
 - 下一步是用U003打开新Review Package进行人工关闭；

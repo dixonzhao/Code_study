@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the complete S0-S7 Golden candidate with the B19B-qualified S1 v0.4."""
+"""Run the complete selected U002 Golden topology with the B19B-qualified S1 v0.4."""
 
 from __future__ import annotations
 
@@ -20,14 +20,14 @@ from typing import Mapping, Optional, Sequence
 
 
 PROGRAM_ID = "CameraRadar.B19C.FullGoldenReplay"
-PROGRAM_VERSION = "0.4.0"
+PROGRAM_VERSION = "0.5.0"
 MODULE_ID = "CameraRadar.S1.CameraTargetContinuityArbitration"
 SOURCE_VERSION = "0.3.0"
 TARGET_VERSION = "0.4.0"
 B19B_RUN_ID = "U22B19B_S1_WIDTH_REAL_REPLAY_V01"
 OUTPUT_RUN_ID = "U22B19C_S1_V04_FULL_GOLDEN_V03"
-PROGRAM_NAME = "u002_u22b19c_full_golden_replay_v0_4.py.txt"
-GUIDE_NAME = "UDP002_U22B19C_START_HERE_CN_v0_4_2026-08-26.txt"
+PROGRAM_NAME = "u002_u22b19c_full_golden_replay_v0_5.py.txt"
+GUIDE_NAME = "UDP002_U22B19C_START_HERE_CN_v0_5_2026-08-26.txt"
 CONTRACT_VALIDATOR_RELATIVE = Path("01_PROGRAMS/core/u002_u22_contract_validator_v0_1.py")
 ENGINE_PREFLIGHT_RELATIVE = Path("01_PROGRAMS/core/u002_u22_engine_preflight_v0_1.py")
 EXECUTOR_RELATIVE = Path("01_PROGRAMS/core/u002_u22_stage_executor_v0_1.py")
@@ -501,18 +501,31 @@ def source_context(root: Path) -> dict[str, object]:
     }
 
 
-def preflight(root: Path) -> dict[str, object]:
-    """Validate all B19C dependencies and output boundaries."""
+def preflight(root: Path, allow_completed_run: bool = False) -> dict[str, object]:
+    """Validate dependencies and optionally accept the completed v0.4 target Run."""
 
     transfer_paths(root)
     context = source_context(root)
     output = root / "07_OUTPUT" / OUTPUT_RUN_ID
+    completed_recovery = False
     if output.exists():
-        raise B19CError("OUTPUT_ALREADY_EXISTS", OUTPUT_RUN_ID)
+        if not allow_completed_run:
+            raise B19CError("OUTPUT_ALREADY_EXISTS", OUTPUT_RUN_ID)
+        status = load_json(output / "run_status.json", "EXISTING_TARGET_STATUS")
+        if status.get("Status") != "SUCCEEDED":
+            raise B19CError("EXISTING_TARGET_NOT_SUCCEEDED", status.get("Status"))
+        existing_config = output / "00_CONFIG/run_configuration.json"
+        if (
+            not existing_config.is_file()
+            or existing_config.read_bytes() != canonical_bytes(context["TargetConfig"])
+        ):
+            raise B19CError("EXISTING_TARGET_CONFIG_CONFLICT", existing_config.name)
+        completed_recovery = True
     config_path = root / "02_CONFIG/run_configs" / (OUTPUT_RUN_ID + ".json")
     if config_path.exists() and config_path.read_bytes() != canonical_bytes(context["TargetConfig"]):
         raise B19CError("TARGET_CONFIG_CONFLICT", config_path.name)
     context["ConfigPath"] = config_path
+    context["CompletedRecovery"] = completed_recovery
     return context
 
 
@@ -520,7 +533,7 @@ def prepare(root: Path) -> str:
     """Print human-readable dependency evidence, then one final capsule."""
 
     moved, locked = archive_previous_temp(root)
-    context = preflight(root)
+    context = preflight(root, allow_completed_run=True)
     permission = permission_probe(root)
     summary = context["B19BSummary"]
     comparison = summary["Comparison"]
@@ -542,7 +555,7 @@ def prepare(root: Path) -> str:
         if label == "New run configuration":
             state = "IDENTICAL-REPLAY" if path.is_file() else "ABSENT-AS-REQUIRED"
         elif label == "New run output":
-            state = "ABSENT-AS-REQUIRED"
+            state = "EXISTING-SUCCEEDED-RECOVERY" if context["CompletedRecovery"] else "ABSENT-AS-REQUIRED"
         else:
             state = "FOUND"
         print(f"PASS | {label} | {state} | {path}")
@@ -562,7 +575,8 @@ def prepare(root: Path) -> str:
     print(f"WARN | TEMP hygiene | archived={moved} locked_and_retained={locked}")
     capsule = (
         f"B19CP-M{context['ModuleCount']}-R{comparison['Rows']}"
-        f"-P{permission['Checks']}-A{moved}-L{locked}-X0-C0"
+        f"-P{permission['Checks']}-E{int(context['CompletedRecovery'])}"
+        f"-A{moved}-L{locked}-X0-C0"
     )
     print(capsule)
     return capsule
@@ -571,7 +585,7 @@ def prepare(root: Path) -> str:
 def self_test(root: Path) -> str:
     """Test config transformation, diagnostics and installed core programs."""
 
-    context = preflight(root)
+    context = preflight(root, allow_completed_run=True)
     preflight_result = subprocess.run(
         [
             sys.executable,
@@ -639,6 +653,52 @@ def selected_artifact(
     return selected[0]
 
 
+def validate_artifact_coverage(
+    resolved_plan: Mapping[str, object],
+    manifests: Sequence[tuple[Path, dict[str, object]]],
+) -> tuple[set[str], int]:
+    """Require Artifact coverage for every selected Module, not every optional Stage slot."""
+
+    plan = resolved_plan.get("ModulePlan")
+    if not isinstance(plan, list):
+        raise B19CError("TARGET_PLAN_MODULES")
+    expected: set[tuple[str, str, str]] = set()
+    for item in plan:
+        if not isinstance(item, dict):
+            raise B19CError("TARGET_PLAN_MODULE_ITEM")
+        expected.add(
+            (
+                str(item.get("ModuleId")),
+                str(item.get("ModuleVersion")),
+                str(item.get("Stage")),
+            )
+        )
+    actual = {
+        (
+            str(manifest.get("ProducerModuleId")),
+            str(manifest.get("ProducerModuleVersion")),
+            str(manifest.get("Stage")),
+        )
+        for _, manifest in manifests
+    }
+    missing = expected - actual
+    unexpected = actual - expected
+    if missing:
+        first = sorted(missing)[0]
+        raise B19CError("TARGET_MODULE_ARTIFACT_MISSING", f"{first[0]}@{first[1]}-{first[2]}")
+    if unexpected:
+        first = sorted(unexpected)[0]
+        raise B19CError("TARGET_MODULE_ARTIFACT_UNPLANNED", f"{first[0]}@{first[1]}-{first[2]}")
+    expected_stages = {stage for _, _, stage in expected}
+    actual_stages = {stage for _, _, stage in actual}
+    if actual_stages != expected_stages:
+        raise B19CError(
+            "TARGET_STAGE_COVERAGE",
+            f"E{len(expected_stages)}-A{len(actual_stages)}",
+        )
+    return actual_stages, len(expected)
+
+
 def inspect_s1_table(path: Path) -> tuple[int, int]:
     """Count v0.4 rows and valid selected Width evidence."""
 
@@ -663,61 +723,74 @@ def inspect_s1_table(path: Path) -> tuple[int, int]:
 
 
 def execute(root: Path, timeout_seconds: int) -> str:
-    """Persist the one-delta config, execute S0-S7 and validate the new Run."""
+    """Execute a new Run or recover and validate the completed v0.4 V03 Run."""
 
-    context = preflight(root)
-    source_file_count, source_before = tree_digest(context["SourceRoot"])
-    config_disposition = write_json_immutable(context["ConfigPath"], context["TargetConfig"])
-    prepare_result = subprocess.run(
-        [
-            sys.executable,
-            str(context["EnginePreflight"]),
-            "--prepare-run",
-            str(context["ConfigPath"]),
-            "--workspace-root",
-            str(root),
-        ],
-        text=True,
-        capture_output=True,
-        timeout=600,
-        check=False,
-    )
-    fallback_used = 0
-    if prepare_result.returncode != 0 or "C-0" not in prepare_result.stdout:
-        if not is_generic_permission_failure(prepare_result):
-            detail = (prepare_result.stdout + " " + prepare_result.stderr)[-240:]
-            raise B19CError("ENGINE_PREFLIGHT", detail)
-        try:
-            staged_preflight_prepare(
-                root,
-                context["ConfigPath"],
-                context["EnginePreflight"],
-            )
-            fallback_used = 1
-        except StagedPreflightFailure as failure:
-            raise staged_failure_to_error(failure) from failure
+    context = preflight(root, allow_completed_run=True)
     run_root = root / "07_OUTPUT" / OUTPUT_RUN_ID
-    if not run_root.is_dir() or run_root.is_symlink():
-        raise B19CError("PREPARED_RUN_ROOT", run_root.name)
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(context["Executor"]),
-            "--execute-run",
-            str(run_root),
-            "--workspace-root",
-            str(root),
-            "--module-timeout-seconds",
-            str(timeout_seconds),
-        ],
-        text=True,
-        capture_output=True,
-        timeout=max(timeout_seconds * context["ModuleCount"], 3600),
-        check=False,
-    )
-    if result.returncode != 0 or "C-0" not in result.stdout:
-        detail = (result.stdout + " " + result.stderr)[-240:]
-        raise B19CError("STAGE_EXECUTOR", detail)
+    receipt_dir = run_root / "02_DIAGNOSTICS/U22B19C_CONTROLLER"
+    receipt_path = receipt_dir / "b19c_full_golden_replay_summary_v0_5.json"
+    capsule_path = receipt_dir / "B19C_RETURN_CAPSULE_v0_5.txt"
+    if receipt_path.is_file() and capsule_path.is_file():
+        accepted = load_json(receipt_path, "B19C_V05_RECEIPT")
+        capsule = capsule_path.read_text(encoding="utf-8-sig").strip()
+        if accepted.get("Status") != "SUCCEEDED" or not capsule.endswith("C0"):
+            raise B19CError("B19C_V05_RECEIPT_CONFLICT")
+        return capsule
+    source_file_count, source_before = tree_digest(context["SourceRoot"])
+    recovery_used = int(context["CompletedRecovery"])
+    fallback_used = 0
+    if recovery_used:
+        config_disposition = "EXISTING_SUCCEEDED_RUN"
+    else:
+        config_disposition = write_json_immutable(context["ConfigPath"], context["TargetConfig"])
+        prepare_result = subprocess.run(
+            [
+                sys.executable,
+                str(context["EnginePreflight"]),
+                "--prepare-run",
+                str(context["ConfigPath"]),
+                "--workspace-root",
+                str(root),
+            ],
+            text=True,
+            capture_output=True,
+            timeout=600,
+            check=False,
+        )
+        if prepare_result.returncode != 0 or "C-0" not in prepare_result.stdout:
+            if not is_generic_permission_failure(prepare_result):
+                detail = (prepare_result.stdout + " " + prepare_result.stderr)[-240:]
+                raise B19CError("ENGINE_PREFLIGHT", detail)
+            try:
+                staged_preflight_prepare(
+                    root,
+                    context["ConfigPath"],
+                    context["EnginePreflight"],
+                )
+                fallback_used = 1
+            except StagedPreflightFailure as failure:
+                raise staged_failure_to_error(failure) from failure
+        if not run_root.is_dir() or run_root.is_symlink():
+            raise B19CError("PREPARED_RUN_ROOT", run_root.name)
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(context["Executor"]),
+                "--execute-run",
+                str(run_root),
+                "--workspace-root",
+                str(root),
+                "--module-timeout-seconds",
+                str(timeout_seconds),
+            ],
+            text=True,
+            capture_output=True,
+            timeout=max(timeout_seconds * context["ModuleCount"], 3600),
+            check=False,
+        )
+        if result.returncode != 0 or "C-0" not in result.stdout:
+            detail = (result.stdout + " " + result.stderr)[-240:]
+            raise B19CError("STAGE_EXECUTOR", detail)
     status = load_json(run_root / "run_status.json", "TARGET_STATUS")
     if status.get("Status") != "SUCCEEDED":
         raise B19CError("TARGET_STATUS", status.get("Status"))
@@ -727,9 +800,9 @@ def execute(root: Path, timeout_seconds: int) -> str:
     if configuration.get("BindingProfileSha256") != sha256_file(context["ProfilePath"]):
         raise B19CError("TARGET_PROFILE_HASH")
     manifests = artifact_manifests(run_root)
-    stages = {str(manifest.get("Stage")) for _, manifest in manifests}
-    if stages != {"S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"}:
-        raise B19CError("TARGET_STAGE_SET", len(stages))
+    stages, covered_modules = validate_artifact_coverage(resolved, manifests)
+    if covered_modules != context["ModuleCount"]:
+        raise B19CError("TARGET_MODULE_COVERAGE_COUNT", covered_modules)
     s1_manifest_path, _ = selected_artifact(manifests, MODULE_ID, TARGET_VERSION)
     s1_table = s1_manifest_path.parent / "camera_target_reconstruction.csv"
     if not s1_table.is_file():
@@ -758,7 +831,10 @@ def execute(root: Path, timeout_seconds: int) -> str:
         "BindingProfileSha256": sha256_file(context["ProfilePath"]),
         "ModuleCount": context["ModuleCount"],
         "ArtifactCount": len(manifests),
-        "StageCount": len(stages),
+        "StageTaxonomy": ["S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7"],
+        "SelectedStageSet": sorted(stages),
+        "SelectedStageCount": len(stages),
+        "SelectedModuleArtifactCoverage": covered_modules,
         "S1Rows": row_count,
         "SelectedWidthValidRows": width_valid,
         "S1MatchesB19BReplay": True,
@@ -766,20 +842,20 @@ def execute(root: Path, timeout_seconds: int) -> str:
         "SourceRunUnchanged": True,
         "ConfigDisposition": config_disposition,
         "PreflightCliFallbackUsed": bool(fallback_used),
+        "CompletedRunRecoveryUsed": bool(recovery_used),
         "GoldenPromotionApproved": False,
         "NextAction": "OPEN_NEW_S7_REVIEW_PACKAGE_IN_U003_AND_COMPLETE_HUMAN_REVIEW",
     }
-    receipt_dir = run_root / "02_DIAGNOSTICS/U22B19C_CONTROLLER"
     receipt_dir.mkdir(parents=True, exist_ok=True)
-    receipt_path = receipt_dir / "b19c_full_golden_replay_summary.json"
     if receipt_path.exists():
         raise B19CError("B19C_RECEIPT_EXISTS")
     receipt_path.write_bytes(canonical_bytes(summary))
     capsule = (
         f"B19C_N{row_count}-M{context['ModuleCount']}-A{len(manifests)}"
-        f"-S{len(stages)}-W{width_valid}-F{fallback_used}-U1-D1-X0-C0"
+        f"-S{len(stages)}-T8-W{width_valid}-F{fallback_used}-R{recovery_used}"
+        f"-U1-D1-X0-C0"
     )
-    (receipt_dir / "B19C_RETURN_CAPSULE.txt").write_text(capsule + "\n", encoding="utf-8")
+    capsule_path.write_text(capsule + "\n", encoding="utf-8")
     return capsule
 
 
