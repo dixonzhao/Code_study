@@ -1,0 +1,91 @@
+UDP002 U22B19C 全量 Golden Run 执行指南（中文）
+版本：v0.1
+日期：2026-08-25
+
+一、目的
+
+B19C 使用 B19B 已通过真实数据验证的 S1 v0.4 和 Width Binding Profile，完整重跑现有 S0-S7 Pipeline。
+
+本步骤不改变任何分析参数，不新增算法，不修改原 Golden Run。唯一受控变化为：
+
+- CameraTargetContinuityArbitration：v0.3.0 -> v0.4.0；
+- Binding Profile：切换为 B19B 生成并绑定 SHA-256 的 Width Profile。
+
+新 S1 输出必须与 B19B 已验证的 v0.4 重放文件 SHA-256 完全一致，并且必须生成完整 S0-S7 Artifact 与 U003 Review Package。
+
+二、下载位置
+
+将以下两个文件直接放入：
+
+C-CODE\U-UDP002\04_TEMP
+
+1. u002_u22b19c_full_golden_replay_v0_1.py.txt
+2. UDP002_U22B19C_START_HERE_CN_v0_1_2026-08-25.txt
+
+不要改名，不要新建子文件夹。
+
+三、CMD执行
+
+当前目录必须为 C-CODE。
+
+python U-UDP002\04_TEMP\u002_u22b19c_full_golden_replay_v0_1.py.txt --prepare --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b19c_full_golden_replay_v0_1.py.txt --self-test --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b19c_full_golden_replay_v0_1.py.txt --execute --workspace-root U-UDP002
+
+四、输出规则
+
+prepare 会显示多行人工可读检查结果，包括：
+
+- Workspace；
+- B19B Summary；
+- 原 Golden Run；
+- Width Profile；
+- S1 v0.4 Module及资格凭据；
+- Stage Executor；
+- 新配置和新输出是否保持未占用；
+- 唯一允许的版本差异；
+- TEMP清理结果。
+
+prepare 最后一行应为：
+
+B19CP_M...-R...-A...-L...-X0-C0
+
+如果是 C-0，不需要回传 prepare 的多行信息。
+
+self-test 仍只输出机器码；C-0不需要回传。
+
+execute 会完整执行 S0-S7。运行时间取决于现有 Pipeline 和公司电脑负载，请等待命令正常结束，不要中断。
+
+五、只回传 execute 最后一行
+
+成功格式：
+
+B19C_N<Rows>-M<Modules>-A<Artifacts>-S<Stages>-W<WidthValid>-U1-D1-X0-C0
+
+字段：
+
+- N：S1 v0.4输出行数；
+- M：固定Pipeline中的Module数量；
+- A：新Run的Artifact数量；
+- S：完成的Stage数量，成功必须为8；
+- W：有效Selected Width行数；
+- U：S7/U003 Review Package存在；
+- D：新S1表与B19B验证重放SHA-256完全一致；
+- X：阻塞问题数；
+- C：总状态。
+
+失败格式：
+
+B19CE_K<Reason>-D<Detail>_X1-C7
+
+失败时只需原样回传最后一行，不要自行修改程序。
+
+六、成功后的意义
+
+B19C C-0说明：
+
+- U001 -> U002 S0-S7 -> U003 Review Package 的CLI路径已使用S1 v0.4完整贯通；
+- Width证据已进入正式Artifact链，但仍未参与Camera选择；
+- 原Golden Run未被修改；
+- 下一步是用U003打开新Review Package进行人工关闭；
+- 人工关闭后可以冻结CLI Golden Run并开始U002 GUI外壳。
