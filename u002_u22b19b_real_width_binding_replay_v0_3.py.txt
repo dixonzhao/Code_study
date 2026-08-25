@@ -26,7 +26,7 @@ from typing import Iterable, Mapping, Optional, Sequence
 
 
 PROGRAM_ID = "CameraRadar.B19B.RealWidthBindingReplay"
-PROGRAM_VERSION = "0.2.0"
+PROGRAM_VERSION = "0.3.0"
 MODULE_ID = "CameraRadar.S1.CameraTargetContinuityArbitration"
 BASELINE_VERSION = "0.3.0"
 CANDIDATE_VERSION = "0.4.0"
@@ -36,8 +36,8 @@ OUTPUT_RUN_ID = "U22B19B_S1_WIDTH_REAL_REPLAY_V01"
 PROFILE_RELATIVE = PurePosixPath(
     "02_CONFIG/signal_profiles/TC001_camera_radar_width_binding_v0_4.json"
 )
-PROGRAM_NAME = "u002_u22b19b_real_width_binding_replay_v0_2.py.txt"
-GUIDE_NAME = "UDP002_U22B19B_START_HERE_CN_v0_2_2026-08-25.txt"
+PROGRAM_NAME = "u002_u22b19b_real_width_binding_replay_v0_3.py.txt"
+GUIDE_NAME = "UDP002_U22B19B_START_HERE_CN_v0_3_2026-08-25.txt"
 WIDTH_ROLE_BY_DISTANCE = {
     "CAMERA_1_DISTANCE": "CAMERA_1_WIDTH",
     "CAMERA_3_DISTANCE": "CAMERA_3_WIDTH",
@@ -145,8 +145,8 @@ def transfer_paths(root: Path) -> tuple[Path, Path]:
     return paths
 
 
-def archive_previous_temp(root: Path) -> int:
-    """Reversibly move stale top-level TEMP content into A-Archive."""
+def archive_previous_temp(root: Path) -> tuple[int, int]:
+    """Move stale TEMP entries, but do not block on Windows-held files."""
 
     import datetime
 
@@ -154,13 +154,26 @@ def archive_previous_temp(root: Path) -> int:
     keep = {"A-Archive", PROGRAM_NAME, GUIDE_NAME}
     stale = sorted(path for path in temp.iterdir() if path.name not in keep)
     if not stale:
-        return 0
+        return 0, 0
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     destination = temp / "A-Archive" / ("U22B19B_PREPARE_" + stamp)
     destination.mkdir(parents=True, exist_ok=False)
+    moved = 0
+    locked = 0
     for source in stale:
-        shutil.move(str(source), str(destination / source.name))
-    return len(stale)
+        try:
+            shutil.move(str(source), str(destination / source.name))
+            moved += 1
+        except PermissionError:
+            # A file opened by VS Code or antivirus is hygiene debt, not a
+            # reason to reject the immutable analysis dependencies.
+            locked += 1
+    if moved == 0:
+        try:
+            destination.rmdir()
+        except OSError:
+            pass
+    return moved, locked
 
 
 def normalize_can_id(value: object) -> int:
@@ -588,10 +601,10 @@ def preflight(root: Path) -> dict[str, object]:
 def prepare(root: Path) -> str:
     """Clean TEMP and run the complete read-only preflight."""
 
-    moved = archive_previous_temp(root)
+    moved, locked = archive_previous_temp(root)
     context = preflight(root)
     profile = context["ProfileCandidate"]
-    return f"B19BP_A{moved}-B{len(profile['Bindings'])}-X0-C0"
+    return f"B19BP_A{moved}-L{locked}-B{len(profile['Bindings'])}-X0-C0"
 
 
 def self_test(root: Path) -> str:
@@ -710,6 +723,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     except B19BError as error:
         print(f"B19BE_K{error.reason}-D{error.detail}_X1-C7")
+        return 7
+    except PermissionError as error:
+        mode = "PREPARE" if args.prepare else "SELFTEST" if args.self_test else "EXECUTE"
+        filename = Path(str(error.filename)).name if error.filename else "NA"
+        print(f"B19BE_KPERMISSION_{mode}-D{token(filename)}_X1-C7")
         return 7
     except Exception as error:
         print(f"B19BE_KUNEXPECTED-D{token(type(error).__name__)}_X1-C7")
