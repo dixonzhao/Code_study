@@ -1,0 +1,91 @@
+UDP002 U22B13C 公司执行指南
+版本：v0.1
+日期：2026-08-25
+
+一、这一步在做什么
+
+B13C同时完成两个相邻职责：
+
+1. 修正S6 ReviewTrace，使英文权威解释和完整日文解释始终共同保存；
+2. 安装S7 Review Batch Export Module，把完整Candidate Inventory分批导出为U003可读取的复核包。
+
+S7不重新计算Candidate，也不删除Candidate。每批最多40个Candidate；若完整结果超过40个，则生成多个Review Batch。完整Candidate清单、证据、解释和血缘仍保存在总包中。
+
+本次合成验收固定生成85个Candidate，并分成40、40、5三个批次。这用于证明“限制人的单批查看量”不会变成“静默丢弃机器候选”。
+
+二、文件放置
+
+1. 把ZIP内全部17个文件直接解压到：
+   C-CODE\U-UDP002\04_TEMP
+2. 不要放入04_TEMP的子文件夹。
+3. 从C-CODE根目录打开CMD。
+
+注意：本次PREPARE会把04_TEMP中不属于本次17文件活动包的所有文件和文件夹，无损移动到：
+
+   C-CODE\U-UDP002\A-Archive\U22B13C_PREPARE_<timestamp>
+
+不会直接删除历史材料。PREPARE结束后，04_TEMP只保留本次活动包。
+
+三、只执行以下三条CMD命令
+
+PREPARE
+python U-UDP002\04_TEMP\u002_u22b13c_prepare_v0_1.py.txt --workspace-root U-UDP002
+
+SELF-TEST
+python U-UDP002\04_TEMP\u002_u22b13c_package_selftest_v0_1.py.txt --workspace-root U-UDP002
+
+EXECUTE
+python U-UDP002\04_TEMP\u002_u22b13c_acceptance_v0_1.py.txt --workspace-root U-UDP002 --out U-UDP002\07_OUTPUT\U22B13C\01_ACCEPTANCE
+
+四、成功标准
+
+PREPARE应以C-0结束，并满足U0。
+SELF-TEST应出现：UDP002-U22B13C-SELFTEST-PASS-24 C-0
+EXECUTE应出现：B13C N-M2-S6C2-L2-C85-B3-Q85-D1785-Z0-X0 C-0
+
+如果EXECUTE为C-0，只回传最后一行B13C capsule，不必回传SELF-TEST。
+如果任一步出现C-7，立即停止，不要自行修改Module、Contract或Validator，回传完整C-7行。
+
+五、PREPARE capsule重点
+
+F17：本次17个活动文件全部存在且Hash正确
+A<n>：归档了n个非活动TEMP条目
+M2：安装两个Module（修正S6与新S7）
+R<n>：复用了n个字节相同的已安装Module
+V<n>：归档并替换了n个不同内容的旧Module
+C<n>：安装了n个Review Contract
+O<n>：归档了n个既有B13C输出目录
+U0：04_TEMP中不存在本次活动包以外的文件或文件夹
+X0 / C-0：没有阻断错误
+
+六、EXECUTE capsule含义
+
+M2：S6与S7两个Module联合运行
+S6C2：修正后的S6生成2个Candidate，并通过双语Trace检查
+L2：两个S6 Candidate均保留完整English/Japanese LocaleBundle
+C85：S7输入和保存85个完整Candidate
+B3：分成3个Review Batch
+Q85：85个Candidate全部进入且只进入一个Batch
+D1785：三个Batch共导出1785行FrameCount Review Data
+Z0：没有截断或静默丢失Candidate
+X0 / C-0：没有阻断错误
+
+七、输出位置
+
+验收输出：
+U-UDP002\07_OUTPUT\U22B13C\01_ACCEPTANCE
+
+主要查看：
+
+- s7_output\review_batch_index.csv
+- s7_output\complete_candidate_inventory.csv
+- s7_output\candidate_evidence_detail.csv
+- s7_output\module_review_trace.jsonl
+- s7_output\batches\RB001\event_queue.csv
+- s7_output\batches\RB001\review_data.csv
+
+RB002和RB003结构相同。后续正式全视频运行时，U003一次打开一个Batch进行人工复核。
+
+八、范围说明
+
+这是合成生产接口验收，不是TC001全视频运行。它验证S6解释契约、S7分批和U003文件接口；不声明Radar错误或Root Cause。
