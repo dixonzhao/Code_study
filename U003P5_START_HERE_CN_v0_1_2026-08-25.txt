@@ -1,0 +1,104 @@
+U003P5 - 单一Peak Cursor控制区UI验收
+版本：v0.1
+日期：2026-08-25
+
+ExecutionRoot = C-CODE
+WorkspaceRoot = U-UDP003
+TransferRoot = U-UDP003\04_TEMP
+
+一、目标
+
+U003 v0.7已经通过精确CAN Peak验收，但Jump/Pin Peak与Release Peak Pin位于不同窗口，操作不直观。
+
+v0.8只调整UI，不修改任何分析或数据契约：
+
+1. 整个程序只保留一个权威Peak Cursor控制区；
+2. 控制区位于主窗口Event Navigation内；
+3. Jump / Pin Peak与Release Pin并排；
+4. 视频底部和CAN子窗口不再重复这组控制；
+5. CAN子窗口只显示Peak Pin或Video Follow状态。
+
+二、下载文件
+
+将以下3个文件直接下载到：
+
+C-CODE\U-UDP003\04_TEMP
+
+- u003_evidence_review_workbench_v0_8.py.txt
+- u003_peak_cursor_ui_acceptance_gate_v0_4.py.txt
+- U003P5_START_HERE_CN_v0_1_2026-08-25.txt
+
+三、CMD存在性检查
+
+从C-CODE根目录运行：
+
+dir U-UDP003\04_TEMP\u003_evidence_review_workbench_v0_8.py.txt
+dir U-UDP003\04_TEMP\u003_peak_cursor_ui_acceptance_gate_v0_4.py.txt
+dir U-UDP003\01_PROGRAMS
+if exist U-UDP003\04_TEMP\u003_evidence_review_workbench_v0_8.py.txt (echo U003P5-SOURCE-OK) else (echo U003P5-SOURCE-MISSING)
+if exist U-UDP003\04_TEMP\u003_peak_cursor_ui_acceptance_gate_v0_4.py.txt (echo U003P5-GATE-OK) else (echo U003P5-GATE-MISSING)
+
+任意一项File Not Found时停止。
+
+四、安装v0.8
+
+不覆盖v0.7：
+
+copy /Y U-UDP003\04_TEMP\u003_evidence_review_workbench_v0_8.py.txt U-UDP003\01_PROGRAMS\u003_evidence_review_workbench_v0_8.py
+
+dir U-UDP003\01_PROGRAMS\u003_evidence_review_workbench_v0_8.py
+
+五、自测和独立Gate
+
+python U-UDP003\01_PROGRAMS\u003_evidence_review_workbench_v0_8.py --self-test
+python U-UDP003\04_TEMP\u003_peak_cursor_ui_acceptance_gate_v0_4.py.txt --self-test
+
+if not exist U-UDP003\03_CASES\TC001_20260422\02_OUTPUT\U003P5_PEAK_CURSOR_UI_ACCEPTANCE mkdir U-UDP003\03_CASES\TC001_20260422\02_OUTPUT\U003P5_PEAK_CURSOR_UI_ACCEPTANCE
+
+python U-UDP003\04_TEMP\u003_peak_cursor_ui_acceptance_gate_v0_4.py.txt --source U-UDP003\01_PROGRAMS\u003_evidence_review_workbench_v0_8.py --out U-UDP003\03_CASES\TC001_20260422\02_OUTPUT\U003P5_PEAK_CURSOR_UI_ACCEPTANCE
+
+type U-UDP003\03_CASES\TC001_20260422\02_OUTPUT\U003P5_PEAK_CURSOR_UI_ACCEPTANCE\UDP003P5_RETURN_CAPSULE.txt
+
+成功标准：
+
+U003P5 N-I1-S1-A1-O1-D26-X0 C-0
+
+六、GUI目视验收
+
+启动：
+
+python U-UDP003\01_PROGRAMS\u003_evidence_review_workbench_v0_8.py
+
+加载B12的review_queue.csv和review_data.csv，使用已确认的视频与FrameCount映射。
+
+检查：
+
+1. 主窗口Event Navigation内只有一个Peak Cursor框。
+2. Jump / Pin Peak与Release Pin在该框内并排。
+3. 视频底部没有第二组Peak Pin按钮。
+4. CAN子窗口没有第二组Peak Pin按钮。
+5. 选择C001后自动Pin到41450。
+6. 点击Release Pin后表格恢复Video Follow。
+7. 点击Jump / Pin Peak后表格重新固定到41450。
+
+七、回传
+
+只回传：
+
+U003P5_RETURN_CAPSULE.txt中的U003P5行
+U003P6 N-G1-O1-C1-J1-R1-X0 C-0
+
+含义：
+
+- G1：GUI正常打开；
+- O1：全程序只有一个权威Peak Cursor控制区；
+- C1：两个相反操作并排；
+- J1：Jump/Pin正常；
+- R1：Release正常；
+- X0/C-0：无失败。
+
+失败时对应项改0，X写失败项数，C-7，最多增加3条短MEMO。
+
+八、下一步
+
+P5/P6通过后，冻结v0.8源码并重建U003单文件EXE。不要继续在旧v0.5-v0.7上增加功能。
