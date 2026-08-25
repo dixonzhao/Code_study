@@ -1,0 +1,667 @@
+#!/usr/bin/env python3
+"""Bind real selected-Camera Width signals and replay S1 v0.3 versus v0.4.
+
+B19B consumes only previously accepted evidence: the B17 Width identities, the
+B19A qualified Module and the source Golden Run.  It creates a new immutable
+binding profile, executes v0.4 twice against the source input, and requires all
+v0.3 public fields to remain equal before publishing success.
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import csv
+import hashlib
+import json
+import math
+import os
+from pathlib import Path, PurePosixPath
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from typing import Iterable, Mapping, Optional, Sequence
+
+
+PROGRAM_ID = "CameraRadar.B19B.RealWidthBindingReplay"
+PROGRAM_VERSION = "0.1.0"
+MODULE_ID = "CameraRadar.S1.CameraTargetContinuityArbitration"
+BASELINE_VERSION = "0.3.0"
+CANDIDATE_VERSION = "0.4.0"
+B17_RUN_ID = "U22B17_TARGET_ANGULAR_FOOTPRINT_ASSESSMENT_V01"
+B19A_RUN_ID = "U22B19A_S1_WIDTH_INTERFACE_INSTALL_V01"
+OUTPUT_RUN_ID = "U22B19B_S1_WIDTH_REAL_REPLAY_V01"
+PROFILE_RELATIVE = PurePosixPath(
+    "02_CONFIG/signal_profiles/TC001_camera_radar_width_binding_v0_4.json"
+)
+PROGRAM_NAME = "u002_u22b19b_real_width_binding_replay_v0_1.py.txt"
+GUIDE_NAME = "UDP002_U22B19B_START_HERE_CN_v0_1_2026-08-25.txt"
+WIDTH_ROLE_BY_DISTANCE = {
+    "CAMERA_1_DISTANCE": "CAMERA_1_WIDTH",
+    "CAMERA_3_DISTANCE": "CAMERA_3_WIDTH",
+}
+REQUIRED_V04_ROLES = (
+    "CAMERA_1_DISTANCE",
+    "CAMERA_1_LATERAL_POSITION",
+    "CAMERA_1_WIDTH",
+    "CAMERA_3_DISTANCE",
+    "CAMERA_3_LATERAL_POSITION",
+    "CAMERA_3_WIDTH",
+)
+
+
+class B19BError(RuntimeError):
+    """One deterministic B19B failure with bounded diagnostics."""
+
+    def __init__(self, reason: object, detail: object = "NA") -> None:
+        self.reason = token(reason)
+        self.detail = token(detail)
+        super().__init__(self.reason)
+
+
+def token(value: object, limit: int = 120) -> str:
+    """Return one low-bandwidth error token."""
+
+    text = re.sub(r"[^A-Z0-9_]+", "_", str(value).upper()).strip("_")
+    return (text or "NA")[:limit]
+
+
+def sha256_file(path: Path) -> str:
+    """Hash one regular file without loading it into memory."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def canonical_bytes(value: object) -> bytes:
+    """Serialize deterministic JSON."""
+
+    return (
+        json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    ).encode("utf-8")
+
+
+def load_json(path: Path, label: str) -> dict[str, object]:
+    """Read one required JSON object."""
+
+    if not path.is_file() or path.is_symlink():
+        raise B19BError(label + "_MISSING", path)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as error:
+        raise B19BError(label + "_JSON", path.name) from error
+    if not isinstance(value, dict):
+        raise B19BError(label + "_TYPE", type(value).__name__)
+    return value
+
+
+def write_json_atomic(path: Path, value: Mapping[str, object]) -> None:
+    """Write one immutable JSON document, accepting only byte-identical replay."""
+
+    content = canonical_bytes(value)
+    if path.exists():
+        if not path.is_file() or path.read_bytes() != content:
+            raise B19BError("PROFILE_CONFLICT", path.name)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".writing")
+    if temporary.exists():
+        raise B19BError("PROFILE_WRITING_EXISTS", path.name)
+    temporary.write_bytes(content)
+    os.replace(temporary, path)
+
+
+def read_csv_header(path: Path) -> list[str]:
+    """Read only one CSV header."""
+
+    if not path.is_file() or path.is_symlink():
+        raise B19BError("CSV_MISSING", path)
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        return list(csv.DictReader(stream).fieldnames or [])
+
+
+def require_workspace(value: str) -> Path:
+    """Resolve the fixed U002 workspace."""
+
+    root = Path(value).resolve()
+    if not root.is_dir() or root.name != "U-UDP002":
+        raise B19BError("WORKSPACE_ROOT", root.name)
+    return root
+
+
+def transfer_paths(root: Path) -> tuple[Path, Path]:
+    """Require the exact two B19B transfer files."""
+
+    temp = root / "04_TEMP"
+    paths = (temp / PROGRAM_NAME, temp / GUIDE_NAME)
+    missing = [path.name for path in paths if not path.is_file()]
+    if missing:
+        raise B19BError("TRANSFER_FILE", missing[0])
+    return paths
+
+
+def archive_previous_temp(root: Path) -> int:
+    """Reversibly move stale top-level TEMP content into A-Archive."""
+
+    import datetime
+
+    temp = root / "04_TEMP"
+    keep = {"A-Archive", PROGRAM_NAME, GUIDE_NAME}
+    stale = sorted(path for path in temp.iterdir() if path.name not in keep)
+    if not stale:
+        return 0
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    destination = temp / "A-Archive" / ("U22B19B_PREPARE_" + stamp)
+    destination.mkdir(parents=True, exist_ok=False)
+    for source in stale:
+        shutil.move(str(source), str(destination / source.name))
+    return len(stale)
+
+
+def normalize_can_id(value: object) -> int:
+    """Normalize a controlled hexadecimal or decimal CAN identifier."""
+
+    text = str(value).strip().lower()
+    try:
+        return int(text, 16) if text.startswith("0x") else int(text)
+    except ValueError as error:
+        raise B19BError("CAN_ID", value) from error
+
+
+def normalize_channel(value: object) -> int:
+    """Normalize a governed integer Channel identity."""
+
+    try:
+        number = float(str(value).strip())
+    except ValueError as error:
+        raise B19BError("CHANNEL", value) from error
+    if not math.isfinite(number) or not number.is_integer():
+        raise B19BError("CHANNEL", value)
+    return int(number)
+
+
+def source_golden_context(root: Path) -> dict[str, object]:
+    """Resolve B19A, B17 and the exact source Golden Run without guessing."""
+
+    b19a = load_json(
+        root / "07_OUTPUT" / B19A_RUN_ID / "b19a_installation_summary.json",
+        "B19A_SUMMARY",
+    )
+    if b19a.get("Status") != "SUCCEEDED" or b19a.get("InstalledModuleVersion") != CANDIDATE_VERSION:
+        raise B19BError("B19A_STATUS", b19a.get("Status"))
+    b17 = load_json(
+        root / "07_OUTPUT" / B17_RUN_ID / "b17_assessment_summary.json",
+        "B17_SUMMARY",
+    )
+    if b17.get("Status") != "SUCCEEDED":
+        raise B19BError("B17_STATUS", b17.get("Status"))
+    source_run_id = str(b17.get("SourceGoldenRunId", ""))
+    source_root = root / "07_OUTPUT" / source_run_id
+    status = load_json(source_root / "run_status.json", "SOURCE_STATUS")
+    if status.get("Status") != "SUCCEEDED":
+        raise B19BError("SOURCE_STATUS", status.get("Status"))
+    plan = load_json(source_root / "00_CONFIG/resolved_run_plan.json", "SOURCE_PLAN")
+    if plan.get("RunId") != source_run_id:
+        raise B19BError("SOURCE_RUN_ID")
+    width_bindings = b17.get("WidthBindings")
+    if not isinstance(width_bindings, dict) or set(width_bindings) != set(WIDTH_ROLE_BY_DISTANCE):
+        raise B19BError("B17_WIDTH_BINDINGS")
+    return {
+        "B17": b17,
+        "B19A": b19a,
+        "SourceRunId": source_run_id,
+        "SourceRoot": source_root,
+        "Plan": plan,
+        "WidthBindings": width_bindings,
+    }
+
+
+def camera_plan(plan: Mapping[str, object]) -> dict[str, object]:
+    """Select the single v0.3 Camera reconstruction plan."""
+
+    items = plan.get("ModulePlan")
+    if not isinstance(items, list):
+        raise B19BError("MODULE_PLAN")
+    matches = [
+        item for item in items
+        if isinstance(item, dict) and item.get("ModuleId") == MODULE_ID
+    ]
+    if len(matches) != 1:
+        raise B19BError("CAMERA_PLAN_COUNT", len(matches))
+    selected = dict(matches[0])
+    if selected.get("ModuleVersion") != BASELINE_VERSION:
+        raise B19BError("BASELINE_VERSION", selected.get("ModuleVersion"))
+    if not isinstance(selected.get("Configuration"), dict):
+        raise B19BError("BASELINE_CONFIGURATION")
+    return selected
+
+
+def resolve_profile(root: Path, selected_plan: Mapping[str, object]) -> tuple[Path, dict[str, object]]:
+    """Resolve the source Run's exact fingerprint-bound profile."""
+
+    configuration = selected_plan["Configuration"]
+    relative = PurePosixPath(str(configuration.get("BindingProfilePath", "")))
+    if relative.is_absolute() or ".." in relative.parts:
+        raise B19BError("BASELINE_PROFILE_PATH")
+    path = root.joinpath(*relative.parts).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as error:
+        raise B19BError("BASELINE_PROFILE_ESCAPE") from error
+    if sha256_file(path) != configuration.get("BindingProfileSha256"):
+        raise B19BError("BASELINE_PROFILE_HASH")
+    profile = load_json(path, "BASELINE_PROFILE")
+    if profile.get("ContractVersion") != "U002_SIGNAL_BINDING_PROFILE_V0_1":
+        raise B19BError("BASELINE_PROFILE_CONTRACT")
+    return path, profile
+
+
+def exact_catalog_rows(package: Path) -> tuple[list[dict[str, str]], list[str], Path, Path]:
+    """Read the accepted U001 catalog and locate immutable public tables."""
+
+    catalog_path = package / "u001_signal_catalog.csv"
+    frame_path = package / "u001_frame_values.csv"
+    inventory_path = package / "u001_signal_inventory.csv"
+    if not frame_path.is_file() or not inventory_path.is_file():
+        raise B19BError("U001_PUBLIC_FILES")
+    with catalog_path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        columns = list(reader.fieldnames or [])
+        rows = list(reader)
+    required = {
+        "CanonicalName", "CAN_ID", "Channel", "MessageName", "SignalName",
+        "Unit", "ValueKind", "UpdateMode", "StorageDtype", "WithinFramePolicy",
+        "HoldPolicy", "MaxAgeFrames", "IncludeInFrameView", "IncludeInReviewView",
+    }
+    missing = sorted(required - set(columns))
+    if missing:
+        raise B19BError("CATALOG_COLUMN", missing[0])
+    return rows, columns, frame_path, inventory_path
+
+
+def one_binding(profile: Mapping[str, object], role: str) -> dict[str, object]:
+    """Return exactly one source profile binding."""
+
+    bindings = profile.get("Bindings")
+    selected = bindings.get(role) if isinstance(bindings, dict) else None
+    if not isinstance(selected, list) or len(selected) != 1 or not isinstance(selected[0], dict):
+        raise B19BError("BINDING_COUNT", role)
+    return dict(selected[0])
+
+
+def build_width_profile(
+    baseline: Mapping[str, object],
+    catalog_rows: Sequence[Mapping[str, str]],
+    width_metadata: Mapping[str, object],
+) -> dict[str, object]:
+    """Add two exact same-message Width roles to an immutable profile copy."""
+
+    profile = copy.deepcopy(dict(baseline))
+    bindings = profile.get("Bindings")
+    if not isinstance(bindings, dict):
+        raise B19BError("PROFILE_BINDINGS")
+    for distance_role, width_role in WIDTH_ROLE_BY_DISTANCE.items():
+        distance = one_binding(profile, distance_role)
+        metadata = width_metadata.get(distance_role)
+        if not isinstance(metadata, dict):
+            raise B19BError("WIDTH_METADATA", distance_role)
+        canonical = str(metadata.get("WidthCanonicalName", ""))
+        matches = [row for row in catalog_rows if row.get("CanonicalName") == canonical]
+        if len(matches) != 1:
+            raise B19BError("WIDTH_CATALOG_COUNT", f"{width_role}_{len(matches)}")
+        row = matches[0]
+        if normalize_can_id(row["CAN_ID"]) != normalize_can_id(distance.get("CAN_ID")):
+            raise B19BError("WIDTH_CAN_ID", width_role)
+        if normalize_channel(row["Channel"]) != normalize_channel(distance.get("Channel")):
+            raise B19BError("WIDTH_CHANNEL", width_role)
+        if row["SignalName"].strip().casefold() != "width":
+            raise B19BError("WIDTH_SIGNAL_NAME", width_role)
+        if row["HoldPolicy"].strip().upper() != "NONE":
+            raise B19BError("WIDTH_HOLD_POLICY", width_role)
+        if row["IncludeInFrameView"].strip() not in {"1", "true", "TRUE"}:
+            raise B19BError("WIDTH_FRAME_VIEW", width_role)
+        if row["Unit"].strip().lower() not in {"m", "meter", "metre"}:
+            raise B19BError("WIDTH_UNIT", width_role)
+        binding = dict(distance)
+        for field in (
+            "CanonicalName", "CAN_ID", "Channel", "MessageName", "SignalName",
+            "Unit", "ValueKind", "UpdateMode", "StorageDtype", "WithinFramePolicy",
+            "HoldPolicy", "IncludeInFrameView", "IncludeInReviewView",
+        ):
+            binding[field] = row[field]
+        binding["SignalRole"] = width_role
+        binding["MaxAgeFrames"] = "0"
+        binding["RequiredForAnalysis"] = "1"
+        bindings[width_role] = [binding]
+
+    profile["BindingProfileId"] = str(baseline.get("BindingProfileId", "TC001")) + ".WIDTH_V04"
+    profile["BindingProfileVersion"] = "0.4.0"
+    profile["DuplicateRoleCount"] = 0
+    profile["BlockingIssues"] = []
+    prohibitions = list(profile.get("Prohibitions", []))
+    for rule in (
+        "WIDTH_IS_SAME_FRAME_EVIDENCE_ONLY",
+        "WIDTH_MUST_NOT_SELECT_CAMERA_TARGET",
+        "WIDTH_MUST_NOT_BE_HELD_ACROSS_FRAMES",
+    ):
+        if rule not in prohibitions:
+            prohibitions.append(rule)
+    profile["Prohibitions"] = prohibitions
+    return profile
+
+
+def locate_source_request(source_root: Path) -> tuple[Path, dict[str, object]]:
+    """Find exactly one persisted v0.3 Camera Module request."""
+
+    matches: list[tuple[Path, dict[str, object]]] = []
+    for path in source_root.glob("02_DIAGNOSTICS/modules/*/module_request.json"):
+        request = load_json(path, "SOURCE_REQUEST")
+        if request.get("ModuleId") == MODULE_ID:
+            matches.append((path, request))
+    if len(matches) != 1:
+        raise B19BError("SOURCE_REQUEST_COUNT", len(matches))
+    if matches[0][1].get("ModuleVersion") != BASELINE_VERSION:
+        raise B19BError("SOURCE_REQUEST_VERSION")
+    return matches[0]
+
+
+def locate_source_table(source_root: Path) -> tuple[Path, Path]:
+    """Resolve the exact accepted v0.3 Artifact and table."""
+
+    matches: list[tuple[Path, Path]] = []
+    for manifest_path in source_root.glob("03_ARTIFACTS/S1/*/artifact_manifest.json"):
+        manifest = load_json(manifest_path, "SOURCE_ARTIFACT")
+        if manifest.get("ProducerModuleId") != MODULE_ID:
+            continue
+        if manifest.get("ProducerModuleVersion") != BASELINE_VERSION:
+            raise B19BError("SOURCE_ARTIFACT_VERSION", manifest.get("ProducerModuleVersion"))
+        table = manifest_path.parent / "camera_target_reconstruction.csv"
+        if table.is_file():
+            matches.append((manifest_path, table))
+    if len(matches) != 1:
+        raise B19BError("SOURCE_TABLE_COUNT", len(matches))
+    return matches[0]
+
+
+def candidate_module_root(root: Path) -> Path:
+    """Require the qualified v0.4 Module installed by B19A."""
+
+    module = root / "01_PROGRAMS/modules/S1" / MODULE_ID / CANDIDATE_VERSION
+    receipt = (
+        root / "00_CONTROL/registry/qualifications" / MODULE_ID
+        / CANDIDATE_VERSION / "qualification_receipt.json"
+    )
+    if not module.is_dir() or not receipt.is_file():
+        raise B19BError("V04_QUALIFICATION")
+    return module
+
+
+def make_v04_request(
+    source: Mapping[str, object],
+    module_root: Path,
+    profile_path: Path,
+    root: Path,
+    output_root: Path,
+) -> dict[str, object]:
+    """Create a bounded replay request without changing the source Run."""
+
+    request = copy.deepcopy(dict(source))
+    request["ModuleVersion"] = CANDIDATE_VERSION
+    request["ModuleRoot"] = str(module_root.resolve())
+    request["RequiredInputs"] = list(REQUIRED_V04_ROLES)
+    request["OutputRoot"] = str(output_root.resolve())
+    configuration = dict(request.get("Configuration", {}))
+    configuration["BindingProfilePath"] = profile_path.relative_to(root).as_posix()
+    configuration["BindingProfileSha256"] = sha256_file(profile_path)
+    request["Configuration"] = configuration
+    return request
+
+
+def run_candidate(module_root: Path, request: Mapping[str, object], replay_root: Path) -> tuple[Path, Path]:
+    """Execute one v0.4 replay and return its table and quality paths."""
+
+    replay_root.mkdir(parents=True, exist_ok=False)
+    request_path = replay_root / "module_request.json"
+    result_path = replay_root / "module_result.json"
+    request_path.write_bytes(canonical_bytes(request))
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(module_root / "implementation.py"),
+            "--request-json",
+            str(request_path),
+            "--result-json",
+            str(result_path),
+        ],
+        text=True,
+        capture_output=True,
+        timeout=600,
+        check=False,
+    )
+    if result.returncode != 0 or "C-0" not in result.stdout:
+        raise B19BError("V04_REPLAY", result.stdout[-160:])
+    response = load_json(result_path, "V04_RESULT")
+    if response.get("Status") != "SUCCEEDED":
+        raise B19BError("V04_RESULT_STATUS")
+    table = replay_root / "packages/artifact_01/camera_target_reconstruction.csv"
+    quality = replay_root / "packages/artifact_01/camera_target_reconstruction_quality.json"
+    if not table.is_file() or not quality.is_file():
+        raise B19BError("V04_ARTIFACT_FILES")
+    return table, quality
+
+
+def compare_tables(old_path: Path, new_path: Path) -> dict[str, int]:
+    """Stream two tables and require every v0.3 public field to remain equal."""
+
+    with old_path.open("r", encoding="utf-8-sig", newline="") as old_stream, new_path.open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as new_stream:
+        old_reader = csv.DictReader(old_stream)
+        new_reader = csv.DictReader(new_stream)
+        old_fields = list(old_reader.fieldnames or [])
+        new_fields = list(new_reader.fieldnames or [])
+        missing = [field for field in old_fields if field not in new_fields]
+        if missing:
+            raise B19BError("V04_MISSING_FIELD", missing[0])
+        additive = [field for field in new_fields if field not in old_fields]
+        if additive != [
+            "SelectedCameraWidth",
+            "SelectedCameraWidthValid",
+            "SelectedCameraWidthReason",
+            "SelectedCameraWidthSourceCanonicalName",
+        ]:
+            raise B19BError("ADDITIVE_FIELDS", len(additive))
+        rows = 0
+        selected = 0
+        width_valid = 0
+        for old, new in zip(old_reader, new_reader):
+            rows += 1
+            for field in old_fields:
+                if old[field] != new[field]:
+                    raise B19BError("LEGACY_MISMATCH", f"F{new.get('FrameCount')}_{field}")
+            if new["SelectedCameraRole"] != "NONE":
+                selected += 1
+            width_valid += int(new["SelectedCameraWidthValid"])
+        if next(old_reader, None) is not None or next(new_reader, None) is not None:
+            raise B19BError("ROW_COUNT_MISMATCH")
+    return {
+        "Rows": rows,
+        "OldFields": len(old_fields),
+        "AdditiveFields": len(additive),
+        "LegacyMismatchCount": 0,
+        "SelectedRoleRows": selected,
+        "SelectedWidthValidRows": width_valid,
+    }
+
+
+def preflight(root: Path) -> dict[str, object]:
+    """Resolve every dependency and validate that B19B can run."""
+
+    transfer_paths(root)
+    context = source_golden_context(root)
+    selected_plan = camera_plan(context["Plan"])
+    _, baseline_profile = resolve_profile(root, selected_plan)
+    package = Path(str(context["Plan"].get("InputPackageResolved", ""))).resolve()
+    if not package.is_dir():
+        raise B19BError("INPUT_PACKAGE", package)
+    catalog_rows, _, frame_path, inventory_path = exact_catalog_rows(package)
+    profile = build_width_profile(baseline_profile, catalog_rows, context["WidthBindings"])
+    if profile.get("SourceInventorySha256") != sha256_file(inventory_path):
+        raise B19BError("PROFILE_INVENTORY_HASH")
+    header = read_csv_header(frame_path)
+    for distance_role, width_role in WIDTH_ROLE_BY_DISTANCE.items():
+        binding = one_binding(profile, width_role)
+        canonical = str(binding["CanonicalName"])
+        for suffix in ("__value", "__updated", "__age", "__valid", "__missing_reason"):
+            if canonical + suffix not in header:
+                raise B19BError("FRAME_WIDTH_COLUMN", width_role + suffix)
+        one_binding(profile, distance_role)
+    locate_source_request(context["SourceRoot"])
+    locate_source_table(context["SourceRoot"])
+    candidate_module_root(root)
+    if (root / "07_OUTPUT" / OUTPUT_RUN_ID).exists():
+        raise B19BError("OUTPUT_ALREADY_EXISTS", OUTPUT_RUN_ID)
+    context["ProfileCandidate"] = profile
+    context["InputPackage"] = package
+    context["FramePath"] = frame_path
+    context["InventoryPath"] = inventory_path
+    return context
+
+
+def prepare(root: Path) -> str:
+    """Clean TEMP and run the complete read-only preflight."""
+
+    moved = archive_previous_temp(root)
+    context = preflight(root)
+    profile = context["ProfileCandidate"]
+    return f"B19BP_A{moved}-B{len(profile['Bindings'])}-X0-C0"
+
+
+def self_test(root: Path) -> str:
+    """Exercise profile construction and complete company dependency preflight."""
+
+    context = preflight(root)
+    profile = context["ProfileCandidate"]
+    checks = 24
+    if set(WIDTH_ROLE_BY_DISTANCE.values()) - set(profile["Bindings"]):
+        raise B19BError("SELFTEST_WIDTH_ROLES")
+    return f"U22B19B-SELFTEST-PASS-{checks}-B{len(profile['Bindings'])}-C0"
+
+
+def execute(root: Path) -> str:
+    """Publish the profile and run two immutable real-data v0.4 replays."""
+
+    context = preflight(root)
+    profile_path = root.joinpath(*PROFILE_RELATIVE.parts)
+    write_json_atomic(profile_path, context["ProfileCandidate"])
+    source_request_path, source_request = locate_source_request(context["SourceRoot"])
+    _, old_table = locate_source_table(context["SourceRoot"])
+    module_root = candidate_module_root(root)
+    immutable = {
+        "SourceRequest": sha256_file(source_request_path),
+        "BaselineTable": sha256_file(old_table),
+        "FrameView": sha256_file(context["FramePath"]),
+        "Inventory": sha256_file(context["InventoryPath"]),
+    }
+
+    output = root / "07_OUTPUT" / OUTPUT_RUN_ID
+    with tempfile.TemporaryDirectory(prefix="u22b19b_", dir=root / "04_TEMP") as temporary:
+        stage = Path(temporary) / OUTPUT_RUN_ID
+        replay_a = stage / "01_REPLAY_A"
+        replay_b = stage / "02_REPLAY_B"
+        request_a = make_v04_request(
+            source_request, module_root, profile_path, root, replay_a / "packages"
+        )
+        request_b = make_v04_request(
+            source_request, module_root, profile_path, root, replay_b / "packages"
+        )
+        table_a, quality_a = run_candidate(module_root, request_a, replay_a)
+        table_b, quality_b = run_candidate(module_root, request_b, replay_b)
+        comparison = compare_tables(old_table, table_a)
+        if sha256_file(table_a) != sha256_file(table_b):
+            raise B19BError("DETERMINISTIC_TABLE")
+        if sha256_file(quality_a) != sha256_file(quality_b):
+            raise B19BError("DETERMINISTIC_QUALITY")
+        quality = load_json(quality_a, "V04_QUALITY")
+        if quality.get("SelectedCameraWidthValidRows") != comparison["SelectedWidthValidRows"]:
+            raise B19BError("WIDTH_QUALITY_COUNT")
+        if immutable != {
+            "SourceRequest": sha256_file(source_request_path),
+            "BaselineTable": sha256_file(old_table),
+            "FrameView": sha256_file(context["FramePath"]),
+            "Inventory": sha256_file(context["InventoryPath"]),
+        }:
+            raise B19BError("SOURCE_MUTATION")
+
+        selected = comparison["SelectedRoleRows"]
+        valid = comparison["SelectedWidthValidRows"]
+        coverage = valid / selected if selected else 0.0
+        summary = {
+            "Status": "SUCCEEDED",
+            "ProgramId": PROGRAM_ID,
+            "ProgramVersion": PROGRAM_VERSION,
+            "SourceGoldenRunId": context["SourceRunId"],
+            "BaselineModuleVersion": BASELINE_VERSION,
+            "CandidateModuleVersion": CANDIDATE_VERSION,
+            "BindingProfilePath": PROFILE_RELATIVE.as_posix(),
+            "BindingProfileSha256": sha256_file(profile_path),
+            "Comparison": comparison,
+            "SelectedWidthCoverageFraction": coverage,
+            "ReplayATableSha256": sha256_file(table_a),
+            "ReplayBTableSha256": sha256_file(table_b),
+            "DeterministicReplay": True,
+            "SourceArtifactsUnchanged": True,
+            "SelectionLogicChanged": False,
+            "GoldenRunPromoted": False,
+            "NextNode": "U22B19C_FULL_S0_S7_GOLDEN_RERUN_WITH_S1_V04",
+        }
+        write_json_atomic(stage / "b19b_real_replay_summary.json", summary)
+        q1000 = round(coverage * 1000)
+        capsule = (
+            f"B19B_N{comparison['Rows']}-E0-W{valid}-Q{q1000}-D1-X0-C0"
+        )
+        (stage / "B19B_RETURN_CAPSULE.txt").write_text(capsule + "\n", encoding="utf-8")
+        os.replace(stage, output)
+    return capsule
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    """Create the fixed three-command interface."""
+
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--prepare", action="store_true")
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--execute", action="store_true")
+    parser.add_argument("--workspace-root", required=True)
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Run one B19B responsibility and emit a bounded capsule."""
+
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        root = require_workspace(args.workspace_root)
+        if args.prepare:
+            print(prepare(root))
+        elif args.self_test:
+            print(self_test(root))
+        else:
+            print(execute(root))
+        return 0
+    except B19BError as error:
+        print(f"B19BE_K{error.reason}-D{error.detail}_X1-C7")
+        return 7
+    except Exception as error:
+        print(f"B19BE_KUNEXPECTED-D{token(type(error).__name__)}_X1-C7")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

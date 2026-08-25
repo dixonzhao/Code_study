@@ -1,0 +1,84 @@
+UDP002 U22B19B 公司端执行指南（中文）
+版本：v0.1
+日期：2026-08-25
+
+一、这一步在做什么
+
+B19B 不修改 Camera 目标选择算法。
+
+它使用 B17 已验收的真实 Width 信号身份，生成一份新的、带 SHA-256 指纹的 Signal Binding Profile；然后在同一个 TC001 输入上：
+
+1. 保留原 S1 v0.3 输出作为基准；
+2. 使用已通过 B19A 资格验收的 S1 v0.4 运行两次；
+3. 要求 v0.3 的全部旧字段逐行、逐值完全不变；
+4. 要求 v0.4 新增 Width 字段，并要求两次 v0.4 输出完全一致；
+5. 不覆盖、不修改旧 Golden Run，也不在本步骤提升正式版本。
+
+通过后，下一节点才是 B19C：使用 S1 v0.4 完整重跑 S0-S7 Golden Run。
+
+二、下载文件
+
+把以下两个文件直接放入：
+
+C-CODE\U-UDP002\04_TEMP
+
+文件：
+
+1. u002_u22b19b_real_width_binding_replay_v0_1.py.txt
+2. UDP002_U22B19B_START_HERE_CN_v0_1_2026-08-25.txt
+
+不要改文件名。不要把文件放入新的子文件夹。
+
+三、执行环境
+
+使用 Windows CMD。
+当前目录必须是 C-CODE。
+
+四、只执行以下三行
+
+python U-UDP002\04_TEMP\u002_u22b19b_real_width_binding_replay_v0_1.py.txt --prepare --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b19b_real_width_binding_replay_v0_1.py.txt --self-test --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b19b_real_width_binding_replay_v0_1.py.txt --execute --workspace-root U-UDP002
+
+说明：
+
+- prepare 会把 04_TEMP 顶层的旧文件可逆移动到 A-Archive，只保留本次两个文件。
+- self-test 成功后不需要手动回传。
+- execute 会读取真实 TC001 Artifact，执行两次 S1 v0.4；运行时间可能为数分钟。
+- 不要重复执行成功的 execute；输出目录采用固定 Run ID，重复运行会 fail-close。
+
+五、需要回传什么
+
+只回传 execute 最后一行。
+
+成功格式：
+
+B19B_N<Rows>-E0-W<SelectedWidthValidRows>-Q<CoveragePerThousand>-D1-X0-C0
+
+字段：
+
+- N：参与逐行对照的真实数据行数；
+- E：旧字段不一致数量，成功必须为 0；
+- W：已选 Camera 且 Width 有效的行数；
+- Q：Width 覆盖率乘以 1000；
+- D：两次 v0.4 重放完全一致，成功为 1；
+- X：阻塞问题数，成功为 0；
+- C：总状态，成功为 0。
+
+失败格式：
+
+B19BE_K<Reason>-D<Detail>_X1-C7
+
+失败时只需原样回传这一行，不要自行修改程序。
+
+六、成功标准
+
+同时满足：
+
+- E0：v0.3 的旧输出字段零变化；
+- D1：两次 v0.4 输出确定一致；
+- W 大于 0；
+- Q 大于 0；
+- X0-C0。
+
+本节点只证明 Width 接口在真实数据上接入成功且不改变旧选择逻辑；它不证明 Width 已参与 Camera 选择，也不重新解释业务结论。
