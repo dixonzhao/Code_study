@@ -1,0 +1,80 @@
+UDP002 U22B20B Thin GUI执行指南（中文）
+版本：v0.1
+日期：2026-08-26
+
+一、本节点做什么
+
+B20A已经安装GUI Run Profile和Workbench Link契约。B20B在这些契约上安装第一版U002 Thin GUI。
+
+Thin GUI只负责：
+
+1. 选择U001 Accepted Package与运行范围；
+2. 默认载入已经验收的Golden Module链；
+3. 在Custom模式下查看、添加、删除、排序和配置已通过Registry验证的Module；
+4. 生成不可变的正式Run Configuration；
+5. 依次调用现有Validator、Preflight和Executor；
+6. 运行成功后提供U003启动入口。
+
+Thin GUI不会重新实现算法。现有CLI Golden Path保持不变。
+
+“用户没有加载Module”的实际含义是自动使用Default Qualified Profile，不是生成空ModulePlan。
+
+二、下载与解压
+
+从Code_study下载：
+
+1. UDP002_U22B20B_PACKAGE_v0_1.zip
+2. UDP002_U22B20B_START_HERE_CN_v0_1_2026-08-26.txt
+
+把ZIP内三个文件解压到：
+
+C-CODE\U-UDP002\04_TEMP
+
+同时把本START_HERE放入同一目录。
+
+最终应有：
+
+- u002_u22b20b_thin_gui_installer_v0_1.py.txt
+- u002_thin_workbench_model_v0_1.py.txt
+- u002_thin_workbench_gui_v0_1.py.txt
+- UDP002_U22B20B_START_HERE_CN_v0_1_2026-08-26.txt
+
+不要改名，不要再创建B20B子文件夹。
+
+三、CMD执行
+
+当前目录必须为C-CODE，只执行以下三行：
+
+python U-UDP002\04_TEMP\u002_u22b20b_thin_gui_installer_v0_1.py.txt --prepare --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b20b_thin_gui_installer_v0_1.py.txt --self-test --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b20b_thin_gui_installer_v0_1.py.txt --open-gui --workspace-root U-UDP002
+
+Prepare和Self-test会用英文显示：检查了什么，以及为什么检查。两步C0时不用回传。
+
+四、界面首次确认
+
+GUI打开后先不要启动完整分析，只检查：
+
+1. 标题为U002 Analysis Workbench v0.1；
+2. Profile显示Default Qualified Profile；
+3. Module表显示5个Module；
+4. 顶部Stage条中S0、S1、S6、S7为激活状态；
+5. Run Scope为FULL_CASE；
+6. 可以看到Run ID、U001 Accepted Package和Formal Actions；
+7. 点击Clone as Custom后，Add/Remove/Move/Edit按钮变为可用；
+8. 点击Use accepted default后恢复默认链。
+
+本节点只验收GUI控制边界，不运行50,198帧全量分析。
+
+五、回传
+
+三条命令均成功并且GUI正常打开：
+
+B20B-OPEN-5M-4S-C0
+
+如果Prepare或Self-test失败，只回传最后一行完整B20BE机器码，不让Copilot自行修改。
+
+六、下一节点
+
+B20C会让GUI生成一份Default Run Configuration，并与CLI Golden配置进行语义等价比较。等B20C通过后，才通过GUI触发正式Golden回归。
+
