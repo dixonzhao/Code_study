@@ -1,0 +1,675 @@
+#!/usr/bin/env python3
+"""Install the U002 GUI Run Profile and local Workbench Link contract baseline."""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import sys
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+
+
+PROGRAM_ID = "CameraRadar.B20A.GuiContractBaseline"
+PROGRAM_VERSION = "0.1.0"
+PROGRAM_NAME = "u002_u22b20a_gui_contract_baseline_v0_1.py.txt"
+GUIDE_NAME = "UDP002_U22B20A_START_HERE_CN_v0_1_2026-08-26.txt"
+B19C_RUN_ID = "U22B19C_S1_V04_FULL_GOLDEN_V03"
+B19D_OUTPUT_ID = "U22B19D_DOWNSTREAM_EQUIVALENCE_V01"
+PROFILE_CONTRACT_ID = "U002_GUI_RUN_PROFILE"
+LINK_CONTRACT_ID = "U002_WORKBENCH_LINK"
+CONTRACT_VERSION = "0.1"
+PROFILE_ID = "CameraRadar.GUI.RadarLossGoldenReference"
+PROFILE_VERSION = "0.1.0"
+STAGE_ORDER = ("S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7")
+
+
+class B20AError(RuntimeError):
+    """One controlled B20A rejection."""
+
+    def __init__(self, reason: object, detail: object = "NA") -> None:
+        self.reason = token(reason)
+        self.detail = detail_token(detail)
+        super().__init__(self.reason)
+
+
+def token(value: object, limit: int = 120) -> str:
+    """Return a bounded machine token."""
+
+    text = re.sub(r"[^A-Z0-9_]+", "_", str(value).upper()).strip("_")
+    return (text or "NA")[:limit]
+
+
+def detail_token(value: object, limit: int = 180) -> str:
+    """Preserve hyphens for capsule field separation."""
+
+    text = re.sub(r"[^A-Z0-9_.-]+", "_", str(value).upper()).strip("_.-")
+    return (text or "NA")[:limit]
+
+
+def canonical_bytes(value: object) -> bytes:
+    """Serialize deterministic JSON."""
+
+    return (
+        json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False)
+        + "\n"
+    ).encode("utf-8")
+
+
+def sha256_file(path: Path) -> str:
+    """Hash one file without loading it into memory."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def load_json(path: Path, label: str) -> Dict[str, Any]:
+    """Load one required JSON object."""
+
+    if not path.is_file() or path.is_symlink():
+        raise B20AError(label + "_MISSING", path.name)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as error:
+        raise B20AError(label + "_JSON", path.name) from error
+    if not isinstance(value, dict):
+        raise B20AError(label + "_TYPE", path.name)
+    return value
+
+
+def require_workspace(value: str) -> Path:
+    """Resolve the fixed company U002 workspace."""
+
+    root = Path(value).resolve()
+    if not root.is_dir() or root.name != "U-UDP002":
+        raise B20AError("WORKSPACE_ROOT", root.name)
+    return root
+
+
+def transfer_paths(root: Path) -> Tuple[Path, Path]:
+    """Require the exact two B20A transfer files in 04_TEMP."""
+
+    temp = root / "04_TEMP"
+    program = temp / PROGRAM_NAME
+    guide = temp / GUIDE_NAME
+    for path in (program, guide):
+        if not path.is_file() or path.is_symlink():
+            raise B20AError("TRANSFER_FILE", path.name)
+    return program, guide
+
+
+def archive_previous_temp(root: Path) -> Tuple[int, int]:
+    """Archive obsolete TEMP entries and retain locked files as explicit evidence."""
+
+    temp = root / "04_TEMP"
+    temp.mkdir(parents=True, exist_ok=True)
+    keep = {"A-Archive", PROGRAM_NAME, GUIDE_NAME}
+    stale = sorted(path for path in temp.iterdir() if path.name not in keep)
+    if not stale:
+        return 0, 0
+    destination = (
+        temp
+        / "A-Archive"
+        / ("U22B20A_PREPARE_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
+    )
+    destination.mkdir(parents=True, exist_ok=False)
+    moved = 0
+    locked = 0
+    for source in stale:
+        try:
+            shutil.move(str(source), str(destination / source.name))
+            moved += 1
+        except PermissionError:
+            locked += 1
+    if moved == 0:
+        try:
+            destination.rmdir()
+        except OSError:
+            pass
+    return moved, locked
+
+
+def exact_keys(value: Mapping[str, object], expected: Sequence[str], label: str) -> None:
+    """Reject both missing and silently ignored contract fields."""
+
+    actual = set(value)
+    wanted = set(expected)
+    missing = sorted(wanted - actual)
+    extra = sorted(actual - wanted)
+    if missing:
+        raise B20AError(label + "_MISSING_FIELD", missing[0])
+    if extra:
+        raise B20AError(label + "_EXTRA_FIELD", extra[0])
+
+
+def nonempty_string(value: object, field: str) -> str:
+    """Require one meaningful string."""
+
+    if not isinstance(value, str) or not value.strip():
+        raise B20AError("STRING_FIELD", field)
+    return value
+
+
+def validate_module_plan(value: object) -> Tuple[int, int]:
+    """Validate selected Module order without requiring every optional Stage slot."""
+
+    if not isinstance(value, list) or not value:
+        raise B20AError("MODULE_PLAN")
+    previous_stage = -1
+    identities = set()
+    stages = set()
+    for sequence, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            raise B20AError("MODULE_PLAN_ITEM", sequence)
+        exact_keys(
+            item,
+            ("Sequence", "Stage", "ModuleId", "ModuleVersion", "Configuration"),
+            "MODULE_PLAN_ITEM",
+        )
+        if item["Sequence"] != sequence:
+            raise B20AError("MODULE_SEQUENCE", item["Sequence"])
+        stage = str(item["Stage"])
+        if stage not in STAGE_ORDER:
+            raise B20AError("MODULE_STAGE", stage)
+        stage_index = STAGE_ORDER.index(stage)
+        if stage_index < previous_stage:
+            raise B20AError("MODULE_STAGE_ORDER", stage)
+        previous_stage = stage_index
+        module_id = nonempty_string(item["ModuleId"], "ModuleId")
+        version = nonempty_string(item["ModuleVersion"], "ModuleVersion")
+        identity = (module_id, version)
+        if identity in identities:
+            raise B20AError("MODULE_IDENTITY_DUPLICATE", module_id)
+        identities.add(identity)
+        if not isinstance(item["Configuration"], dict):
+            raise B20AError("MODULE_CONFIGURATION", module_id)
+        stages.add(stage)
+    return len(value), len(stages)
+
+
+def validate_primary_outcome(value: object) -> None:
+    """Require an explicit engineering question and discrepancy direction."""
+
+    if not isinstance(value, dict):
+        raise B20AError("PRIMARY_OUTCOME")
+    exact_keys(value, ("Name", "Formula", "Sign", "Unit", "Purpose"), "PRIMARY_OUTCOME")
+    for field in ("Name", "Formula", "Sign", "Unit"):
+        nonempty_string(value[field], field)
+    if value["Purpose"] not in ("EXPLORATORY", "CONFIRMATORY"):
+        raise B20AError("PRIMARY_OUTCOME_PURPOSE", value["Purpose"])
+
+
+def validate_gui_profile(value: Mapping[str, object]) -> Tuple[int, int]:
+    """Validate one saved GUI profile before it can generate a formal Run Configuration."""
+
+    exact_keys(
+        value,
+        (
+            "ContractId",
+            "ContractVersion",
+            "ProfileId",
+            "ProfileVersion",
+            "DisplayName",
+            "Description",
+            "SourceGoldenRunId",
+            "RunIdPolicy",
+            "RunPurpose",
+            "RunScope",
+            "FrameStart",
+            "FrameEnd",
+            "InputPackage",
+            "SignalProfile",
+            "ModulePlan",
+            "PrimaryOutcome",
+            "CandidatePolicy",
+            "OutputSelection",
+            "PostRun",
+        ),
+        "GUI_PROFILE",
+    )
+    if value["ContractId"] != PROFILE_CONTRACT_ID or value["ContractVersion"] != CONTRACT_VERSION:
+        raise B20AError("GUI_PROFILE_CONTRACT")
+    for field in (
+        "ProfileId",
+        "ProfileVersion",
+        "DisplayName",
+        "Description",
+        "SourceGoldenRunId",
+        "InputPackage",
+        "SignalProfile",
+        "CandidatePolicy",
+    ):
+        nonempty_string(value[field], field)
+    policy = value["RunIdPolicy"]
+    if not isinstance(policy, dict):
+        raise B20AError("RUN_ID_POLICY")
+    exact_keys(policy, ("Mode", "SuggestedPrefix"), "RUN_ID_POLICY")
+    if policy["Mode"] != "USER_CONFIRMED":
+        raise B20AError("RUN_ID_MODE", policy["Mode"])
+    prefix = nonempty_string(policy["SuggestedPrefix"], "SuggestedPrefix")
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}", prefix) is None:
+        raise B20AError("RUN_ID_PREFIX", prefix)
+    if value["RunPurpose"] not in ("SMOKE", "TUNING", "EVALUATION"):
+        raise B20AError("RUN_PURPOSE", value["RunPurpose"])
+    scope = value["RunScope"]
+    if scope not in ("FULL_CASE", "FRAME_RANGE", "FILTERED_RANGE"):
+        raise B20AError("RUN_SCOPE", scope)
+    start = value["FrameStart"]
+    end = value["FrameEnd"]
+    if scope == "FULL_CASE":
+        if start is not None or end is not None:
+            raise B20AError("FULL_CASE_RANGE")
+    else:
+        if isinstance(start, bool) or isinstance(end, bool) or not isinstance(start, int) or not isinstance(end, int):
+            raise B20AError("FRAME_RANGE_TYPE")
+        if start < 0 or end < start:
+            raise B20AError("FRAME_RANGE_VALUE")
+    module_count, stage_count = validate_module_plan(value["ModulePlan"])
+    validate_primary_outcome(value["PrimaryOutcome"])
+    outputs = value["OutputSelection"]
+    if not isinstance(outputs, list) or not outputs or any(not isinstance(item, str) or not item for item in outputs):
+        raise B20AError("OUTPUT_SELECTION")
+    if len(set(outputs)) != len(outputs):
+        raise B20AError("OUTPUT_SELECTION_DUPLICATE")
+    post_run = value["PostRun"]
+    if not isinstance(post_run, dict):
+        raise B20AError("POST_RUN")
+    exact_keys(post_run, ("Action", "ReviewArtifactType"), "POST_RUN")
+    if post_run["Action"] not in ("NONE", "OPEN_OUTPUT", "PROMPT_U003", "LAUNCH_U003"):
+        raise B20AError("POST_RUN_ACTION", post_run["Action"])
+    if post_run["ReviewArtifactType"] != "U003_REVIEW_PACKAGE":
+        raise B20AError("POST_RUN_ARTIFACT", post_run["ReviewArtifactType"])
+    return module_count, stage_count
+
+
+def validate_workbench_link(value: Mapping[str, object]) -> None:
+    """Validate local-only U001/U003 path preferences."""
+
+    exact_keys(
+        value,
+        (
+            "ContractId",
+            "ContractVersion",
+            "LinkId",
+            "WorkspaceRoot",
+            "U001PackageSelection",
+            "U003",
+            "EvidenceBoundary",
+        ),
+        "WORKBENCH_LINK",
+    )
+    if value["ContractId"] != LINK_CONTRACT_ID or value["ContractVersion"] != CONTRACT_VERSION:
+        raise B20AError("WORKBENCH_LINK_CONTRACT")
+    nonempty_string(value["LinkId"], "LinkId")
+    if value["WorkspaceRoot"] != ".":
+        raise B20AError("WORKSPACE_LINK_ROOT", value["WorkspaceRoot"])
+    u001 = value["U001PackageSelection"]
+    if not isinstance(u001, dict):
+        raise B20AError("U001_LINK")
+    exact_keys(u001, ("Mode", "DefaultRoot", "RequireAcceptedPackage"), "U001_LINK")
+    if u001["Mode"] != "USER_SELECT" or u001["RequireAcceptedPackage"] is not True:
+        raise B20AError("U001_LINK_POLICY")
+    nonempty_string(u001["DefaultRoot"], "U001DefaultRoot")
+    u003 = value["U003"]
+    if not isinstance(u003, dict):
+        raise B20AError("U003_LINK")
+    exact_keys(
+        u003,
+        ("ExecutablePath", "LaunchPolicy", "AcceptedArtifactType", "RequireSucceededRun"),
+        "U003_LINK",
+    )
+    if u003["ExecutablePath"] is not None:
+        nonempty_string(u003["ExecutablePath"], "U003ExecutablePath")
+    if u003["LaunchPolicy"] not in ("DISABLED", "PROMPT_AFTER_SUCCESS", "AUTO_AFTER_SUCCESS"):
+        raise B20AError("U003_LAUNCH_POLICY", u003["LaunchPolicy"])
+    if u003["AcceptedArtifactType"] != "U003_REVIEW_PACKAGE" or u003["RequireSucceededRun"] is not True:
+        raise B20AError("U003_EVIDENCE_POLICY")
+    if value["EvidenceBoundary"] != "LOCAL_UI_PREFERENCE_NOT_RUN_EVIDENCE":
+        raise B20AError("EVIDENCE_BOUNDARY")
+
+
+def gui_profile_schema() -> Dict[str, object]:
+    """Return the reusable JSON Schema document for saved GUI Run Profiles."""
+
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "urn:u002:gui-run-profile:0.1",
+        "title": "U002 GUI Run Profile",
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "ContractId", "ContractVersion", "ProfileId", "ProfileVersion",
+            "DisplayName", "Description", "SourceGoldenRunId", "RunIdPolicy",
+            "RunPurpose", "RunScope", "FrameStart", "FrameEnd", "InputPackage",
+            "SignalProfile", "ModulePlan", "PrimaryOutcome", "CandidatePolicy",
+            "OutputSelection", "PostRun",
+        ],
+        "properties": {
+            "ContractId": {"const": PROFILE_CONTRACT_ID},
+            "ContractVersion": {"const": CONTRACT_VERSION},
+            "ProfileId": {"type": "string", "minLength": 1},
+            "ProfileVersion": {"type": "string", "minLength": 1},
+            "DisplayName": {"type": "string", "minLength": 1},
+            "Description": {"type": "string", "minLength": 1},
+            "SourceGoldenRunId": {"type": "string", "minLength": 1},
+            "RunIdPolicy": {"type": "object"},
+            "RunPurpose": {"enum": ["SMOKE", "TUNING", "EVALUATION"]},
+            "RunScope": {"enum": ["FULL_CASE", "FRAME_RANGE", "FILTERED_RANGE"]},
+            "FrameStart": {"type": ["integer", "null"]},
+            "FrameEnd": {"type": ["integer", "null"]},
+            "InputPackage": {"type": "string", "minLength": 1},
+            "SignalProfile": {"type": "string", "minLength": 1},
+            "ModulePlan": {"type": "array", "minItems": 1},
+            "PrimaryOutcome": {"type": "object"},
+            "CandidatePolicy": {"type": "string", "minLength": 1},
+            "OutputSelection": {"type": "array", "minItems": 1, "uniqueItems": True},
+            "PostRun": {"type": "object"},
+        },
+    }
+
+
+def workbench_link_schema() -> Dict[str, object]:
+    """Return the reusable JSON Schema document for local-only Workbench Links."""
+
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "urn:u002:workbench-link:0.1",
+        "title": "U002 Workbench Link",
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "ContractId", "ContractVersion", "LinkId", "WorkspaceRoot",
+            "U001PackageSelection", "U003", "EvidenceBoundary",
+        ],
+        "properties": {
+            "ContractId": {"const": LINK_CONTRACT_ID},
+            "ContractVersion": {"const": CONTRACT_VERSION},
+            "LinkId": {"type": "string", "minLength": 1},
+            "WorkspaceRoot": {"const": "."},
+            "U001PackageSelection": {"type": "object"},
+            "U003": {"type": "object"},
+            "EvidenceBoundary": {"const": "LOCAL_UI_PREFERENCE_NOT_RUN_EVIDENCE"},
+        },
+    }
+
+
+def source_context(root: Path) -> Dict[str, object]:
+    """Require the human-closed B19C/B19D Golden Reference."""
+
+    transfer_paths(root)
+    run_root = root / "07_OUTPUT" / B19C_RUN_ID
+    status = load_json(run_root / "run_status.json", "B19C_STATUS")
+    if status.get("Status") != "SUCCEEDED":
+        raise B20AError("B19C_NOT_SUCCEEDED", status.get("Status"))
+    b19c_receipt = load_json(
+        run_root / "02_DIAGNOSTICS/U22B19C_CONTROLLER/b19c_full_golden_replay_summary_v0_5.json",
+        "B19C_RECEIPT",
+    )
+    if b19c_receipt.get("Status") != "SUCCEEDED" or b19c_receipt.get("TargetRunId") != B19C_RUN_ID:
+        raise B20AError("B19C_RECEIPT_STATUS")
+    b19d_summary = load_json(
+        root / "07_OUTPUT" / B19D_OUTPUT_ID / "b19d_downstream_equivalence_summary.json",
+        "B19D_SUMMARY",
+    )
+    if (
+        b19d_summary.get("Status") != "SUCCEEDED"
+        or b19d_summary.get("BusinessPayloadEquivalent") is not True
+        or b19d_summary.get("ExistingHumanReviewTransferApproved") is not True
+    ):
+        raise B20AError("B19D_NOT_CLOSED")
+    run_configuration_path = run_root / "00_CONFIG/run_configuration.json"
+    run_configuration = load_json(run_configuration_path, "B19C_RUN_CONFIGURATION")
+    if run_configuration.get("RunId") != B19C_RUN_ID:
+        raise B20AError("B19C_CONFIG_RUN_ID")
+    return {
+        "RunRoot": run_root,
+        "RunConfigurationPath": run_configuration_path,
+        "RunConfiguration": run_configuration,
+        "B19CReceipt": b19c_receipt,
+        "B19DSummary": b19d_summary,
+    }
+
+
+def build_profile(run: Mapping[str, object]) -> Dict[str, object]:
+    """Convert the accepted formal Run into a reusable, non-executing GUI template."""
+
+    value = {
+        "ContractId": PROFILE_CONTRACT_ID,
+        "ContractVersion": CONTRACT_VERSION,
+        "ProfileId": PROFILE_ID,
+        "ProfileVersion": PROFILE_VERSION,
+        "DisplayName": "Radar-loss Golden Reference",
+        "Description": "Human-closed full-video Radar measurement-loss candidate workflow.",
+        "SourceGoldenRunId": B19C_RUN_ID,
+        "RunIdPolicy": {
+            "Mode": "USER_CONFIRMED",
+            "SuggestedPrefix": "U002_GUI_RADAR_LOSS",
+        },
+        "RunPurpose": run["RunPurpose"],
+        "RunScope": run["RunScope"],
+        "FrameStart": run["FrameStart"],
+        "FrameEnd": run["FrameEnd"],
+        "InputPackage": run["InputPackage"],
+        "SignalProfile": run["SignalProfile"],
+        "ModulePlan": copy.deepcopy(run["ModulePlan"]),
+        "PrimaryOutcome": copy.deepcopy(run["PrimaryOutcome"]),
+        "CandidatePolicy": run["CandidatePolicy"],
+        "OutputSelection": list(run["OutputSelection"]),
+        "PostRun": {
+            "Action": "PROMPT_U003",
+            "ReviewArtifactType": "U003_REVIEW_PACKAGE",
+        },
+    }
+    validate_gui_profile(value)
+    return value
+
+
+def build_workbench_link() -> Dict[str, object]:
+    """Build the local-only link template without inventing a U003 path."""
+
+    value = {
+        "ContractId": LINK_CONTRACT_ID,
+        "ContractVersion": CONTRACT_VERSION,
+        "LinkId": "LOCAL_DEFAULT",
+        "WorkspaceRoot": ".",
+        "U001PackageSelection": {
+            "Mode": "USER_SELECT",
+            "DefaultRoot": "03_CASES",
+            "RequireAcceptedPackage": True,
+        },
+        "U003": {
+            "ExecutablePath": None,
+            "LaunchPolicy": "PROMPT_AFTER_SUCCESS",
+            "AcceptedArtifactType": "U003_REVIEW_PACKAGE",
+            "RequireSucceededRun": True,
+        },
+        "EvidenceBoundary": "LOCAL_UI_PREFERENCE_NOT_RUN_EVIDENCE",
+    }
+    validate_workbench_link(value)
+    return value
+
+
+def output_paths(root: Path) -> Dict[str, Path]:
+    """Return the four controlled installation paths."""
+
+    return {
+        "ProfileSchema": root / "00_CONTROL/contracts/gui/u002_gui_run_profile_schema_v0_1.json",
+        "LinkSchema": root / "00_CONTROL/contracts/gui/u002_workbench_link_schema_v0_1.json",
+        "Profile": root / "02_CONFIG/gui_profiles/u002_radar_loss_golden_reference_v0_1.json",
+        "Link": root / "02_CONFIG/workbench_links/u002_workbench_link_local_default_v0_1.json",
+    }
+
+
+def write_immutable(path: Path, value: Mapping[str, object]) -> str:
+    """Create one control document or accept byte-identical replay."""
+
+    data = canonical_bytes(value)
+    if path.exists():
+        if not path.is_file() or path.is_symlink() or path.read_bytes() != data:
+            raise B20AError("OUTPUT_CONFLICT", path.name)
+        return "REPLAY"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".writing")
+    if temporary.exists():
+        raise B20AError("TEMPORARY_EXISTS", temporary.name)
+    temporary.write_bytes(data)
+    os.replace(temporary, path)
+    return "CREATED"
+
+
+def prepare(root: Path) -> str:
+    """Show English runtime checks while the Chinese guide owns the commands."""
+
+    moved, locked = archive_previous_temp(root)
+    context = source_context(root)
+    profile = build_profile(context["RunConfiguration"])
+    link = build_workbench_link()
+    modules, stages = validate_gui_profile(profile)
+    validate_workbench_link(link)
+    outputs = output_paths(root)
+    print("=== U22B20A PREPARE / CONTRACT BASELINE READINESS ===")
+    print("PASS | B19C Run is SUCCEEDED | WHY: GUI templates must start from an accepted execution reference")
+    print("PASS | B19D transferred human review | WHY: the reference must include machine and human closure")
+    print(f"PASS | Selected topology is {modules} Modules across {stages} Stages | WHY: empty optional Stage slots remain valid")
+    print("PASS | Run Profile validation | WHY: GUI state must map deterministically to the formal Run Configuration")
+    print("PASS | Workbench Link validation | WHY: local U001/U003 paths must stay outside analysis evidence")
+    for label, path in outputs.items():
+        state = "IDENTICAL-REPLAY" if path.is_file() and path.read_bytes() in (
+            canonical_bytes(gui_profile_schema()),
+            canonical_bytes(workbench_link_schema()),
+            canonical_bytes(profile),
+            canonical_bytes(link),
+        ) else ("CONFLICT-CHECKED-BY-EXECUTE" if path.exists() else "READY-TO-CREATE")
+        print(f"INFO | {label} | {state}")
+    print(f"INFO | TEMP hygiene | archived={moved} locked={locked}")
+    capsule = f"B20AP-C2-M{modules}-S{stages}-A{moved}-L{locked}-X0-C0"
+    print(capsule)
+    return capsule
+
+
+def self_test(root: Path) -> str:
+    """Exercise positive and fail-closed contract behavior."""
+
+    context = source_context(root)
+    profile = build_profile(context["RunConfiguration"])
+    link = build_workbench_link()
+    modules, stages = validate_gui_profile(profile)
+    validate_workbench_link(link)
+    print("=== U22B20A SELF-TEST / CONTRACT INVARIANTS ===")
+    print("PASS | Strict top-level fields | WHY: unknown GUI fields must not silently influence a Run")
+    print("PASS | Consecutive Module sequence | WHY: execution order must be explicit and reproducible")
+    print("PASS | Nondecreasing Stage order | WHY: Modules may share a Stage but cannot execute backward")
+    print("PASS | Sparse Stage topology | WHY: selected Modules, not all eight slots, define one Run")
+    print("PASS | USER_CONFIRMED RunId policy | WHY: the GUI must not silently create an unreviewed identity")
+    print("PASS | FULL_CASE range rule | WHY: stale FrameStart/FrameEnd must not leak into a full-case Run")
+    print("PASS | Explicit PrimaryOutcome | WHY: formula, sign, unit and purpose remain visible")
+    print("PASS | Local Workbench Link evidence boundary | WHY: machine-specific paths are not analysis evidence")
+    print("PASS | U003 launch requires SUCCEEDED Run | WHY: failed or partial output cannot enter human review")
+
+    invalid_sequence = copy.deepcopy(profile)
+    invalid_sequence["ModulePlan"][0]["Sequence"] = 2
+    try:
+        validate_gui_profile(invalid_sequence)
+        raise B20AError("SELFTEST_SEQUENCE_NOT_REJECTED")
+    except B20AError as error:
+        if error.reason != "MODULE_SEQUENCE":
+            raise
+    print("PASS | Negative sequence test | WHY: reordered plans fail before formal Preflight")
+
+    invalid_scope = copy.deepcopy(profile)
+    invalid_scope["RunScope"] = "FULL_CASE"
+    invalid_scope["FrameStart"] = 7400
+    try:
+        validate_gui_profile(invalid_scope)
+        raise B20AError("SELFTEST_SCOPE_NOT_REJECTED")
+    except B20AError as error:
+        if error.reason != "FULL_CASE_RANGE":
+            raise
+    print("PASS | Negative scope test | WHY: FULL_CASE cannot carry hidden frame limits")
+
+    invalid_link = copy.deepcopy(link)
+    invalid_link["EvidenceBoundary"] = "RUN_EVIDENCE"
+    try:
+        validate_workbench_link(invalid_link)
+        raise B20AError("SELFTEST_LINK_NOT_REJECTED")
+    except B20AError as error:
+        if error.reason != "EVIDENCE_BOUNDARY":
+            raise
+    print("PASS | Negative evidence-boundary test | WHY: local executable paths never enter formal evidence")
+    capsule = f"U22B20A-ST-N12-C2-M{modules}-S{stages}-X0-C0"
+    print(capsule)
+    return capsule
+
+
+def execute(root: Path) -> str:
+    """Install the two schemas and two default control documents."""
+
+    context = source_context(root)
+    source_path = context["RunConfigurationPath"]
+    source_hash_before = sha256_file(source_path)
+    profile = build_profile(context["RunConfiguration"])
+    link = build_workbench_link()
+    modules, stages = validate_gui_profile(profile)
+    validate_workbench_link(link)
+    documents = {
+        "ProfileSchema": gui_profile_schema(),
+        "LinkSchema": workbench_link_schema(),
+        "Profile": profile,
+        "Link": link,
+    }
+    paths = output_paths(root)
+    dispositions = [write_immutable(paths[name], value) for name, value in documents.items()]
+    if sha256_file(source_path) != source_hash_before:
+        raise B20AError("SOURCE_RUN_MUTATION")
+    created = sum(item == "CREATED" for item in dispositions)
+    replayed = sum(item == "REPLAY" for item in dispositions)
+    return (
+        f"B20A-C2-P1-L1-M{modules}-S{stages}-N{created}-R{replayed}"
+        "-G1-U1-X0-C0"
+    )
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    """Create the fixed three-command interface."""
+
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--prepare", action="store_true")
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--execute", action="store_true")
+    parser.add_argument("--workspace-root", required=True)
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Run one B20A responsibility."""
+
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        root = require_workspace(args.workspace_root)
+        if args.prepare:
+            prepare(root)
+        elif args.self_test:
+            self_test(root)
+        else:
+            print(execute(root))
+        return 0
+    except B20AError as error:
+        print(f"B20AE-K{error.reason}-D{error.detail}-X1-C7")
+        return 7
+    except Exception as error:
+        print(f"B20AE-KUNEXPECTED-D{token(error.__class__.__name__)}-X1-C7")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

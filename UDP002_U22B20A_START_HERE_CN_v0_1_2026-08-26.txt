@@ -1,0 +1,78 @@
+UDP002 U22B20A GUI契约基线执行指南（中文）
+版本：v0.1
+日期：2026-08-26
+
+一、目的
+
+B19D已经证明新版CLI Golden Run与原人工复核结果一致。B20A开始进入U002产品界面阶段，但本步骤还不创建GUI。
+
+本步骤先安装两个固定接口：
+
+1. GUI Run Profile
+
+保存界面选择的Input Package、Run范围、Module顺序、Module配置、Primary Outcome、Candidate Policy和输出要求。它是生成正式Run Configuration的模板，不直接执行算法。
+
+2. Workbench Link
+
+保存本机U001选择位置和U003启动位置/偏好。它属于本机界面设置，不是分析证据，不进入Run Manifest或算法结论。
+
+这样以后修改GUI布局不会修改Golden Core，修改本机U003路径也不会改变分析结果。
+
+二、下载位置
+
+把以下两个文件直接放入：
+
+C-CODE\U-UDP002\04_TEMP
+
+1. u002_u22b20a_gui_contract_baseline_v0_1.py.txt
+2. UDP002_U22B20A_START_HERE_CN_v0_1_2026-08-26.txt
+
+不要改名，不要创建子文件夹。
+
+三、CMD执行（当前目录必须为C-CODE）
+
+python U-UDP002\04_TEMP\u002_u22b20a_gui_contract_baseline_v0_1.py.txt --prepare --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b20a_gui_contract_baseline_v0_1.py.txt --self-test --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b20a_gui_contract_baseline_v0_1.py.txt --execute --workspace-root U-UDP002
+
+PREPARE和SELF-TEST的解释按照新规则使用英文，最后一行仍为短机器码。C0时不用回传这两步。
+
+四、只回传EXECUTE最后一行
+
+首次成功典型格式：
+
+B20A-C2-P1-L1-M5-S4-N4-R0-G1-U1-X0-C0
+
+字段：
+
+- C：安装的Contract数量；
+- P：Golden GUI Run Profile数量；
+- L：本地Workbench Link模板数量；
+- M：Profile内Module数量；
+- S：Profile实际占用Stage数量；
+- N：本次新建文件数量；
+- R：字节一致而复用的文件数量；
+- G：来源是已冻结Golden Run；
+- U：来源已经继承U003人工复核；
+- X：技术阻塞数；
+- C0/C7：节点状态。
+
+重复执行时N/R可能变为N0-R4，这是正常的不可变重放。
+
+失败时只回传完整B20AE最后一行，不自行修改文件。
+
+五、成功后生成位置
+
+契约：
+
+U-UDP002\00_CONTROL\contracts\gui
+
+Profile：
+
+U-UDP002\02_CONFIG\gui_profiles
+
+Workbench Link：
+
+U-UDP002\02_CONFIG\workbench_links
+
+下一节点B20B才会基于这些接口创建Thin GUI；现有Contract Validator、Module Registry、Engine Preflight、Stage Executor和算法Module保持不变。
