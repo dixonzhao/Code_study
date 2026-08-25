@@ -7,6 +7,7 @@ import argparse
 import copy
 import csv
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -18,14 +19,15 @@ from typing import Mapping, Optional, Sequence
 
 
 PROGRAM_ID = "CameraRadar.B19C.FullGoldenReplay"
-PROGRAM_VERSION = "0.2.0"
+PROGRAM_VERSION = "0.3.0"
 MODULE_ID = "CameraRadar.S1.CameraTargetContinuityArbitration"
 SOURCE_VERSION = "0.3.0"
 TARGET_VERSION = "0.4.0"
 B19B_RUN_ID = "U22B19B_S1_WIDTH_REAL_REPLAY_V01"
-OUTPUT_RUN_ID = "U22B19C_S1_V04_FULL_GOLDEN_V01"
-PROGRAM_NAME = "u002_u22b19c_full_golden_replay_v0_2.py.txt"
-GUIDE_NAME = "UDP002_U22B19C_START_HERE_CN_v0_2_2026-08-25.txt"
+OUTPUT_RUN_ID = "U22B19C_S1_V04_FULL_GOLDEN_V02"
+PROGRAM_NAME = "u002_u22b19c_full_golden_replay_v0_3.py.txt"
+GUIDE_NAME = "UDP002_U22B19C_START_HERE_CN_v0_3_2026-08-25.txt"
+CONTRACT_VALIDATOR_RELATIVE = Path("01_PROGRAMS/core/u002_u22_contract_validator_v0_1.py")
 ENGINE_PREFLIGHT_RELATIVE = Path("01_PROGRAMS/core/u002_u22_engine_preflight_v0_1.py")
 EXECUTOR_RELATIVE = Path("01_PROGRAMS/core/u002_u22_stage_executor_v0_1.py")
 
@@ -213,7 +215,7 @@ def build_target_config(
 
     target = copy.deepcopy(dict(source))
     target["RunId"] = OUTPUT_RUN_ID
-    target["RunPurpose"] = "GOLDEN_REPLAY_CANDIDATE"
+    target["RunPurpose"] = "EVALUATION"
     target["SignalProfile"] = (
         str(profile.get("BindingProfileId"))
         + "@"
@@ -225,6 +227,34 @@ def build_target_config(
     configuration["BindingProfilePath"] = profile_path.relative_to(root).as_posix()
     configuration["BindingProfileSha256"] = sha256_file(profile_path)
     return target
+
+
+def validate_target_run_contract(
+    root: Path,
+    document: Mapping[str, object],
+) -> Path:
+    """Validate the generated target against the installed formal Run schema."""
+
+    validator_path = root / CONTRACT_VALIDATOR_RELATIVE
+    if not validator_path.is_file() or validator_path.is_symlink():
+        raise B19CError("CONTRACT_VALIDATOR_FILE", validator_path.name)
+    spec = importlib.util.spec_from_file_location(
+        "u002_u22_contract_validator_for_b19c",
+        validator_path,
+    )
+    if spec is None or spec.loader is None:
+        raise B19CError("CONTRACT_VALIDATOR_LOAD", validator_path.name)
+    validator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(validator)
+    if not hasattr(validator, "validate_document"):
+        raise B19CError("CONTRACT_VALIDATOR_API")
+    try:
+        validator.validate_document(root, "RUN", dict(document))
+    except Exception as error:
+        reason = getattr(error, "reason", error.__class__.__name__)
+        path = getattr(error, "path", "NA")
+        raise B19CError("TARGET_CONTRACT_" + token(reason, 60), path) from error
+    return validator_path
 
 
 def compare_topology(source: Mapping[str, object], target: Mapping[str, object]) -> int:
@@ -290,6 +320,7 @@ def source_context(root: Path) -> dict[str, object]:
     if not module_root.is_dir() or not receipt.is_file():
         raise B19CError("TARGET_QUALIFICATION")
     target_config = build_target_config(source_config, profile_path, profile, root)
+    contract_validator = validate_target_run_contract(root, target_config)
     module_count = compare_topology(source_config, target_config)
     return {
         "B19BSummary": summary,
@@ -300,6 +331,7 @@ def source_context(root: Path) -> dict[str, object]:
         "SourceConfig": source_config,
         "ProfilePath": profile_path,
         "Profile": profile,
+        "ContractValidator": contract_validator,
         "EnginePreflight": engine_preflight,
         "Executor": executor,
         "ModuleRoot": module_root,
@@ -338,6 +370,7 @@ def prepare(root: Path) -> str:
         ("Width binding profile", context["ProfilePath"]),
         ("Qualified S1 v0.4 Module", context["ModuleRoot"]),
         ("Qualification receipt", context["QualificationReceipt"]),
+        ("Formal Run Contract Validator", context["ContractValidator"]),
         ("Engine Preflight", context["EnginePreflight"]),
         ("Stage Executor", context["Executor"]),
         ("New run configuration", context["ConfigPath"]),
@@ -356,6 +389,7 @@ def prepare(root: Path) -> str:
         "PASS | Controlled delta | "
         f"S1 {SOURCE_VERSION} -> {TARGET_VERSION}; topology {context['ModuleCount']} Modules unchanged"
     )
+    print("PASS | Target Run contract | COMPLETE DOCUMENT VALIDATED AGAINST INSTALLED SCHEMA")
     print(
         "PASS | B19B compatibility | "
         f"rows={comparison['Rows']} legacy_mismatch=0 width_valid={comparison['SelectedWidthValidRows']}"
@@ -400,7 +434,7 @@ def self_test(root: Path) -> str:
     )
     if executor_result.returncode != 0 or "C-0" not in executor_result.stdout:
         raise B19CError("EXECUTOR_SELFTEST", executor_result.stdout[-120:])
-    return f"U22B19C-SELFTEST-PASS-32-M{context['ModuleCount']}-X0-C0"
+    return f"U22B19C-SELFTEST-PASS-40-M{context['ModuleCount']}-X0-C0"
 
 
 def artifact_manifests(run_root: Path) -> list[tuple[Path, dict[str, object]]]:
