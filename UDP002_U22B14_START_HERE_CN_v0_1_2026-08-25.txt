@@ -1,0 +1,91 @@
+UDP002 U22B14 执行指南
+======================
+
+目标
+----
+在不改变B13D已验收的16个Candidate身份和原Peak的前提下：
+
+1. 使用Camera纵向距离与横向位置计算TargetBearingProxyDeg；
+2. 使用全视频有效帧作为分母，计算各方位角区间的Radar失效率；
+3. 同时按Camera距离分层，避免把距离影响误认为角度影响；
+4. 生成可直接载入U003的方位角复核表。
+
+本节点不设定15度或其他角度阈值，也不宣称Radar故障或Root Cause。
+
+
+所需文件与位置
+----------------
+把ZIP内以下两个文件解压到：
+
+C-CODE\U-UDP002\04_TEMP
+
+- u002_u22b14_target_bearing_association_v0_1.py.txt
+- u002_u22b14_target_bearing_association_algorithm_card_v0_1.json
+
+从C-CODE目录打开CMD。B13D来源Run必须为：
+
+U-UDP002\07_OUTPUT\U22B13D_TC001_FULL_VIDEO_REVIEW_V01
+
+
+CMD执行——最多三行
+-------------------
+1. 准备检查：
+
+python U-UDP002\04_TEMP\u002_u22b14_target_bearing_association_v0_1.py.txt --prepare --workspace-root U-UDP002 --source-run-id U22B13D_TC001_FULL_VIDEO_REVIEW_V01 --algorithm-card U-UDP002\04_TEMP\u002_u22b14_target_bearing_association_algorithm_card_v0_1.json
+
+2. 自测：
+
+python U-UDP002\04_TEMP\u002_u22b14_target_bearing_association_v0_1.py.txt --self-test
+
+3. 全视频执行：
+
+python U-UDP002\04_TEMP\u002_u22b14_target_bearing_association_v0_1.py.txt --execute --workspace-root U-UDP002 --source-run-id U22B13D_TC001_FULL_VIDEO_REVIEW_V01 --algorithm-card U-UDP002\04_TEMP\u002_u22b14_target_bearing_association_algorithm_card_v0_1.json
+
+
+成功结果
+--------
+自测：
+
+U22B14-SELFTEST-PASS-28-C0
+
+执行结束：
+
+B14-NF...-NE...-NI...-C16-B8-G64-X0-C0
+
+只需把最后一行手工回传。详细数据不要手抄。
+
+
+输出位置
+--------
+C-CODE\U-UDP002\07_OUTPUT\U22B14_TARGET_BEARING_ASSOCIATION_V01
+
+主要文件：
+
+- frame_bearing_evidence.csv
+  全视频逐FrameCount的Camera方位角Proxy与Radar有效状态。
+
+- bearing_loss_rate_by_abs_bearing_bin.csv
+  每个绝对方位角区间的曝光帧数、Radar失效帧数、失效率和Wilson 95%区间。
+
+- bearing_distance_loss_grid.csv
+  方位角×Camera距离二维分层结果。
+
+- candidate_bearing_summary.csv
+  16个Candidate的原Peak、独立Bearing Peak及方位角摘要。
+
+- u003_bearing_review\event_queue.csv
+- u003_bearing_review\review_data.csv
+  可直接载入U003进行方位角证据复核。
+
+- b14_quality_report.json
+  输入Hash、候选身份保持、坐标假设和禁止结论。
+
+
+结果解释边界
+------------
+- B13D已证明可以定位Radar持续无效窗口。
+- B14检查Radar无效率是否随Camera目标方位角发生变化。
+- C0010正前方短时无效必须保留为对照，不得删除。
+- 若某角度Bin曝光帧很少，不解释其失效率。
+- Camera Distance暂按纵向距离x解释，所以使用atan2(y, x)。若DBC确认其为斜距，公式必须改为asin(y/r)。
+
