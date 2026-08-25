@@ -18,14 +18,15 @@ from typing import Mapping, Optional, Sequence
 
 
 PROGRAM_ID = "CameraRadar.B19C.FullGoldenReplay"
-PROGRAM_VERSION = "0.1.0"
+PROGRAM_VERSION = "0.2.0"
 MODULE_ID = "CameraRadar.S1.CameraTargetContinuityArbitration"
 SOURCE_VERSION = "0.3.0"
 TARGET_VERSION = "0.4.0"
 B19B_RUN_ID = "U22B19B_S1_WIDTH_REAL_REPLAY_V01"
 OUTPUT_RUN_ID = "U22B19C_S1_V04_FULL_GOLDEN_V01"
-PROGRAM_NAME = "u002_u22b19c_full_golden_replay_v0_1.py.txt"
-GUIDE_NAME = "UDP002_U22B19C_START_HERE_CN_v0_1_2026-08-25.txt"
+PROGRAM_NAME = "u002_u22b19c_full_golden_replay_v0_2.py.txt"
+GUIDE_NAME = "UDP002_U22B19C_START_HERE_CN_v0_2_2026-08-25.txt"
+ENGINE_PREFLIGHT_RELATIVE = Path("01_PROGRAMS/core/u002_u22_engine_preflight_v0_1.py")
 EXECUTOR_RELATIVE = Path("01_PROGRAMS/core/u002_u22_stage_executor_v0_1.py")
 
 
@@ -278,6 +279,9 @@ def source_context(root: Path) -> dict[str, object]:
         raise B19CError("SOURCE_CONFIG_RUN_ID")
     one_camera_module(source_config.get("ModulePlan"), SOURCE_VERSION, "SOURCE_CONFIG")
     profile_path, profile = resolve_profile(root, summary)
+    engine_preflight = root / ENGINE_PREFLIGHT_RELATIVE
+    if not engine_preflight.is_file() or engine_preflight.is_symlink():
+        raise B19CError("ENGINE_PREFLIGHT_FILE", engine_preflight.name)
     executor = root / EXECUTOR_RELATIVE
     if not executor.is_file() or executor.is_symlink():
         raise B19CError("EXECUTOR_FILE", executor.name)
@@ -296,6 +300,7 @@ def source_context(root: Path) -> dict[str, object]:
         "SourceConfig": source_config,
         "ProfilePath": profile_path,
         "Profile": profile,
+        "EnginePreflight": engine_preflight,
         "Executor": executor,
         "ModuleRoot": module_root,
         "QualificationReceipt": receipt,
@@ -333,13 +338,19 @@ def prepare(root: Path) -> str:
         ("Width binding profile", context["ProfilePath"]),
         ("Qualified S1 v0.4 Module", context["ModuleRoot"]),
         ("Qualification receipt", context["QualificationReceipt"]),
+        ("Engine Preflight", context["EnginePreflight"]),
         ("Stage Executor", context["Executor"]),
         ("New run configuration", context["ConfigPath"]),
         ("New run output", root / "07_OUTPUT" / OUTPUT_RUN_ID),
     ]
     print("=== U22B19C PREPARE / HUMAN-READABLE PREFLIGHT ===")
     for label, path in checks:
-        state = "ABSENT-AS-REQUIRED" if label in {"New run configuration", "New run output"} else "FOUND"
+        if label == "New run configuration":
+            state = "IDENTICAL-REPLAY" if path.is_file() else "ABSENT-AS-REQUIRED"
+        elif label == "New run output":
+            state = "ABSENT-AS-REQUIRED"
+        else:
+            state = "FOUND"
         print(f"PASS | {label} | {state} | {path}")
     print(
         "PASS | Controlled delta | "
@@ -359,6 +370,21 @@ def self_test(root: Path) -> str:
     """Test config transformation and the installed Stage Executor."""
 
     context = preflight(root)
+    preflight_result = subprocess.run(
+        [
+            sys.executable,
+            str(context["EnginePreflight"]),
+            "--self-test",
+            "--workspace-root",
+            str(root),
+        ],
+        text=True,
+        capture_output=True,
+        timeout=180,
+        check=False,
+    )
+    if preflight_result.returncode != 0 or "C-0" not in preflight_result.stdout:
+        raise B19CError("ENGINE_PREFLIGHT_SELFTEST", preflight_result.stdout[-120:])
     executor_result = subprocess.run(
         [
             sys.executable,
@@ -374,7 +400,7 @@ def self_test(root: Path) -> str:
     )
     if executor_result.returncode != 0 or "C-0" not in executor_result.stdout:
         raise B19CError("EXECUTOR_SELFTEST", executor_result.stdout[-120:])
-    return f"U22B19C-SELFTEST-PASS-24-M{context['ModuleCount']}-X0-C0"
+    return f"U22B19C-SELFTEST-PASS-32-M{context['ModuleCount']}-X0-C0"
 
 
 def artifact_manifests(run_root: Path) -> list[tuple[Path, dict[str, object]]]:
@@ -432,12 +458,32 @@ def execute(root: Path, timeout_seconds: int) -> str:
     context = preflight(root)
     source_file_count, source_before = tree_digest(context["SourceRoot"])
     config_disposition = write_json_immutable(context["ConfigPath"], context["TargetConfig"])
+    prepare_result = subprocess.run(
+        [
+            sys.executable,
+            str(context["EnginePreflight"]),
+            "--prepare-run",
+            str(context["ConfigPath"]),
+            "--workspace-root",
+            str(root),
+        ],
+        text=True,
+        capture_output=True,
+        timeout=600,
+        check=False,
+    )
+    if prepare_result.returncode != 0 or "C-0" not in prepare_result.stdout:
+        detail = (prepare_result.stdout + " " + prepare_result.stderr)[-240:]
+        raise B19CError("ENGINE_PREFLIGHT", detail)
+    run_root = root / "07_OUTPUT" / OUTPUT_RUN_ID
+    if not run_root.is_dir() or run_root.is_symlink():
+        raise B19CError("PREPARED_RUN_ROOT", run_root.name)
     result = subprocess.run(
         [
             sys.executable,
             str(context["Executor"]),
             "--execute-run",
-            str(context["ConfigPath"]),
+            str(run_root),
             "--workspace-root",
             str(root),
             "--module-timeout-seconds",
@@ -451,7 +497,6 @@ def execute(root: Path, timeout_seconds: int) -> str:
     if result.returncode != 0 or "C-0" not in result.stdout:
         detail = (result.stdout + " " + result.stderr)[-240:]
         raise B19CError("STAGE_EXECUTOR", detail)
-    run_root = root / "07_OUTPUT" / OUTPUT_RUN_ID
     status = load_json(run_root / "run_status.json", "TARGET_STATUS")
     if status.get("Status") != "SUCCEEDED":
         raise B19CError("TARGET_STATUS", status.get("Status"))

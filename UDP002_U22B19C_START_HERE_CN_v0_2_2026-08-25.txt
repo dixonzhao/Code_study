@@ -1,5 +1,5 @@
 UDP002 U22B19C 全量 Golden Run 执行指南（中文）
-版本：v0.1
+版本：v0.2
 日期：2026-08-25
 
 一、目的
@@ -19,8 +19,8 @@ B19C 使用 B19B 已通过真实数据验证的 S1 v0.4 和 Width Binding Profil
 
 C-CODE\U-UDP002\04_TEMP
 
-1. u002_u22b19c_full_golden_replay_v0_1.py.txt
-2. UDP002_U22B19C_START_HERE_CN_v0_1_2026-08-25.txt
+1. u002_u22b19c_full_golden_replay_v0_2.py.txt
+2. UDP002_U22B19C_START_HERE_CN_v0_2_2026-08-25.txt
 
 不要改名，不要新建子文件夹。
 
@@ -28,9 +28,9 @@ C-CODE\U-UDP002\04_TEMP
 
 当前目录必须为 C-CODE。
 
-python U-UDP002\04_TEMP\u002_u22b19c_full_golden_replay_v0_1.py.txt --prepare --workspace-root U-UDP002
-python U-UDP002\04_TEMP\u002_u22b19c_full_golden_replay_v0_1.py.txt --self-test --workspace-root U-UDP002
-python U-UDP002\04_TEMP\u002_u22b19c_full_golden_replay_v0_1.py.txt --execute --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b19c_full_golden_replay_v0_2.py.txt --prepare --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b19c_full_golden_replay_v0_2.py.txt --self-test --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b19c_full_golden_replay_v0_2.py.txt --execute --workspace-root U-UDP002
 
 四、输出规则
 
@@ -41,6 +41,7 @@ prepare 会显示多行人工可读检查结果，包括：
 - 原 Golden Run；
 - Width Profile；
 - S1 v0.4 Module及资格凭据；
+- Engine Preflight；
 - Stage Executor；
 - 新配置和新输出是否保持未占用；
 - 唯一允许的版本差异；
@@ -55,6 +56,8 @@ B19CP_M...-R...-A...-L...-X0-C0
 self-test 仍只输出机器码；C-0不需要回传。
 
 execute 会完整执行 S0-S7。运行时间取决于现有 Pipeline 和公司电脑负载，请等待命令正常结束，不要中断。
+
+v0.2修正说明：v0.1错误地把Run Configuration文件直接传给Stage Executor。正式契约要求先由Engine Preflight创建PREPARED Run Root，再把该Run Root传给Stage Executor。v0.2已按此固定顺序执行，并在本地使用严格区分“配置文件”和“Run目录”的测试替身完成回归验证。
 
 五、只回传 execute 最后一行
 
