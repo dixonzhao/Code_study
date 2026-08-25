@@ -1,0 +1,574 @@
+#!/usr/bin/env python3
+"""Close B17 with candidate-level evidence and an S1 interface decision record."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+from datetime import datetime, timezone
+import hashlib
+import json
+import math
+from pathlib import Path
+import re
+import shutil
+import sys
+import tempfile
+from typing import Mapping, Sequence
+
+
+PROGRAM_ID = "CameraRadar.B18.CandidateFootprintDecision"
+PROGRAM_VERSION = "0.1.0"
+DEFAULT_B17_RUN_ID = "U22B17_TARGET_ANGULAR_FOOTPRINT_ASSESSMENT_V01"
+DEFAULT_OUTPUT_RUN_ID = "U22B18_CANDIDATE_FOOTPRINT_DECISION_V01"
+FOCUS_CANDIDATE_NUMBERS = (10, 14, 16)
+CURRENT_TRANSFER_FILES = {
+    "u002_u22b18_candidate_footprint_decision_v0_1.py.txt",
+    "u002_u22b18_candidate_footprint_decision_algorithm_card_v0_1.json",
+    "UDP002_U22B18_START_HERE_CN_v0_1_2026-08-25.txt",
+}
+
+
+class B18Error(RuntimeError):
+    """One deterministic B18 failure."""
+
+    def __init__(self, reason: object, detail: object = "NA") -> None:
+        self.reason = token(reason, 80)
+        self.detail = token(detail, 180)
+        super().__init__(self.reason)
+
+
+def token(value: object, limit: int = 100) -> str:
+    """Return one bounded low-bandwidth token."""
+
+    text = "".join(
+        character if character.isalnum() or character in ".-" else "_"
+        for character in str(value).upper()
+    ).strip("_")
+    return (text or "UNKNOWN")[:limit]
+
+
+def sha256_file(path: Path) -> str:
+    """Hash a regular file with bounded memory."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def load_json(path: Path, label: str) -> dict[str, object]:
+    """Load one regular JSON object."""
+
+    if not path.is_file() or path.is_symlink():
+        raise B18Error(label + "_MISSING", path)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as error:
+        raise B18Error(label + "_JSON", path.name) from error
+    if not isinstance(value, dict):
+        raise B18Error(label + "_TYPE", type(value).__name__)
+    return value
+
+
+def write_json(path: Path, value: Mapping[str, object]) -> None:
+    """Write deterministic JSON."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def read_csv(path: Path) -> tuple[list[dict[str, str]], list[str]]:
+    """Read a CSV and reject ambiguous headers."""
+
+    if not path.is_file() or path.is_symlink():
+        raise B18Error("CSV_MISSING", path)
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        columns = list(reader.fieldnames or [])
+        rows = [dict(row) for row in reader]
+    if not columns or len(columns) != len(set(columns)):
+        raise B18Error("CSV_HEADER", path.name)
+    return rows, columns
+
+
+def write_csv(path: Path, columns: Sequence[str], rows: Sequence[Mapping[str, object]]) -> None:
+    """Write deterministic CSV."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(columns), lineterminator="\n")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({column: row.get(column, "") for column in columns})
+
+
+def require_columns(columns: Sequence[str], required: Sequence[str], label: str) -> None:
+    """Require all named fields while permitting documented extensions."""
+
+    missing = [column for column in required if column not in columns]
+    if missing:
+        raise B18Error(label + "_COLUMN", missing[0])
+
+
+def parse_int(value: object, label: str) -> int:
+    """Parse an integer without accepting a fractional value."""
+
+    try:
+        number = float(str(value).strip())
+    except Exception as error:
+        raise B18Error(label, value) from error
+    if not math.isfinite(number) or not number.is_integer():
+        raise B18Error(label, value)
+    return int(number)
+
+
+def parse_float(value: object, label: str) -> float:
+    """Parse one required finite float."""
+
+    try:
+        number = float(str(value).strip())
+    except Exception as error:
+        raise B18Error(label, value) from error
+    if not math.isfinite(number):
+        raise B18Error(label, value)
+    return number
+
+
+def candidate_number(candidate_id: object) -> int:
+    """Normalize C10, C010, and C0010 to the same numeric identity."""
+
+    match = re.fullmatch(r"[Cc]0*(\d+)", str(candidate_id).strip())
+    if match is None:
+        raise B18Error("CANDIDATE_ID", candidate_id)
+    return int(match.group(1))
+
+
+def completed_temp_cleanup(temp_root: Path) -> tuple[Path | None, int]:
+    """Archive every previous top-level TEMP item while keeping B18 inputs.
+
+    This operation is intentionally reversible.  It never deletes 07_OUTPUT,
+    installed Modules, Case data, or A-Archive.  The currently running B18
+    transfer files are allow-listed by exact basename.
+    """
+
+    if not temp_root.is_dir():
+        raise B18Error("TEMP_ROOT", temp_root)
+    candidates = [
+        path
+        for path in sorted(temp_root.iterdir(), key=lambda item: item.name.casefold())
+        if path.name != "A-Archive" and path.name not in CURRENT_TRANSFER_FILES
+    ]
+    if not candidates:
+        return None, 0
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    destination = temp_root / "A-Archive" / f"U22B18_PREPARE_{timestamp}"
+    destination.mkdir(parents=True, exist_ok=False)
+    moved = 0
+    for source in candidates:
+        target = destination / source.name
+        if target.exists():
+            raise B18Error("CLEANUP_COLLISION", source.name)
+        shutil.move(str(source), str(target))
+        moved += 1
+    return destination, moved
+
+
+def load_inputs(
+    workspace_root: Path,
+    b17_run_id: str,
+    card_path: Path,
+) -> tuple[dict[str, object], list[dict[str, str]], list[str]]:
+    """Load and lineage-check the exact B17 evidence package."""
+
+    b17_root = workspace_root / "07_OUTPUT" / b17_run_id
+    summary_path = b17_root / "b17_assessment_summary.json"
+    candidates_path = b17_root / "b17_candidate_footprint_summary.csv"
+    summary = load_json(summary_path, "B17_SUMMARY")
+    if summary.get("Status") != "SUCCEEDED":
+        raise B18Error("B17_STATUS", summary.get("Status"))
+    if summary.get("ProgramId") != "CameraRadar.B17.TargetAngularFootprintAssessment":
+        raise B18Error("B17_PROGRAM_IDENTITY")
+    rows, columns = read_csv(candidates_path)
+    card = load_json(card_path, "ALGORITHM_CARD")
+    if card.get("AlgorithmId") != PROGRAM_ID or card.get("AlgorithmVersion") != PROGRAM_VERSION:
+        raise B18Error("ALGORITHM_CARD_IDENTITY")
+    return summary, rows, columns
+
+
+def focus_evidence(
+    rows: Sequence[Mapping[str, str]],
+    columns: Sequence[str],
+) -> list[dict[str, object]]:
+    """Extract C10/C14/C16 without changing accepted Candidate identity."""
+
+    required = (
+        "CandidateId",
+        "CandidateRank",
+        "RadarInvalidDurationFrames",
+        "FootprintEligibleInvalidFrameCount",
+        "MedianSelectedCameraWidthM",
+        "MedianCameraDistanceM",
+        "MaxAbsTargetCenterBearingDeg",
+        "MaxNearestBodyEdgeBearingDeg",
+        "CenterlineCoverageFrameCount",
+        "CenterlineCoverageFraction",
+        "PreviousTransitionClass",
+    )
+    require_columns(columns, required, "B17_CANDIDATE")
+    by_number: dict[int, Mapping[str, str]] = {}
+    for row in rows:
+        number = candidate_number(row["CandidateId"])
+        if number in by_number:
+            raise B18Error("CANDIDATE_DUPLICATE", number)
+        by_number[number] = row
+    if sorted(by_number) != list(range(1, len(rows) + 1)):
+        raise B18Error("CANDIDATE_DOMAIN")
+
+    output: list[dict[str, object]] = []
+    for number in FOCUS_CANDIDATE_NUMBERS:
+        if number not in by_number:
+            raise B18Error("FOCUS_CANDIDATE_MISSING", number)
+        row = by_number[number]
+        duration = parse_int(row["RadarInvalidDurationFrames"], "DURATION")
+        eligible = parse_int(row["FootprintEligibleInvalidFrameCount"], "ELIGIBLE")
+        centerline = parse_int(row["CenterlineCoverageFrameCount"], "CENTERLINE")
+        if eligible < 0 or centerline < 0 or centerline > eligible:
+            raise B18Error("FOOTPRINT_COUNTS", number)
+        output.append(
+            {
+                "CandidateId": row["CandidateId"],
+                "CandidateNumber": number,
+                "CandidateRank": row["CandidateRank"],
+                "RadarInvalidDurationFrames": duration,
+                "FootprintEligibleInvalidFrameCount": eligible,
+                "MedianSelectedCameraWidthM": parse_float(
+                    row["MedianSelectedCameraWidthM"], "WIDTH"
+                ),
+                "MedianCameraDistanceM": parse_float(
+                    row["MedianCameraDistanceM"], "DISTANCE"
+                ),
+                "MaxAbsTargetCenterBearingDeg": parse_float(
+                    row["MaxAbsTargetCenterBearingDeg"], "CENTER_ANGLE"
+                ),
+                "MaxNearestBodyEdgeBearingDeg": parse_float(
+                    row["MaxNearestBodyEdgeBearingDeg"], "EDGE_ANGLE"
+                ),
+                "CenterlineCoverageFrameCount": centerline,
+                "CenterlineCoverageFraction": parse_float(
+                    row["CenterlineCoverageFraction"], "CENTERLINE_FRACTION"
+                ),
+                "PreviousTransitionClass": row["PreviousTransitionClass"],
+            }
+        )
+    return output
+
+
+def promotion_evidence(summary: Mapping[str, object]) -> dict[str, object]:
+    """Decide only whether an S1 interface change has enough evidence."""
+
+    frames = parse_int(summary.get("FrameCount"), "FRAME_COUNT")
+    eligible = parse_int(summary.get("FootprintEligibleFrameCount"), "ELIGIBLE_COUNT")
+    association = summary.get("AssociationAssessment")
+    if not isinstance(association, dict):
+        raise B18Error("ASSOCIATION_SUMMARY")
+    center_auc = parse_float(association.get("CenterBearingRankAUC"), "CENTER_AUC")
+    edge_auc = parse_float(
+        association.get("NearestBodyEdgeBearingRankAUC"), "EDGE_AUC"
+    )
+    coverage = eligible / frames if frames else 0.0
+    auc_gain = edge_auc - center_auc
+    ready = coverage >= 0.95 and auc_gain >= 0.10
+    return {
+        "FrameCount": frames,
+        "FootprintEligibleFrameCount": eligible,
+        "WidthCoverageFraction": coverage,
+        "CenterBearingRankAUC": center_auc,
+        "NearestBodyEdgeBearingRankAUC": edge_auc,
+        "AucGain": auc_gain,
+        "S1InterfacePromotionEvidenceReady": ready,
+        "Meaning": "READY_TO_DESIGN_INTERFACE_CHANGE_NOT_IMPLEMENTATION_ACCEPTED",
+    }
+
+
+def proposed_interface() -> dict[str, object]:
+    """Describe the future S1 field extension without modifying S1."""
+
+    return {
+        "Status": "PROPOSED_NOT_IMPLEMENTED",
+        "OwningStage": "S1",
+        "OwningModule": "CameraRadar.S1.CameraTargetContinuityArbitration",
+        "Fields": [
+            {
+                "Name": "SelectedCameraWidth",
+                "Type": "nullable finite float",
+                "Unit": "m",
+                "Meaning": "Width from the same selected Camera role and FrameCount",
+            },
+            {
+                "Name": "SelectedCameraWidthValid",
+                "Type": "boolean",
+                "Meaning": "U001 valid AND updated AND age zero AND positive Width",
+            },
+            {
+                "Name": "SelectedCameraWidthReason",
+                "Type": "controlled string",
+                "Meaning": "Reason for valid or unavailable selected Width",
+            },
+            {
+                "Name": "SelectedCameraWidthSourceCanonicalName",
+                "Type": "string",
+                "Meaning": "Exact U001 lineage identity selected by Camera role",
+            },
+        ],
+        "Prohibitions": [
+            "no Width-based target selection in this interface change",
+            "no cross-frame Width hold",
+            "no Radar field-of-view or root-cause claim",
+        ],
+    }
+
+
+def prepare(
+    workspace_root: Path,
+    b17_run_id: str,
+    output_run_id: str,
+    card_path: Path,
+) -> str:
+    """Archive previous TEMP material, then verify every B18 dependency."""
+
+    _, moved = completed_temp_cleanup(workspace_root / "04_TEMP")
+    summary, rows, columns = load_inputs(workspace_root, b17_run_id, card_path)
+    focus_evidence(rows, columns)
+    promotion_evidence(summary)
+    if (workspace_root / "07_OUTPUT" / output_run_id).exists():
+        raise B18Error("OUTPUT_ALREADY_EXISTS", output_run_id)
+    return f"B18P_A{moved}-N{len(rows)}-K3-X0-C0"
+
+
+def execute(
+    workspace_root: Path,
+    b17_run_id: str,
+    output_run_id: str,
+    card_path: Path,
+) -> str:
+    """Write the bounded decision package and compact focus evidence."""
+
+    output_root = workspace_root / "07_OUTPUT" / output_run_id
+    if output_root.exists():
+        raise B18Error("OUTPUT_ALREADY_EXISTS", output_run_id)
+    summary, rows, columns = load_inputs(workspace_root, b17_run_id, card_path)
+    focus = focus_evidence(rows, columns)
+    decision = promotion_evidence(summary)
+    interface = proposed_interface()
+    candidate_path = (
+        workspace_root
+        / "07_OUTPUT"
+        / b17_run_id
+        / "b17_candidate_footprint_summary.csv"
+    )
+
+    try:
+        output_root.mkdir(parents=True, exist_ok=False)
+        write_csv(output_root / "b18_focus_candidate_evidence.csv", list(focus[0]), focus)
+        write_json(
+            output_root / "b18_s1_interface_promotion_decision.json",
+            {
+                "Status": "SUCCEEDED",
+                "ProgramId": PROGRAM_ID,
+                "ProgramVersion": PROGRAM_VERSION,
+                "SourceB17RunId": b17_run_id,
+                "DecisionEvidence": decision,
+                "HumanReviewDependency": {
+                    "AcceptedReviewCapsule": "RV260825T145605_N16-R16_C1-1-9_C1-11-16_C3-10",
+                    "C0010Role": "MANDATORY_NON_GEOMETRIC_COUNTEREXAMPLE",
+                    "C0014Role": "CLOSE_RANGE_FINITE_WIDTH_CASE",
+                    "C0016Role": "CLOSE_RANGE_FINITE_WIDTH_CASE",
+                },
+                "ProposedS1Interface": interface,
+                "ImplementationApproved": False,
+                "ThresholdApproved": False,
+                "RootCauseClaim": False,
+                "B17SummarySha256": sha256_file(
+                    workspace_root / "07_OUTPUT" / b17_run_id / "b17_assessment_summary.json"
+                ),
+                "B17CandidatesSha256": sha256_file(candidate_path),
+                "AlgorithmCardSha256": sha256_file(card_path),
+            },
+        )
+    except Exception:
+        if output_root.exists():
+            shutil.rmtree(output_root)
+        raise
+
+    parts = []
+    for row in focus:
+        parts.append(
+            "C{number}-D{duration}-MC{center}-MN{edge}-O{covered}E{eligible}".format(
+                number=row["CandidateNumber"],
+                duration=row["RadarInvalidDurationFrames"],
+                center=round(float(row["MaxAbsTargetCenterBearingDeg"]) * 10),
+                edge=round(float(row["MaxNearestBodyEdgeBearingDeg"]) * 10),
+                covered=row["CenterlineCoverageFrameCount"],
+                eligible=row["FootprintEligibleInvalidFrameCount"],
+            )
+        )
+    capsule = (
+        f"B18_N{len(rows)}-P{int(bool(decision['S1InterfacePromotionEvidenceReady']))}_"
+        + "_".join(parts)
+        + "_X0-C0"
+    )
+    (output_root / "B18_RETURN_CAPSULE.txt").write_text(capsule + "\n", encoding="utf-8")
+    return capsule
+
+
+def self_test() -> None:
+    """Test cleanup boundaries, identities, decision rule, and capsule inputs."""
+
+    checks = 0
+
+    def check(condition: bool) -> None:
+        nonlocal checks
+        if not condition:
+            raise AssertionError("SELFTEST")
+        checks += 1
+
+    check(candidate_number("C0010") == 10)
+    check(candidate_number("C10") == 10)
+    check(candidate_number("c016") == 16)
+
+    columns = [
+        "CandidateId",
+        "CandidateRank",
+        "RadarInvalidDurationFrames",
+        "FootprintEligibleInvalidFrameCount",
+        "MedianSelectedCameraWidthM",
+        "MedianCameraDistanceM",
+        "MaxAbsTargetCenterBearingDeg",
+        "MaxNearestBodyEdgeBearingDeg",
+        "CenterlineCoverageFrameCount",
+        "CenterlineCoverageFraction",
+        "PreviousTransitionClass",
+    ]
+    rows = []
+    for number in range(1, 17):
+        rows.append(
+            {
+                "CandidateId": f"C{number:04d}",
+                "CandidateRank": number,
+                "RadarInvalidDurationFrames": 10,
+                "FootprintEligibleInvalidFrameCount": 10,
+                "MedianSelectedCameraWidthM": 2.0,
+                "MedianCameraDistanceM": 7.0,
+                "MaxAbsTargetCenterBearingDeg": 10.0,
+                "MaxNearestBodyEdgeBearingDeg": 1.0,
+                "CenterlineCoverageFrameCount": 2,
+                "CenterlineCoverageFraction": 0.2,
+                "PreviousTransitionClass": "TEST",
+            }
+        )
+    focus = focus_evidence(rows, columns)
+    check([row["CandidateNumber"] for row in focus] == [10, 14, 16])
+    check(focus[0]["RadarInvalidDurationFrames"] == 10)
+    check(focus[1]["MedianSelectedCameraWidthM"] == 2.0)
+    check(focus[2]["CenterlineCoverageFrameCount"] == 2)
+
+    summary = {
+        "FrameCount": 50198,
+        "FootprintEligibleFrameCount": 50026,
+        "AssociationAssessment": {
+            "CenterBearingRankAUC": 0.664,
+            "NearestBodyEdgeBearingRankAUC": 0.946,
+        },
+    }
+    decision = promotion_evidence(summary)
+    check(decision["WidthCoverageFraction"] > 0.99)
+    check(abs(float(decision["AucGain"]) - 0.282) < 1e-12)
+    check(decision["S1InterfacePromotionEvidenceReady"] is True)
+    check(proposed_interface()["Status"] == "PROPOSED_NOT_IMPLEMENTED")
+    check(len(proposed_interface()["Fields"]) == 4)
+
+    with tempfile.TemporaryDirectory() as temporary:
+        temp_root = Path(temporary) / "04_TEMP"
+        temp_root.mkdir()
+        for name in CURRENT_TRANSFER_FILES:
+            (temp_root / name).write_text("current", encoding="utf-8")
+        (temp_root / "old_program.py.txt").write_text("old", encoding="utf-8")
+        (temp_root / "old_folder").mkdir()
+        (temp_root / "A-Archive").mkdir()
+        destination, moved = completed_temp_cleanup(temp_root)
+        check(moved == 2)
+        check(destination is not None and destination.is_dir())
+        check((destination / "old_program.py.txt").is_file())
+        check((destination / "old_folder").is_dir())
+        check(all((temp_root / name).is_file() for name in CURRENT_TRANSFER_FILES))
+        check((temp_root / "A-Archive").is_dir())
+
+    check(parse_int("10.0", "T") == 10)
+    check(parse_float("0.946", "T") == 0.946)
+    check(PROGRAM_VERSION == "0.1.0")
+    print(f"U22B18-SELFTEST-PASS-{checks}-C0")
+
+
+def parser() -> argparse.ArgumentParser:
+    """Build the three-command B18 interface."""
+
+    result = argparse.ArgumentParser(description=PROGRAM_ID)
+    mode = result.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--prepare", action="store_true")
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--execute", action="store_true")
+    result.add_argument("--workspace-root", type=Path, default=Path("U-UDP002"))
+    result.add_argument("--b17-run-id", default=DEFAULT_B17_RUN_ID)
+    result.add_argument("--output-run-id", default=DEFAULT_OUTPUT_RUN_ID)
+    result.add_argument(
+        "--algorithm-card",
+        type=Path,
+        default=Path(
+            "U-UDP002/04_TEMP/"
+            "u002_u22b18_candidate_footprint_decision_algorithm_card_v0_1.json"
+        ),
+    )
+    return result
+
+
+def main() -> int:
+    """Execute one explicit mode and return one bounded line."""
+
+    arguments = parser().parse_args()
+    try:
+        if arguments.self_test:
+            self_test()
+        elif arguments.prepare:
+            print(
+                prepare(
+                    arguments.workspace_root,
+                    arguments.b17_run_id,
+                    arguments.output_run_id,
+                    arguments.algorithm_card,
+                )
+            )
+        else:
+            print(
+                execute(
+                    arguments.workspace_root,
+                    arguments.b17_run_id,
+                    arguments.output_run_id,
+                    arguments.algorithm_card,
+                )
+            )
+        return 0
+    except B18Error as error:
+        print(f"B18E_K{error.reason}-D{error.detail}_X1-C7")
+        return 7
+    except Exception as error:
+        print(f"B18E_KUNEXPECTED-D{token(type(error).__name__)}_X1-C7")
+        return 7
+
+
+if __name__ == "__main__":
+    sys.exit(main())

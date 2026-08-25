@@ -1,0 +1,76 @@
+UDP002 U22B18 执行指南
+======================
+
+本节点做什么
+------------
+B17 已证明：在相同有效样本上，目标中心角 AUC 为 0.664，车体最近边缘角 AUC 为 0.946，Width 覆盖率为 99.66%。
+
+B18 只做最后一次候选级收口：自动提取 C0010、C0014、C0016 的中心角、最近边缘角和中心线覆盖 Frame 数，并生成是否值得正式升级 S1 输出接口的证据记录。
+
+B18 不修改 U001、S1 或 Golden Run。
+
+自动清理规则
+------------
+运行 --prepare 时，程序会把 U-UDP002\04_TEMP 中除以下内容外的全部旧项目，移动到带 UTC 时间戳的 A-Archive 子目录：
+
+- 当前 B18 程序；
+- 当前 B18 Algorithm Card；
+- 当前执行指南；
+- A-Archive 本身。
+
+这是可逆归档，不是删除。不会触碰 07_OUTPUT、01_PROGRAMS、02_CONFIG、03_CASES。
+
+文件位置
+--------
+把以下 3 个文件下载到：
+
+C-CODE\U-UDP002\04_TEMP
+
+- u002_u22b18_candidate_footprint_decision_v0_1.py.txt
+- u002_u22b18_candidate_footprint_decision_algorithm_card_v0_1.json
+- UDP002_U22B18_START_HERE_CN_v0_1_2026-08-25.txt
+
+从 C-CODE 目录打开 CMD。
+
+CMD 执行——三行
+---------------
+python U-UDP002\04_TEMP\u002_u22b18_candidate_footprint_decision_v0_1.py.txt --prepare
+
+python U-UDP002\04_TEMP\u002_u22b18_candidate_footprint_decision_v0_1.py.txt --self-test
+
+python U-UDP002\04_TEMP\u002_u22b18_candidate_footprint_decision_v0_1.py.txt --execute
+
+成功标准
+--------
+Self-test：
+
+U22B18-SELFTEST-PASS-21-C0
+
+正式结果类似：
+
+B18_N16-P1_C10-D10-MC4-MN0-O10E10_C14-D20-MC150-MN8-O4E20_C16-D15-MC100-MN12-O2E15_X0-C0
+
+只需回传这一行。
+
+Capsule 解释
+------------
+- P1：证据足以开始设计 S1 接口升级；不是已经批准实现
+- D：Radar 无效持续 Frame 数
+- MC：无效期间最大中心角，单位 0.1°
+- MN：无效期间最大最近车体边缘角，单位 0.1°
+- O：车体横跨传感器中心线的 Frame 数
+- E：具有完整 Width 证据的无效 Frame 数
+
+输出位置
+--------
+C-CODE\U-UDP002\07_OUTPUT\U22B18_CANDIDATE_FOOTPRINT_DECISION_V01
+
+主要文件：
+
+- b18_focus_candidate_evidence.csv
+- b18_s1_interface_promotion_decision.json
+- B18_RETURN_CAPSULE.txt
+
+下一步
+------
+根据 B18 结果决定是否正式创建 S1 v0.4 接口变更。即使 P1，下一步也只增加 SelectedCameraWidth 及其有效性和来源字段，不允许 Width 直接参与 Camera target selection。

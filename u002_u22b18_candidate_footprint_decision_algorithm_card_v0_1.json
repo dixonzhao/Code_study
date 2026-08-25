@@ -1,0 +1,38 @@
+{
+  "AlgorithmId": "CameraRadar.B18.CandidateFootprintDecision",
+  "AlgorithmVersion": "0.1.0",
+  "Status": "DECISION_EVIDENCE_ONLY",
+  "Purpose": "Close the B17 experiment with candidate-level C0010/C0014/C0016 evidence and decide whether a formal SelectedCameraWidth S1 interface change is justified.",
+  "Inputs": [
+    "accepted B17 assessment summary",
+    "accepted B17 Candidate footprint summary",
+    "human review capsule RV260825T145605_N16-R16_C1-1-9_C1-11-16_C3-10"
+  ],
+  "DecisionRule": [
+    "WidthCoverageFraction must be at least 0.95",
+    "NearestBodyEdgeBearingRankAUC minus CenterBearingRankAUC must be at least 0.10",
+    "C0010 remains a mandatory non-geometric counterexample",
+    "C0014 and C0016 remain the close-range finite-width interpretation cases"
+  ],
+  "Outputs": [
+    "three-row focus Candidate evidence CSV",
+    "S1 interface-promotion decision JSON",
+    "proposed but not implemented SelectedCameraWidth field contract",
+    "bounded return capsule"
+  ],
+  "ProposedS1Fields": [
+    "SelectedCameraWidth",
+    "SelectedCameraWidthValid",
+    "SelectedCameraWidthReason",
+    "SelectedCameraWidthSourceCanonicalName"
+  ],
+  "Prohibitions": [
+    "do not modify U001 or S1 in B18",
+    "do not use Width to choose the Camera target",
+    "do not approve a Radar field-of-view threshold",
+    "do not convert descriptive AUC into accuracy or causality",
+    "do not suppress C0010 or other central Radar-loss events"
+  ],
+  "TemporaryWorkspacePolicy": "During prepare, archive every previous top-level 04_TEMP item except A-Archive and the three exact B18 transfer files. Never touch 07_OUTPUT, 01_PROGRAMS, 02_CONFIG or 03_CASES.",
+  "RootCauseClaim": false
+}
