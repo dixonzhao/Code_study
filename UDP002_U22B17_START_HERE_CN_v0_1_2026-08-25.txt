@@ -1,0 +1,79 @@
+UDP002 U22B17 执行指南
+======================
+
+为什么做 B17
+------------
+B15 把目标当成一个点，只计算目标中心的方位角。人工复核发现：
+
+- C0010：车辆仍在正前方，但 Radar 单独丢失约 10 Frame，是明确的非几何对照；
+- C0014、C0016：目标距离很近，即使目标中心角较大，车体的一部分仍靠近传感器中心线，因此 Radar 仍可能继续识别。
+
+B17 使用 U001 已经受控输出的 Camera Width，把目标从“一个点”改成“具有横向宽度的角度范围”。它比较：
+
+1. 目标中心角；
+2. 车体最近边缘角；
+3. 车体是否覆盖传感器中心线。
+
+本实验不会修改 U001、不会修改已经通过 Golden Run 的 S1，也不会批准新的 Radar 视野阈值。
+
+文件位置
+--------
+把以下 3 个文件下载到：
+
+C-CODE\U-UDP002\04_TEMP
+
+- u002_u22b17_target_angular_footprint_assessment_v0_1.py.txt
+- u002_u22b17_target_angular_footprint_assessment_algorithm_card_v0_1.json
+- 本执行指南
+
+从 C-CODE 目录打开 CMD。
+
+CMD 执行——三行
+---------------
+python U-UDP002\04_TEMP\u002_u22b17_target_angular_footprint_assessment_v0_1.py.txt --prepare
+
+python U-UDP002\04_TEMP\u002_u22b17_target_angular_footprint_assessment_v0_1.py.txt --self-test
+
+python U-UDP002\04_TEMP\u002_u22b17_target_angular_footprint_assessment_v0_1.py.txt --execute
+
+程序会自动从 B14 质量记录找到原始 Golden Run，再从该 Run 的 resolved plan 找到准确的 U001 六文件包；不需要手动填写 CAN ID，也不重跑 Decode。
+
+成功标准
+--------
+Self-test：
+
+U22B17-SELFTEST-PASS-26-C0
+
+正式执行返回类似：
+
+B17_N50198-E48000-I500-O120_AUC-C650-N710_K16-X0-C0
+
+只需回传这一行。
+
+Capsule 解释
+------------
+- N：B14 Frame 总数
+- E：Width 与中心几何同时可用的 Frame 数
+- I：其中 Radar 无效 Frame 数
+- O：Radar 无效且车体横跨传感器中心线的 Frame 数
+- AUC-C：目标中心角对 Radar 无效的排序关联，乘以 1000
+- AUC-N：车体最近边缘角对 Radar 无效的排序关联，乘以 1000
+- K：保持的 Candidate 数
+
+AUC 只用于比较两种几何表述，不是准确率、阈值或因果证明。
+
+输出位置
+--------
+C-CODE\U-UDP002\07_OUTPUT\U22B17_TARGET_ANGULAR_FOOTPRINT_ASSESSMENT_V01
+
+主要文件：
+
+- b17_frame_angular_footprint_evidence.csv
+- b17_loss_rate_by_geometry_bin.csv
+- b17_candidate_footprint_summary.csv
+- b17_assessment_summary.json
+- B17_RETURN_CAPSULE.txt
+
+下一步
+------
+先根据 Capsule 判断 Width 覆盖率以及最近边缘角是否比中心角更有解释力；随后只查看 C0010、C0014、C0016 的 Candidate summary。若结论成立，再把 SelectedCameraWidth 正式加入下一版 S1 输出接口；若不成立，保持现有 S1 不动。

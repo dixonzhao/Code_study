@@ -1,0 +1,67 @@
+{
+  "AlgorithmId": "CameraRadar.B17.TargetAngularFootprintAssessment",
+  "AlgorithmVersion": "0.1.0",
+  "Status": "PROVISIONAL_EXPERIMENT_ONLY",
+  "ProblemSolved": "Target-center bearing treats a finite vehicle as a point and can overstate off-axis exposure for close targets.",
+  "Purpose": "Compare target-center bearing with the nearest lateral body-edge bearing while preserving the accepted Golden Run and Candidate identities.",
+  "Inputs": [
+    "accepted B14 full-frame center-bearing evidence",
+    "accepted B16 Candidate transition evidence",
+    "the source Golden Run resolved plan",
+    "paired Camera Width signals from the exact accepted U001 Frame View",
+    "the fingerprint-bound S1 distance bindings used to identify the corresponding Camera channels"
+  ],
+  "MathematicalDefinition": [
+    "x_t = selected Camera longitudinal distance in meters",
+    "y_t = selected Camera lateral position in meters",
+    "w_t = selected Camera target Width in meters",
+    "center_angle_t = atan2(abs(y_t), x_t)",
+    "nearest_edge_offset_t = max(abs(y_t) - w_t/2, 0)",
+    "nearest_edge_angle_t = atan2(nearest_edge_offset_t, x_t)",
+    "farthest_edge_offset_t = abs(y_t) + w_t/2",
+    "farthest_edge_angle_t = atan2(farthest_edge_offset_t, x_t)",
+    "centerline_covered_t = 1 when abs(y_t) <= w_t/2",
+    "rank AUC compares descriptive ordering association with Radar invalidity; it is not a classifier acceptance metric"
+  ],
+  "Assumptions": [
+    "Camera Width is the lateral physical target width in meters",
+    "Camera LateralPosition refers to the target center in the same lateral coordinate system",
+    "Camera Distance, LateralPosition and Width selected from one Camera role describe the same target and FrameCount",
+    "the Camera and Radar sensor-origin offset is small enough for this first descriptive comparison",
+    "U001 validity, updated and age fields are authoritative",
+    "no cross-frame Width hold is permitted"
+  ],
+  "Prohibitions": [
+    "do not modify U001 source files or the accepted S1 Module",
+    "do not call Radar ground truth",
+    "do not infer Radar beam width from this experiment",
+    "do not approve a field-of-view threshold",
+    "do not classify every Radar dropout as geometry-related",
+    "do not hide centerline Radar-loss counterexamples such as reviewed Candidate C0010"
+  ],
+  "Outputs": [
+    "full-frame center and angular-footprint evidence CSV",
+    "directly comparable Radar-invalid rate tables by center and nearest-edge angle",
+    "tie-aware rank-AUC comparison",
+    "Candidate-level footprint summaries preserving B16 identities",
+    "quality and lineage JSON",
+    "bounded return capsule"
+  ],
+  "EvaluationPlan": [
+    "verify exact paired Width identities through the accepted U001 catalog and the source S1 distance bindings",
+    "require Width to be valid, updated in the same frame, age zero and positive",
+    "compare center-angle and nearest-edge-angle descriptive association over identical eligible rows",
+    "inspect reviewed close-range Candidates C0014 and C0016 for reduced nearest-edge angle",
+    "retain reviewed C0010 as a central non-geometric comparison",
+    "promote SelectedCameraWidth into a future S1 interface only if the experiment materially improves engineering interpretation"
+  ],
+  "Limitations": [
+    "DBC definitions of Width and LateralPosition still require business confirmation before a physical field-of-view claim",
+    "target orientation, foreshortening, occlusion, reflector location and Radar antenna pattern are not modeled",
+    "Camera-reported Width may be an estimate rather than measured ground truth",
+    "rank AUC is sensitive to population composition and temporal dependence",
+    "video review remains mandatory for engineering conclusions"
+  ],
+  "DecisionRule": "B17 may justify a formal S1 SelectedCameraWidth interface change only when Width coverage is sufficient and nearest-edge geometry resolves reviewed close-range contradictions without erasing central-loss counterexamples.",
+  "RootCauseClaim": false
+}
