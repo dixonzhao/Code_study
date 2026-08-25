@@ -1,0 +1,1379 @@
+#!/usr/bin/env python3
+"""Run the accepted TC001 full-video Radar-loss review chain.
+
+The production path composes one new immutable five-Module U002 Run:
+
+S0 U001 intake
+S1 Camera target reconstruction 0.3.0
+S1 Radar measurement validity 0.1.1
+S6 Radar measurement-loss Candidate synthesis 0.1.2
+S7 Candidate review-batch export 0.1.1
+
+No threshold, merge rule, Candidate identity or source Artifact is modified.
+The program discovers the technically accepted full-range B1B4 source and the
+accepted B11 geometry configuration, qualifies the exact Module set, executes
+through the standard U002 engine, audits every Artifact and validates the U003
+handoff package fail-closed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+
+PROGRAM_ID = "UDP002.U22B13D.TC001FullVideoRun"
+PROGRAM_VERSION = "0.1.1"
+CONTRACT_VERSION = "U22.0.1"
+
+DEFAULT_RUN_ID = "U22B13D_TC001_FULL_VIDEO_REVIEW_V01"
+SELFTEST_FRAME_START = 7400
+SELFTEST_FRAME_END = 57597
+
+B1B4_RUN_RECEIPT = "u22b1b4_normalized_retry_run_receipt_v0_1.json"
+B1B4_ACCEPTANCE_RECEIPT = "u22b1b4_technical_acceptance_receipt_v0_1.json"
+B11_RUN_ID = "U22B11_GEOMETRY_MODULE_V030_F41380_41780_V01"
+
+CORE_ROOT = Path("01_PROGRAMS/core")
+REGISTRY = CORE_ROOT / "u002_u22_module_registry_v0_1.py"
+QUALIFICATION = CORE_ROOT / "u002_u22_module_qualification_v0_1.py"
+PREFLIGHT = CORE_ROOT / "u002_u22_engine_preflight_v0_1.py"
+EXECUTOR = CORE_ROOT / "u002_u22_stage_executor_v0_1.py"
+ARTIFACT_STORE = CORE_ROOT / "u002_u22_artifact_store_v0_1.py"
+
+MODULE_PLAN = (
+    ("S0", "CameraRadar.S0.U001ControlledProfileIntake", "0.1.1"),
+    ("S1", "CameraRadar.S1.CameraTargetContinuityArbitration", "0.3.0"),
+    ("S1", "CameraRadar.S1.RadarMeasurementValidity", "0.1.1"),
+    (
+        "S6",
+        "CameraRadar.S6.RadarMeasurementLossGeometryCandidateSynthesis",
+        "0.1.2",
+    ),
+    ("S7", "CameraRadar.S7.CandidateReviewBatchExport", "0.1.1"),
+)
+
+ARTIFACT_TYPES = (
+    "U001_INTAKE_ACCEPTED",
+    "CAMERA_TARGET_RECONSTRUCTION",
+    "RADAR_VALIDITY",
+    "ANOMALY_CANDIDATES",
+    "U003_REVIEW_PACKAGE",
+)
+
+REVIEW_COLUMNS = (
+    (
+        "CAMERA_TARGET_RECONSTRUCTION",
+        "CanonicalCameraDistance",
+        "CanonicalCameraDistance",
+        True,
+    ),
+    (
+        "CAMERA_TARGET_RECONSTRUCTION",
+        "CanonicalCameraValid",
+        "CanonicalCameraValid",
+        True,
+    ),
+    (
+        "CAMERA_TARGET_RECONSTRUCTION",
+        "SelectedCameraRole",
+        "SelectedCameraRole",
+        True,
+    ),
+    (
+        "CAMERA_TARGET_RECONSTRUCTION",
+        "SelectionStatus",
+        "SelectionStatus",
+        True,
+    ),
+    (
+        "CAMERA_TARGET_RECONSTRUCTION",
+        "SelectedCameraLateralPosition",
+        "SelectedCameraLateralPosition",
+        False,
+    ),
+    ("RADAR_VALIDITY", "RadarDistance", "RadarDistance", True),
+    (
+        "RADAR_VALIDITY",
+        "RadarMeasurementValid",
+        "RadarMeasurementValid",
+        True,
+    ),
+    (
+        "RADAR_VALIDITY",
+        "RadarValidityReason",
+        "RadarValidityReason",
+        True,
+    ),
+    (
+        "RADAR_VALIDITY",
+        "RadarEvidenceClass",
+        "RadarEvidenceClass",
+        True,
+    ),
+)
+
+
+class B13DError(RuntimeError):
+    """Represent one deterministic full-video failure."""
+
+    def __init__(
+        self,
+        reason: object,
+        detail: object = "NA",
+        phase: object = "B13D",
+    ) -> None:
+        self.reason = machine_token(reason, 80)
+        self.detail = machine_token(detail, 180)
+        self.phase = machine_token(phase, 32)
+        super().__init__(self.reason)
+
+
+def machine_token(value: object, limit: int = 100) -> str:
+    """Convert diagnostic text into one bounded machine-safe token."""
+
+    text = re.sub(r"[^A-Z0-9_.-]+", "_", str(value).upper()).strip("_")
+    return (text or "UNKNOWN")[:limit]
+
+
+def canonical_bytes(value: object) -> bytes:
+    """Serialize one governed JSON document deterministically."""
+
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    """Hash one file with bounded memory."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def load_json(path: Path, label: str) -> Dict[str, object]:
+    """Load one required JSON object."""
+
+    if not path.is_file() or path.is_symlink():
+        raise B13DError(label + "_MISSING", path, "DISCOVERY")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as error:
+        raise B13DError(label + "_JSON", path, "DISCOVERY") from error
+    if not isinstance(value, dict):
+        raise B13DError(label + "_TYPE", path, "DISCOVERY")
+    return value
+
+
+def write_json_atomic(path: Path, value: object) -> None:
+    """Write one JSON file without exposing a partial document."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".writing")
+    if temporary.exists():
+        raise B13DError("TEMPORARY_FILE_EXISTS", temporary, "WRITE")
+    temporary.write_bytes(canonical_bytes(value))
+    temporary.replace(path)
+
+
+def write_text_atomic(path: Path, value: str) -> None:
+    """Write one UTF-8 text file atomically."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".writing")
+    if temporary.exists():
+        raise B13DError("TEMPORARY_FILE_EXISTS", temporary, "WRITE")
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(value)
+    temporary.replace(path)
+
+
+def resolve_path(root: Path, value: object) -> Path:
+    path = Path(str(value))
+    if not path.is_absolute():
+        path = root / path
+    return path.resolve()
+
+
+def require_workspace(path: Path) -> Path:
+    """Require the accepted U002 foundation surface."""
+
+    root = path.resolve()
+    if not root.is_dir() or root.name not in {"U-UDP002", "UDP002"}:
+        raise B13DError("WORKSPACE_ROOT", root, "WORKSPACE")
+    for relative in (REGISTRY, QUALIFICATION, PREFLIGHT, EXECUTOR, ARTIFACT_STORE):
+        candidate = root / relative
+        if not candidate.is_file() or candidate.is_symlink():
+            raise B13DError("CORE_PROGRAM_MISSING", relative, "WORKSPACE")
+    return root
+
+
+def module_item(
+    configuration: Mapping[str, object],
+    module_id: str,
+) -> Dict[str, object]:
+    """Select exactly one Module configuration by identity."""
+
+    plan = configuration.get("ModulePlan")
+    if not isinstance(plan, list):
+        raise B13DError("MODULE_PLAN_TYPE", module_id, "CONFIG")
+    matches = [
+        item
+        for item in plan
+        if isinstance(item, dict) and item.get("ModuleId") == module_id
+    ]
+    if len(matches) != 1:
+        raise B13DError("MODULE_ITEM_COUNT", f"{module_id}:{len(matches)}", "CONFIG")
+    return dict(matches[0])
+
+
+def plan_identity(
+    configuration: Mapping[str, object],
+) -> Tuple[Tuple[str, str, str], ...]:
+    """Return the ordered Stage, ModuleId and ModuleVersion identity."""
+
+    plan = configuration.get("ModulePlan")
+    if not isinstance(plan, list):
+        raise B13DError("MODULE_PLAN_TYPE", "NOT_LIST", "CONFIG")
+    identities: List[Tuple[str, str, str]] = []
+    for sequence, item in enumerate(plan, start=1):
+        if not isinstance(item, dict) or item.get("Sequence") != sequence:
+            raise B13DError("MODULE_SEQUENCE", sequence, "CONFIG")
+        identities.append(
+            (
+                str(item.get("Stage")),
+                str(item.get("ModuleId")),
+                str(item.get("ModuleVersion")),
+            )
+        )
+    return tuple(identities)
+
+
+def require_succeeded_run(
+    workspace_root: Path,
+    run_root: Path,
+    configuration_path: Path,
+    label: str,
+) -> None:
+    """Verify one immutable succeeded source Run and its recorded config."""
+
+    status = load_json(run_root / "run_status.json", label + "_STATUS")
+    if status.get("Status") != "SUCCEEDED":
+        raise B13DError(label + "_NOT_SUCCEEDED", status.get("Status"), "DISCOVERY")
+    recorded = run_root / "00_CONFIG/run_configuration.json"
+    if not recorded.is_file() or recorded.read_bytes() != configuration_path.read_bytes():
+        raise B13DError(label + "_CONFIG_IDENTITY", recorded, "DISCOVERY")
+    try:
+        configuration_path.resolve().relative_to(workspace_root)
+    except ValueError as error:
+        raise B13DError(label + "_CONFIG_OUTSIDE_WORKSPACE", configuration_path) from error
+
+
+def discover_full_source(
+    workspace_root: Path,
+    frame_start: int,
+    frame_end: int,
+) -> Tuple[Path, Path, Dict[str, object], Dict[str, object]]:
+    """Find the unique accepted B1B4 source for the requested frame domain."""
+
+    matches: List[Tuple[Path, Path, Dict[str, object], Dict[str, object]]] = []
+    pattern = "U22B1B4_*/" + B1B4_RUN_RECEIPT
+    for receipt_path in (workspace_root / "07_OUTPUT").glob(pattern):
+        receipt = load_json(receipt_path, "B1B4_RECEIPT")
+        if receipt.get("Status") != "NORMALIZED_RETRY_RUN_COMPLETED":
+            continue
+        if receipt.get("FrameStart") != frame_start:
+            continue
+        if receipt.get("FrameEnd") != frame_end:
+            continue
+        run_root = receipt_path.parent
+        acceptance_path = run_root / B1B4_ACCEPTANCE_RECEIPT
+        acceptance = load_json(acceptance_path, "B1B4_ACCEPTANCE")
+        if acceptance.get("Status") != "TECHNICAL_ACCEPTED_SEMANTIC_REVIEW_PENDING":
+            continue
+        run_id = str(receipt.get("RunId", ""))
+        config_path = workspace_root / "02_CONFIG/run_configs" / (run_id + ".json")
+        require_succeeded_run(
+            workspace_root,
+            run_root,
+            config_path,
+            "B1B4",
+        )
+        configuration = load_json(config_path, "B1B4_CONFIG")
+        matches.append((run_root, config_path, configuration, receipt))
+    if len(matches) != 1:
+        raise B13DError("B1B4_FULL_SOURCE_COUNT", len(matches), "DISCOVERY")
+    return matches[0]
+
+
+def discover_geometry_source(
+    workspace_root: Path,
+) -> Tuple[Path, Path, Dict[str, object]]:
+    """Load the accepted B11 geometry Module configuration and profile."""
+
+    config_path = workspace_root / "02_CONFIG/run_configs" / (B11_RUN_ID + ".json")
+    configuration = load_json(config_path, "B11_CONFIG")
+    run_root = workspace_root / "07_OUTPUT" / B11_RUN_ID
+    require_succeeded_run(workspace_root, run_root, config_path, "B11")
+    camera = module_item(
+        configuration,
+        "CameraRadar.S1.CameraTargetContinuityArbitration",
+    )
+    if camera.get("ModuleVersion") != "0.3.0":
+        raise B13DError("B11_CAMERA_VERSION", camera.get("ModuleVersion"), "DISCOVERY")
+    camera_configuration = camera.get("Configuration")
+    if not isinstance(camera_configuration, dict):
+        raise B13DError("B11_CAMERA_CONFIGURATION", "TYPE", "DISCOVERY")
+    expected_geometry = {
+        "MaxReacquisitionAbsLateralMeters": 0.75,
+        "MinimumCenterlineAdvantageMeters": 1.0,
+        "GeometryConfirmFrames": 3,
+    }
+    for key, expected in expected_geometry.items():
+        if camera_configuration.get(key) != expected:
+            raise B13DError("B11_GEOMETRY_POLICY", key, "DISCOVERY")
+    profile_path = resolve_path(
+        workspace_root,
+        camera_configuration.get("BindingProfilePath"),
+    )
+    profile_hash = str(camera_configuration.get("BindingProfileSha256", ""))
+    if not profile_path.is_file() or sha256_file(profile_path) != profile_hash:
+        raise B13DError("B11_BINDING_PROFILE", profile_path, "DISCOVERY")
+    return run_root, config_path, configuration
+
+
+def source_seed_configuration(
+    full_configuration: Mapping[str, object],
+    frame_start: int,
+    frame_end: int,
+) -> Dict[str, object]:
+    """Recover the full-range seed and derive its context boundary.
+
+    The accepted B1B4 run predates the context-aware Camera Module and
+    therefore does not necessarily contain ``ContextFrameStart``.  SeedFrame
+    and SeedRole are the authoritative B1B4 fields.  For the production
+    full-video run, the context boundary is deterministically the explicit
+    U002 Run ``FrameStart``.  If a newer source explicitly carries the field, it
+    still has to agree with that boundary; the runner never silently accepts
+    a different context domain.
+    """
+
+    camera = module_item(
+        full_configuration,
+        "CameraRadar.S1.CameraTargetContinuityArbitration",
+    )
+    configuration = camera.get("Configuration")
+    if not isinstance(configuration, dict):
+        raise B13DError("B1B4_CAMERA_CONFIGURATION", "TYPE", "COMPOSE")
+    result: Dict[str, object] = {}
+    for key in ("SeedFrame", "SeedRole"):
+        if key not in configuration:
+            raise B13DError("B1B4_SEED_FIELD", key, "COMPOSE")
+        result[key] = configuration[key]
+    seed = result["SeedFrame"]
+    if seed is not None and (
+        not isinstance(seed, int)
+        or isinstance(seed, bool)
+        or seed != frame_start
+    ):
+        raise B13DError("B1B4_SEED_FRAME_MISMATCH", seed, "COMPOSE")
+    if frame_end < frame_start:
+        raise B13DError("FRAME_RANGE_ORDER", f"{frame_start}:{frame_end}", "COMPOSE")
+    context = configuration.get("ContextFrameStart", frame_start)
+    if context is not None and (
+        not isinstance(context, int)
+        or isinstance(context, bool)
+        or context != frame_start
+    ):
+        raise B13DError("B1B4_CONTEXT_RANGE", context, "COMPOSE")
+    result["ContextFrameStart"] = frame_start
+    return result
+
+
+def s6_configuration() -> Dict[str, object]:
+    return {
+        "MinimumInvalidFrames": 5,
+        "CandidateMergeGapFrames": 200,
+        "ReviewPaddingBeforeFrames": 40,
+        "ReviewPaddingAfterFrames": 40,
+        "LateralEvidenceThresholdMeters": 1.7,
+        "RequestedReviewLanguage": "ja",
+    }
+
+
+def s7_configuration() -> Dict[str, object]:
+    return {
+        "MaxCandidatesPerBatch": 40,
+        "BatchOrdering": "CANDIDATE_RANK_ASC_THEN_ID_ASC",
+        "StrictReviewWindowCoverage": True,
+        "ReviewDataColumns": [
+            {
+                "ArtifactType": artifact,
+                "SourceColumn": source,
+                "OutputName": output,
+                "Required": required,
+            }
+            for artifact, source, output, required in REVIEW_COLUMNS
+        ],
+    }
+
+
+def build_configuration(
+    full_configuration: Mapping[str, object],
+    geometry_configuration: Mapping[str, object],
+    run_id: str,
+    frame_start: int,
+    frame_end: int,
+) -> Dict[str, object]:
+    """Compose the production five-Module full-video Run."""
+
+    full_seed = source_seed_configuration(
+        full_configuration,
+        frame_start,
+        frame_end,
+    )
+    s0 = module_item(
+        geometry_configuration,
+        "CameraRadar.S0.U001ControlledProfileIntake",
+    )
+    camera_source = module_item(
+        geometry_configuration,
+        "CameraRadar.S1.CameraTargetContinuityArbitration",
+    )
+    camera_configuration = json.loads(
+        json.dumps(camera_source.get("Configuration"))
+    )
+    if not isinstance(camera_configuration, dict):
+        raise B13DError("CAMERA_CONFIGURATION_TYPE", "NOT_OBJECT", "COMPOSE")
+    camera_configuration.update(full_seed)
+    binding_path = str(camera_configuration.get("BindingProfilePath", ""))
+    binding_hash = str(camera_configuration.get("BindingProfileSha256", ""))
+    if not binding_path or not re.fullmatch(r"[0-9a-f]{64}", binding_hash):
+        raise B13DError("BINDING_PROFILE_IDENTITY", binding_path, "COMPOSE")
+
+    plan = [
+        {
+            "Sequence": 1,
+            "Stage": "S0",
+            "ModuleId": MODULE_PLAN[0][1],
+            "ModuleVersion": MODULE_PLAN[0][2],
+            "Configuration": dict(s0.get("Configuration") or {}),
+        },
+        {
+            "Sequence": 2,
+            "Stage": "S1",
+            "ModuleId": MODULE_PLAN[1][1],
+            "ModuleVersion": MODULE_PLAN[1][2],
+            "Configuration": camera_configuration,
+        },
+        {
+            "Sequence": 3,
+            "Stage": "S1",
+            "ModuleId": MODULE_PLAN[2][1],
+            "ModuleVersion": MODULE_PLAN[2][2],
+            "Configuration": {
+                "BindingProfilePath": binding_path,
+                "BindingProfileSha256": binding_hash,
+            },
+        },
+        {
+            "Sequence": 4,
+            "Stage": "S6",
+            "ModuleId": MODULE_PLAN[3][1],
+            "ModuleVersion": MODULE_PLAN[3][2],
+            "Configuration": s6_configuration(),
+        },
+        {
+            "Sequence": 5,
+            "Stage": "S7",
+            "ModuleId": MODULE_PLAN[4][1],
+            "ModuleVersion": MODULE_PLAN[4][2],
+            "Configuration": s7_configuration(),
+        },
+    ]
+    value = {
+        "ContractVersion": CONTRACT_VERSION,
+        "RunId": run_id,
+        "RunPurpose": "EVALUATION",
+        "RunScope": "FRAME_RANGE",
+        "FrameStart": frame_start,
+        "FrameEnd": frame_end,
+        "InputPackage": geometry_configuration["InputPackage"],
+        "SignalProfile": geometry_configuration["SignalProfile"],
+        "ModulePlan": plan,
+        "PrimaryOutcome": {
+            "Name": "RadarMeasurementLossReviewCandidates",
+            "Formula": "PersistentNot(RadarMeasurementValid)WithCameraGeometryEvidence",
+            "Sign": "NOT_APPLICABLE",
+            "Unit": "frame",
+            "Purpose": "EXPLORATORY",
+        },
+        "CandidatePolicy": MODULE_PLAN[3][1] + "@" + MODULE_PLAN[3][2],
+        "OutputSelection": list(ARTIFACT_TYPES),
+    }
+    if plan_identity(value) != MODULE_PLAN:
+        raise B13DError("COMPOSED_PLAN_IDENTITY", plan_identity(value), "COMPOSE")
+    return value
+
+
+def build_fixture_configuration(
+    source: Mapping[str, object],
+    run_id: str,
+) -> Dict[str, object]:
+    """Build a local integration Run without claiming production geometry."""
+
+    source_plan = source.get("ModulePlan")
+    if not isinstance(source_plan, list):
+        raise B13DError("FIXTURE_PLAN", "TYPE", "FIXTURE")
+    selected: List[Dict[str, object]] = []
+    for module_id in (
+        "CameraRadar.S0.U001ControlledProfileIntake",
+        "CameraRadar.S1.CameraTargetContinuityArbitration",
+        "CameraRadar.S1.RadarMeasurementValidity",
+    ):
+        selected.append(module_item(source, module_id))
+    selected.extend(
+        [
+            {
+                "Stage": "S6",
+                "ModuleId": MODULE_PLAN[3][1],
+                "ModuleVersion": MODULE_PLAN[3][2],
+                "Configuration": s6_configuration(),
+            },
+            {
+                "Stage": "S7",
+                "ModuleId": MODULE_PLAN[4][1],
+                "ModuleVersion": MODULE_PLAN[4][2],
+                "Configuration": s7_configuration(),
+            },
+        ]
+    )
+    for sequence, item in enumerate(selected, start=1):
+        item["Sequence"] = sequence
+    return {
+        "ContractVersion": CONTRACT_VERSION,
+        "RunId": run_id,
+        "RunPurpose": "SMOKE",
+        "RunScope": source["RunScope"],
+        "FrameStart": source["FrameStart"],
+        "FrameEnd": source["FrameEnd"],
+        "InputPackage": source["InputPackage"],
+        "SignalProfile": source["SignalProfile"],
+        "ModulePlan": selected,
+        "PrimaryOutcome": {
+            "Name": "RadarMeasurementLossReviewCandidates",
+            "Formula": "PersistentNot(RadarMeasurementValid)WithCameraGeometryEvidence",
+            "Sign": "NOT_APPLICABLE",
+            "Unit": "frame",
+            "Purpose": "EXPLORATORY",
+        },
+        "CandidatePolicy": MODULE_PLAN[3][1] + "@" + MODULE_PLAN[3][2],
+        "OutputSelection": list(ARTIFACT_TYPES),
+    }
+
+
+def persist_immutable(path: Path, value: Mapping[str, object]) -> str:
+    """Create one configuration or accept only byte-identical replay."""
+
+    payload = canonical_bytes(value)
+    if path.exists():
+        if not path.is_file() or path.read_bytes() != payload:
+            raise B13DError("RUN_CONFIGURATION_CONFLICT", path, "PERSIST")
+        return "REPLAY"
+    write_json_atomic(path, value)
+    return "CREATED"
+
+
+def run_process(command: Sequence[str], timeout: int) -> subprocess.CompletedProcess:
+    """Run one child without shell interpretation."""
+
+    return subprocess.run(
+        list(command),
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def require_success(
+    result: subprocess.CompletedProcess,
+    label: str,
+    diagnostics: List[Dict[str, object]],
+) -> None:
+    """Store bounded child evidence and fail on non-C0 result."""
+
+    diagnostics.append(
+        {
+            "Step": label,
+            "ReturnCode": result.returncode,
+            "StdoutTail": result.stdout[-2400:],
+            "StderrTail": result.stderr[-2400:],
+        }
+    )
+    if result.returncode != 0 or "C-0" not in result.stdout:
+        detail = (result.stdout + " " + result.stderr)[-500:]
+        raise B13DError(label + "_FAILED", detail, "CHILD")
+
+
+def qualify_module_set(
+    workspace_root: Path,
+    identities: Sequence[Tuple[str, str, str]],
+    timeout: int,
+    diagnostics: List[Dict[str, object]],
+) -> None:
+    """Qualify every exact Module identity and refresh availability."""
+
+    registry = run_process(
+        [
+            sys.executable,
+            str(workspace_root / REGISTRY),
+            "--refresh",
+            "--workspace-root",
+            str(workspace_root),
+        ],
+        240,
+    )
+    require_success(registry, "REGISTRY_REFRESH", diagnostics)
+
+    for stage, module_id, version in identities:
+        identity = module_id + "@" + version
+        audit_command = [
+            sys.executable,
+            str(workspace_root / QUALIFICATION),
+            "--audit-module",
+            identity,
+            "--workspace-root",
+            str(workspace_root),
+            "--timeout-seconds",
+            str(timeout),
+        ]
+        audit = run_process(audit_command, timeout + 120)
+        if audit.returncode != 0 or "C-0" not in audit.stdout:
+            qualification = run_process(
+                [
+                    sys.executable,
+                    str(workspace_root / QUALIFICATION),
+                    "--qualify-module",
+                    identity,
+                    "--workspace-root",
+                    str(workspace_root),
+                    "--timeout-seconds",
+                    str(timeout),
+                ],
+                timeout + 120,
+            )
+            require_success(
+                qualification,
+                "QUALIFY_" + stage + "_" + module_id.split(".")[-1],
+                diagnostics,
+            )
+            audit = run_process(audit_command, timeout + 120)
+        require_success(
+            audit,
+            "AUDIT_" + stage + "_" + module_id.split(".")[-1],
+            diagnostics,
+        )
+
+    availability = run_process(
+        [
+            sys.executable,
+            str(workspace_root / QUALIFICATION),
+            "--refresh-availability",
+            "--workspace-root",
+            str(workspace_root),
+        ],
+        240,
+    )
+    require_success(availability, "AVAILABILITY_REFRESH", diagnostics)
+
+
+def execute_run(
+    workspace_root: Path,
+    configuration_path: Path,
+    run_id: str,
+    module_count: int,
+    timeout: int,
+    diagnostics: List[Dict[str, object]],
+) -> Tuple[Path, bool]:
+    """Prepare and execute one immutable U002 Run, or audit a replay."""
+
+    run_root = workspace_root / "07_OUTPUT" / run_id
+    replay = False
+    if run_root.exists():
+        status = load_json(run_root / "run_status.json", "TARGET_RUN_STATUS")
+        recorded = run_root / "00_CONFIG/run_configuration.json"
+        if not recorded.is_file() or recorded.read_bytes() != configuration_path.read_bytes():
+            raise B13DError("TARGET_RUN_CONFIGURATION", run_id, "RUN")
+        if status.get("Status") == "SUCCEEDED":
+            replay = True
+        elif status.get("Status") != "PREPARED":
+            raise B13DError("TARGET_RUN_STATUS", status.get("Status"), "RUN")
+    else:
+        preflight = run_process(
+            [
+                sys.executable,
+                str(workspace_root / PREFLIGHT),
+                "--prepare-run",
+                str(configuration_path),
+                "--workspace-root",
+                str(workspace_root),
+            ],
+            600,
+        )
+        require_success(preflight, "RUN_PREFLIGHT", diagnostics)
+
+    if not replay:
+        execution = run_process(
+            [
+                sys.executable,
+                str(workspace_root / EXECUTOR),
+                "--execute-run",
+                str(run_root),
+                "--workspace-root",
+                str(workspace_root),
+                "--module-timeout-seconds",
+                str(timeout),
+            ],
+            timeout * module_count + 600,
+        )
+        require_success(execution, "FIVE_MODULE_EXECUTION", diagnostics)
+
+    audit = run_process(
+        [
+            sys.executable,
+            str(workspace_root / ARTIFACT_STORE),
+            "--audit-run",
+            "--workspace-root",
+            str(workspace_root),
+            "--run-root",
+            str(run_root),
+        ],
+        1200,
+    )
+    require_success(audit, "ARTIFACT_STORE_AUDIT", diagnostics)
+    return run_root, replay
+
+
+def artifact_records(
+    run_root: Path,
+) -> Dict[str, Tuple[Path, Dict[str, object]]]:
+    """Verify the exact five-Artifact output chain."""
+
+    index_path = run_root / "run_artifact_index_v0_1.json"
+    index = load_json(index_path, "ARTIFACT_INDEX")
+    artifacts = index.get("Artifacts")
+    if not isinstance(artifacts, list) or len(artifacts) != len(ARTIFACT_TYPES):
+        raise B13DError("ARTIFACT_TOTAL", len(artifacts or []), "VERIFY")
+    records: Dict[str, Tuple[Path, Dict[str, object]]] = {}
+    observed: List[str] = []
+    for item in artifacts:
+        if not isinstance(item, dict):
+            raise B13DError("ARTIFACT_INDEX_ITEM", "TYPE", "VERIFY")
+        artifact_type = str(item.get("ArtifactType"))
+        observed.append(artifact_type)
+        manifest_path = run_root / str(item.get("ManifestRelativePath", ""))
+        manifest = load_json(manifest_path, "MANIFEST_" + artifact_type)
+        if manifest.get("ArtifactType") != artifact_type:
+            raise B13DError("ARTIFACT_TYPE_IDENTITY", artifact_type, "VERIFY")
+        if sha256_file(manifest_path) != item.get("ManifestSha256"):
+            raise B13DError("ARTIFACT_MANIFEST_HASH", artifact_type, "VERIFY")
+        payloads = manifest.get("Payloads")
+        if not isinstance(payloads, list) or not payloads:
+            raise B13DError("ARTIFACT_PAYLOADS", artifact_type, "VERIFY")
+        for payload in payloads:
+            if not isinstance(payload, dict):
+                raise B13DError("PAYLOAD_RECORD", artifact_type, "VERIFY")
+            path = manifest_path.parent / str(payload.get("RelativePath", ""))
+            if not path.is_file() or path.is_symlink():
+                raise B13DError("PAYLOAD_MISSING", path, "VERIFY")
+            if sha256_file(path) != payload.get("Sha256"):
+                raise B13DError("PAYLOAD_HASH", path.name, "VERIFY")
+        if artifact_type in records:
+            raise B13DError("ARTIFACT_DUPLICATE", artifact_type, "VERIFY")
+        records[artifact_type] = (manifest_path, manifest)
+    if tuple(observed) != ARTIFACT_TYPES:
+        raise B13DError("ARTIFACT_ORDER", observed, "VERIFY")
+    return records
+
+
+def payload_by_kind(
+    manifest_path: Path,
+    manifest: Mapping[str, object],
+    kind: str,
+) -> Path:
+    payloads = manifest.get("Payloads")
+    matches = [
+        item
+        for item in payloads or []
+        if isinstance(item, dict) and item.get("PayloadKind") == kind
+    ]
+    if len(matches) != 1:
+        raise B13DError(
+            "PAYLOAD_KIND_COUNT",
+            f"{manifest.get('ArtifactType')}:{kind}:{len(matches)}",
+            "VERIFY",
+        )
+    return manifest_path.parent / str(matches[0]["RelativePath"])
+
+
+def payload_by_name(
+    manifest_path: Path,
+    manifest: Mapping[str, object],
+    name: str,
+) -> Path:
+    payloads = manifest.get("Payloads")
+    matches = [
+        item
+        for item in payloads or []
+        if isinstance(item, dict) and item.get("RelativePath") == name
+    ]
+    if len(matches) != 1:
+        raise B13DError("PAYLOAD_NAME_COUNT", f"{name}:{len(matches)}", "VERIFY")
+    return manifest_path.parent / name
+
+
+def read_csv(path: Path) -> Tuple[List[Dict[str, str]], List[str]]:
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        return [dict(row) for row in reader], list(reader.fieldnames or [])
+
+
+def parse_int(value: object, label: str) -> int:
+    if isinstance(value, bool):
+        raise B13DError(label, value, "VERIFY")
+    try:
+        return int(str(value))
+    except Exception as error:
+        raise B13DError(label, value, "VERIFY") from error
+
+
+def boolean_false(value: object) -> bool:
+    return str(value).strip().lower() in {"0", "0.0", "false"}
+
+
+def validate_outputs(
+    run_root: Path,
+    records: Mapping[str, Tuple[Path, Mapping[str, object]]],
+    require_candidates: bool,
+) -> Dict[str, int]:
+    """Validate Candidate completeness, batching and U003 handoff identity."""
+
+    camera_manifest_path, camera_manifest = records["CAMERA_TARGET_RECONSTRUCTION"]
+    radar_manifest_path, radar_manifest = records["RADAR_VALIDITY"]
+    candidate_manifest_path, candidate_manifest = records["ANOMALY_CANDIDATES"]
+    review_manifest_path, review_manifest = records["U003_REVIEW_PACKAGE"]
+
+    camera_rows, camera_columns = read_csv(
+        payload_by_kind(camera_manifest_path, camera_manifest, "PRIMARY")
+    )
+    radar_rows, radar_columns = read_csv(
+        payload_by_kind(radar_manifest_path, radar_manifest, "PRIMARY")
+    )
+    candidate_rows, candidate_columns = read_csv(
+        payload_by_kind(candidate_manifest_path, candidate_manifest, "PRIMARY")
+    )
+    if "FrameCount" not in camera_columns or "FrameCount" not in radar_columns:
+        raise B13DError("FRAMECOUNT_COLUMN", "S1", "VERIFY")
+    if len(camera_rows) != len(radar_rows):
+        raise B13DError("S1_ROW_COUNT", f"{len(camera_rows)}:{len(radar_rows)}", "VERIFY")
+    if require_candidates and not candidate_rows:
+        raise B13DError("ZERO_TC001_CANDIDATES", "KNOWN_LOSS_NOT_FOUND", "VERIFY")
+
+    required_candidate_columns = {
+        "CandidateId",
+        "CandidateRank",
+        "EvidenceStartFrame",
+        "PeakFrameCount",
+        "EvidenceEndFrame",
+        "ReviewStartFrame",
+        "ReviewEndFrame",
+        "ReviewTraceRef",
+        "ReviewMemo",
+        "RootCauseClaim",
+    }
+    missing = required_candidate_columns - set(candidate_columns)
+    if missing:
+        raise B13DError("CANDIDATE_COLUMNS", sorted(missing)[0], "VERIFY")
+    ordered_candidates = sorted(
+        candidate_rows,
+        key=lambda row: (parse_int(row["CandidateRank"], "RANK"), row["CandidateId"]),
+    )
+    candidate_ids: List[str] = []
+    for expected_rank, row in enumerate(ordered_candidates, start=1):
+        identity = row["CandidateId"]
+        if identity in candidate_ids:
+            raise B13DError("CANDIDATE_DUPLICATE", identity, "VERIFY")
+        if parse_int(row["CandidateRank"], "RANK") != expected_rank:
+            raise B13DError("CANDIDATE_RANK", identity, "VERIFY")
+        bounds = [
+            parse_int(row[key], key)
+            for key in (
+                "ReviewStartFrame",
+                "EvidenceStartFrame",
+                "PeakFrameCount",
+                "EvidenceEndFrame",
+                "ReviewEndFrame",
+            )
+        ]
+        if bounds != sorted(bounds):
+            raise B13DError("CANDIDATE_BOUNDS", identity, "VERIFY")
+        if not boolean_false(row["RootCauseClaim"]):
+            raise B13DError("ROOT_CAUSE_CLAIM", identity, "VERIFY")
+        if not row["ReviewMemo"].strip():
+            raise B13DError("REVIEW_MEMO_EMPTY", identity, "VERIFY")
+        candidate_ids.append(identity)
+
+    trace_path = payload_by_name(
+        candidate_manifest_path,
+        candidate_manifest,
+        "module_review_trace.jsonl",
+    )
+    traces: List[Dict[str, object]] = []
+    with trace_path.open("r", encoding="utf-8-sig") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            if not line.strip():
+                continue
+            value = json.loads(line)
+            if not isinstance(value, dict):
+                raise B13DError("TRACE_TYPE", line_number, "VERIFY")
+            traces.append(value)
+    trace_ids: set[str] = set()
+    japanese_traces = 0
+    for trace in traces:
+        trace_id = str(trace.get("TraceId", ""))
+        bundles = trace.get("LocaleBundles")
+        if not trace_id or trace_id in trace_ids or not isinstance(bundles, dict):
+            raise B13DError("TRACE_ID_OR_BUNDLE", trace_id, "VERIFY")
+        if not str(bundles.get("en", "")).strip():
+            raise B13DError("TRACE_ENGLISH", trace_id, "VERIFY")
+        if not str(bundles.get("ja", "")).strip():
+            raise B13DError("TRACE_JAPANESE", trace_id, "VERIFY")
+        trace_ids.add(trace_id)
+        japanese_traces += 1
+    if len(traces) != len(candidate_rows):
+        raise B13DError("TRACE_COUNT", f"{len(traces)}:{len(candidate_rows)}", "VERIFY")
+
+    package_root = review_manifest_path.parent
+    batch_index, batch_columns = read_csv(package_root / "review_batch_index.csv")
+    complete_inventory, _ = read_csv(package_root / "complete_candidate_inventory.csv")
+    quality = load_json(package_root / "review_batch_quality.json", "REVIEW_QUALITY")
+    if len(complete_inventory) != len(candidate_rows):
+        raise B13DError("COMPLETE_INVENTORY_COUNT", len(complete_inventory), "VERIFY")
+    if quality.get("CandidateTruncationCount") != 0:
+        raise B13DError("CANDIDATE_TRUNCATION", quality.get("CandidateTruncationCount"), "VERIFY")
+    if quality.get("CandidateIdentityPreserved") is not True:
+        raise B13DError("CANDIDATE_IDENTITY", "FALSE", "VERIFY")
+    if "ReviewBatchId" not in batch_columns:
+        raise B13DError("BATCH_INDEX_COLUMNS", "ReviewBatchId", "VERIFY")
+
+    assigned: List[str] = []
+    review_rows = 0
+    maximum_batch = 0
+    for index_row in batch_index:
+        batch_id = index_row["ReviewBatchId"]
+        queue, queue_columns = read_csv(
+            package_root / "batches" / batch_id / "event_queue.csv"
+        )
+        data, data_columns = read_csv(
+            package_root / "batches" / batch_id / "review_data.csv"
+        )
+        if not {"EventID", "CandidateId", "PeakFrameCount", "ReviewMemo"}.issubset(
+            queue_columns
+        ):
+            raise B13DError("QUEUE_COLUMNS", batch_id, "VERIFY")
+        if "FrameCount" not in data_columns:
+            raise B13DError("REVIEW_DATA_FRAMECOUNT", batch_id, "VERIFY")
+        if len(queue) > 40:
+            raise B13DError("BATCH_SIZE", len(queue), "VERIFY")
+        maximum_batch = max(maximum_batch, len(queue))
+        for row in queue:
+            if row["EventID"] != row["CandidateId"]:
+                raise B13DError("EVENT_CANDIDATE_ID", row["EventID"], "VERIFY")
+            assigned.append(row["CandidateId"])
+        review_rows += len(data)
+    if assigned != candidate_ids:
+        raise B13DError("BATCH_ASSIGNMENT_IDENTITY", len(assigned), "VERIFY")
+
+    invalid_radar = 0
+    for row in radar_rows:
+        if str(row.get("RadarMeasurementValid", "")).strip().lower() in {
+            "0",
+            "0.0",
+            "false",
+        }:
+            invalid_radar += 1
+    valid_camera = sum(
+        str(row.get("CanonicalCameraValid", "")).strip().lower()
+        in {"1", "1.0", "true"}
+        for row in camera_rows
+    )
+    return {
+        "FrameRows": len(camera_rows),
+        "CanonicalCameraValidRows": valid_camera,
+        "RadarInvalidRows": invalid_radar,
+        "CandidateCount": len(candidate_rows),
+        "ReviewBatchCount": len(batch_index),
+        "AssignedCandidateCount": len(assigned),
+        "ReviewDataRowCount": review_rows,
+        "JapaneseTraceCount": japanese_traces,
+        "MaximumBatchSize": maximum_batch,
+    }
+
+
+def write_failure(
+    workspace_root: Optional[Path],
+    error: Exception,
+    diagnostics: Sequence[Mapping[str, object]],
+) -> None:
+    """Persist a broad machine-readable failure record when possible."""
+
+    if workspace_root is None:
+        return
+    try:
+        root = workspace_root / "07_OUTPUT/U22B13D_CONTROL"
+        root.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(
+            root / "latest_failure.json",
+            {
+                "ProgramId": PROGRAM_ID,
+                "ProgramVersion": PROGRAM_VERSION,
+                "Reason": getattr(error, "reason", type(error).__name__),
+                "Detail": getattr(error, "detail", str(error)),
+                "Phase": getattr(error, "phase", "UNHANDLED"),
+                "Diagnostics": list(diagnostics),
+                "CompletionCode": 7,
+            },
+        )
+    except Exception:
+        pass
+
+
+def execute(args: argparse.Namespace) -> str:
+    """Execute the production or explicitly selected local-fixture path."""
+
+    root = require_workspace(args.workspace_root)
+    diagnostics: List[Dict[str, object]] = []
+    if args.frame_start is None or args.frame_end is None:
+        raise B13DError("EXPLICIT_FRAME_RANGE_REQUIRED", "FRAME_START_FRAME_END", "INPUT")
+    if args.frame_start < 0 or args.frame_end < args.frame_start:
+        raise B13DError(
+            "INVALID_FRAME_RANGE",
+            f"{args.frame_start}:{args.frame_end}",
+            "INPUT",
+        )
+    requested_frame_count = args.frame_end - args.frame_start + 1
+    if args.fixture_source_config is not None:
+        source = load_json(args.fixture_source_config.resolve(), "FIXTURE_CONFIG")
+        configuration = build_fixture_configuration(source, args.run_id)
+        identities = plan_identity(configuration)
+        require_candidates = False
+        source_evidence = {
+            "Mode": "LOCAL_FIXTURE",
+            "SourceConfiguration": str(args.fixture_source_config.resolve()),
+            "SourceConfigurationSha256": sha256_file(args.fixture_source_config.resolve()),
+        }
+    else:
+        full_run_root, full_config_path, full_configuration, full_receipt = (
+            discover_full_source(root, args.frame_start, args.frame_end)
+        )
+        geometry_run_root, geometry_config_path, geometry_configuration = (
+            discover_geometry_source(root)
+        )
+        configuration = build_configuration(
+            full_configuration,
+            geometry_configuration,
+            args.run_id,
+            args.frame_start,
+            args.frame_end,
+        )
+        identities = MODULE_PLAN
+        require_candidates = True
+        source_evidence = {
+            "Mode": "TC001_FULL_VIDEO",
+            "B1B4Run": full_run_root.name,
+            "B1B4Configuration": full_config_path.relative_to(root).as_posix(),
+            "B1B4ConfigurationSha256": sha256_file(full_config_path),
+            "B1B4ReceiptSha256": sha256_bytes(canonical_bytes(full_receipt)),
+            "B11Run": geometry_run_root.name,
+            "B11Configuration": geometry_config_path.relative_to(root).as_posix(),
+            "B11ConfigurationSha256": sha256_file(geometry_config_path),
+        }
+
+    qualify_module_set(
+        root,
+        identities,
+        args.module_timeout_seconds,
+        diagnostics,
+    )
+    config_path = root / "02_CONFIG/run_configs" / (args.run_id + ".json")
+    disposition = persist_immutable(config_path, configuration)
+    run_root, replay = execute_run(
+        root,
+        config_path,
+        args.run_id,
+        len(identities),
+        args.module_timeout_seconds,
+        diagnostics,
+    )
+    records = artifact_records(run_root)
+    metrics = validate_outputs(run_root, records, require_candidates)
+    if args.fixture_source_config is None and metrics["FrameRows"] != requested_frame_count:
+        raise B13DError(
+            "FULL_VIDEO_ROW_COUNT",
+            metrics["FrameRows"],
+            "VERIFY",
+        )
+
+    capsule = (
+        "B13D N-F"
+        + str(metrics["FrameRows"])
+        + "-V"
+        + str(metrics["CanonicalCameraValidRows"])
+        + "-R"
+        + str(metrics["RadarInvalidRows"])
+        + "-C"
+        + str(metrics["CandidateCount"])
+        + "-B"
+        + str(metrics["ReviewBatchCount"])
+        + "-Q"
+        + str(metrics["AssignedCandidateCount"])
+        + "-D"
+        + str(metrics["ReviewDataRowCount"])
+        + "-J"
+        + str(metrics["JapaneseTraceCount"])
+        + "-Z0-X0 C-0"
+    )
+    receipt = {
+        "ReceiptContract": "UDP002_U22B13D_TC001_FULL_VIDEO_RUN_V0_1",
+        "ProgramId": PROGRAM_ID,
+        "ProgramVersion": PROGRAM_VERSION,
+        "Status": "PASSED",
+        "RunId": args.run_id,
+        "RunConfiguration": config_path.relative_to(root).as_posix(),
+        "RunConfigurationSha256": sha256_file(config_path),
+        "ConfigurationDisposition": disposition,
+        "RunReplay": replay,
+        "SourceEvidence": source_evidence,
+        "ModulePlan": [
+            {"Stage": stage, "ModuleId": module_id, "ModuleVersion": version}
+            for stage, module_id, version in identities
+        ],
+        "Metrics": metrics,
+        "CandidateTruncationCount": 0,
+        "RootCauseClaim": False,
+        "Diagnostics": diagnostics,
+        "Capsule": capsule,
+        "CompletionCode": 0,
+    }
+    write_json_atomic(run_root / "u22b13d_full_video_receipt_v0_1.json", receipt)
+    write_text_atomic(run_root / "B13D_return_capsule.txt", capsule + "\n")
+    print(capsule)
+    return capsule
+
+
+def self_test() -> str:
+    """Exercise composition, scope, batching policy and failure boundaries."""
+
+    checks: List[bool] = []
+
+    def check(value: bool) -> None:
+        if not value:
+            raise B13DError("SELFTEST", len(checks), "SELFTEST")
+        checks.append(True)
+
+    full = {
+        "ModulePlan": [
+            {
+                "Sequence": 1,
+                "Stage": "S0",
+                "ModuleId": MODULE_PLAN[0][1],
+                "ModuleVersion": MODULE_PLAN[0][2],
+                "Configuration": {},
+            },
+            {
+                "Sequence": 2,
+                "Stage": "S1",
+                "ModuleId": MODULE_PLAN[1][1],
+                "ModuleVersion": "0.1.0",
+                "Configuration": {
+                    "SeedFrame": SELFTEST_FRAME_START,
+                    "SeedRole": "CAMERA_1_DISTANCE",
+                },
+            },
+        ]
+    }
+    geometry = {
+        "InputPackage": "03_CASES/TC001/U001_FULL_GEOMETRY",
+        "SignalProfile": "TC001.CameraRadar.FullGeometry@0.1",
+        "ModulePlan": [
+            {
+                "Sequence": 1,
+                "Stage": "S0",
+                "ModuleId": MODULE_PLAN[0][1],
+                "ModuleVersion": MODULE_PLAN[0][2],
+                "Configuration": {},
+            },
+            {
+                "Sequence": 2,
+                "Stage": "S1",
+                "ModuleId": MODULE_PLAN[1][1],
+                "ModuleVersion": MODULE_PLAN[1][2],
+                "Configuration": {
+                    "BindingProfilePath": "02_CONFIG/binding_profiles/tc001.json",
+                    "BindingProfileSha256": "a" * 64,
+                    "ContinuityScaleMeters": 0.38,
+                    "MaxContinuityCost": 3.0,
+                    "MaxReacquisitionAbsLateralMeters": 0.75,
+                    "MinimumCenterlineAdvantageMeters": 1.0,
+                    "GeometryConfirmFrames": 3,
+                    "AcquireConfirmFrames": 3,
+                    "SwitchConfirmFrames": 3,
+                    "SwitchMargin": 0.2,
+                    "ResetAfterBothInvalidFrames": 20,
+                    "SeedFrame": 41380,
+                    "SeedRole": "CAMERA_3_DISTANCE",
+                    "ContextFrameStart": 41380,
+                },
+            },
+        ],
+    }
+    value = build_configuration(
+        full,
+        geometry,
+        DEFAULT_RUN_ID,
+        SELFTEST_FRAME_START,
+        SELFTEST_FRAME_END,
+    )
+    check(PROGRAM_ID.startswith("UDP002"))
+    check(PROGRAM_VERSION == "0.1.1")
+    check(CONTRACT_VERSION == "U22.0.1")
+    check(SELFTEST_FRAME_START == 7400)
+    check(SELFTEST_FRAME_END == 57597)
+    check(SELFTEST_FRAME_END - SELFTEST_FRAME_START + 1 == 50198)
+    check(len(MODULE_PLAN) == 5)
+    check(plan_identity(value) == MODULE_PLAN)
+    check(value["RunScope"] == "FRAME_RANGE")
+    check(value["FrameStart"] == SELFTEST_FRAME_START)
+    check(value["FrameEnd"] == SELFTEST_FRAME_END)
+    check(value["InputPackage"] == geometry["InputPackage"])
+    check(value["SignalProfile"] == geometry["SignalProfile"])
+    check(value["OutputSelection"] == list(ARTIFACT_TYPES))
+    camera = module_item(value, MODULE_PLAN[1][1])
+    camera_configuration = camera["Configuration"]
+    check(camera["ModuleVersion"] == "0.3.0")
+    check(camera_configuration["SeedFrame"] == SELFTEST_FRAME_START)
+    check(camera_configuration["SeedRole"] == "CAMERA_1_DISTANCE")
+    check(camera_configuration["ContextFrameStart"] == SELFTEST_FRAME_START)
+    check(camera_configuration["MaxReacquisitionAbsLateralMeters"] == 0.75)
+    check(camera_configuration["MinimumCenterlineAdvantageMeters"] == 1.0)
+    radar = module_item(value, MODULE_PLAN[2][1])
+    check(radar["Configuration"]["BindingProfileSha256"] == "a" * 64)
+    s6 = module_item(value, MODULE_PLAN[3][1])
+    check(s6["Configuration"]["CandidateMergeGapFrames"] == 200)
+    check(s6["Configuration"]["MinimumInvalidFrames"] == 5)
+    check(s6["Configuration"]["RequestedReviewLanguage"] == "ja")
+    s7 = module_item(value, MODULE_PLAN[4][1])
+    check(s7["Configuration"]["MaxCandidatesPerBatch"] == 40)
+    check(len(s7["Configuration"]["ReviewDataColumns"]) == len(REVIEW_COLUMNS))
+    check(all(item["Required"] is required for item, (*_, required) in zip(
+        s7["Configuration"]["ReviewDataColumns"], REVIEW_COLUMNS
+    )))
+    check(value["CandidatePolicy"].endswith("@0.1.2"))
+    check(value["PrimaryOutcome"]["Purpose"] == "EXPLORATORY")
+    check(machine_token("a b/c") == "A_B_C")
+    check(len(sha256_bytes(b"B13D")) == 64)
+    check(boolean_false(False))
+    check(boolean_false("0"))
+    check(not boolean_false("1"))
+    check(B1B4_RUN_RECEIPT.endswith(".json"))
+    check(B1B4_ACCEPTANCE_RECEIPT.endswith(".json"))
+    check(B11_RUN_ID.startswith("U22B11_"))
+    check(len(ARTIFACT_TYPES) == len(MODULE_PLAN))
+    check(ARTIFACT_TYPES[-1] == "U003_REVIEW_PACKAGE")
+    check(REVIEW_COLUMNS[-1][1] == "RadarEvidenceClass")
+    check(len(checks) == 40)
+    if len(checks) != 41:
+        raise B13DError("SELFTEST_COUNT", len(checks), "SELFTEST")
+    return "UDP002-U22B13D-SELFTEST-PASS-41 C-0"
+
+
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--execute", action="store_true")
+    parser.add_argument("--workspace-root", type=Path, default=Path("U-UDP002"))
+    parser.add_argument("--run-id", default=DEFAULT_RUN_ID)
+    parser.add_argument(
+        "--frame-start",
+        type=int,
+        default=None,
+        help="Required for --execute: explicit first FrameCount of this U002 Run.",
+    )
+    parser.add_argument(
+        "--frame-end",
+        type=int,
+        default=None,
+        help="Required for --execute: explicit last FrameCount of this U002 Run.",
+    )
+    parser.add_argument("--module-timeout-seconds", type=int, default=1800)
+    parser.add_argument(
+        "--fixture-source-config",
+        type=Path,
+        default=None,
+        help="Local integration only; never used by the company START_HERE.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = parse_args(argv)
+    workspace: Optional[Path] = None
+    diagnostics: List[Dict[str, object]] = []
+    try:
+        if args.self_test:
+            print(self_test())
+            return 0
+        workspace = args.workspace_root.resolve()
+        execute(args)
+        return 0
+    except Exception as error:
+        write_failure(workspace, error, diagnostics)
+        reason = getattr(error, "reason", type(error).__name__)
+        detail = getattr(error, "detail", str(error))
+        phase = getattr(error, "phase", "UNHANDLED")
+        print(
+            "B13DE K-"
+            + machine_token(reason)
+            + " P-"
+            + machine_token(phase)
+            + " X1 C-7"
+        )
+        print("B13DD D-" + machine_token(detail, 180) + " X0 C-0")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
