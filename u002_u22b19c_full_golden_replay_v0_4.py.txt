@@ -15,18 +15,19 @@ import re
 import shutil
 import subprocess
 import sys
+import traceback
 from typing import Mapping, Optional, Sequence
 
 
 PROGRAM_ID = "CameraRadar.B19C.FullGoldenReplay"
-PROGRAM_VERSION = "0.3.0"
+PROGRAM_VERSION = "0.4.0"
 MODULE_ID = "CameraRadar.S1.CameraTargetContinuityArbitration"
 SOURCE_VERSION = "0.3.0"
 TARGET_VERSION = "0.4.0"
 B19B_RUN_ID = "U22B19B_S1_WIDTH_REAL_REPLAY_V01"
-OUTPUT_RUN_ID = "U22B19C_S1_V04_FULL_GOLDEN_V02"
-PROGRAM_NAME = "u002_u22b19c_full_golden_replay_v0_3.py.txt"
-GUIDE_NAME = "UDP002_U22B19C_START_HERE_CN_v0_3_2026-08-25.txt"
+OUTPUT_RUN_ID = "U22B19C_S1_V04_FULL_GOLDEN_V03"
+PROGRAM_NAME = "u002_u22b19c_full_golden_replay_v0_4.py.txt"
+GUIDE_NAME = "UDP002_U22B19C_START_HERE_CN_v0_4_2026-08-26.txt"
 CONTRACT_VALIDATOR_RELATIVE = Path("01_PROGRAMS/core/u002_u22_contract_validator_v0_1.py")
 ENGINE_PREFLIGHT_RELATIVE = Path("01_PROGRAMS/core/u002_u22_engine_preflight_v0_1.py")
 EXECUTOR_RELATIVE = Path("01_PROGRAMS/core/u002_u22_stage_executor_v0_1.py")
@@ -37,14 +38,30 @@ class B19CError(RuntimeError):
 
     def __init__(self, reason: object, detail: object = "NA") -> None:
         self.reason = token(reason)
-        self.detail = token(detail)
+        self.detail = capsule_detail(detail)
         super().__init__(self.reason)
+
+
+class StagedPreflightFailure(RuntimeError):
+    """Preserve the exact Engine Preflight phase and original exception."""
+
+    def __init__(self, phase: str, original: BaseException) -> None:
+        self.phase = token(phase, 48)
+        self.original = original
+        super().__init__(self.phase)
 
 
 def token(value: object, limit: int = 140) -> str:
     """Return a low-bandwidth diagnostic token."""
 
     text = re.sub(r"[^A-Z0-9_]+", "_", str(value).upper()).strip("_")
+    return (text or "NA")[:limit]
+
+
+def capsule_detail(value: object, limit: int = 220) -> str:
+    """Keep hyphens as field separators while bounding one diagnostic detail."""
+
+    text = re.sub(r"[^A-Z0-9_.-]+", "_", str(value).upper()).strip("_.-")
     return (text or "NA")[:limit]
 
 
@@ -102,6 +119,149 @@ def require_workspace(value: str) -> Path:
     if not root.is_dir() or root.name != "U-UDP002":
         raise B19CError("WORKSPACE_ROOT", root.name)
     return root
+
+
+def load_python_module(path: Path, module_name: str):
+    """Load one installed program for controlled in-process diagnosis."""
+
+    if not path.is_file() or path.is_symlink():
+        raise B19CError("PYTHON_MODULE_FILE", path.name)
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise B19CError("PYTHON_MODULE_LOAD", path.name)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def permission_probe(root: Path) -> dict[str, int]:
+    """Exercise the exact create/write/read/rename/delete operations used by Preflight."""
+
+    output = root / "07_OUTPUT"
+    output.mkdir(parents=True, exist_ok=True)
+    probe = output / (".b19c_permission_probe_" + str(os.getpid()))
+    renamed = output / (probe.name + "_renamed")
+    for path in (probe, renamed):
+        if path.exists():
+            shutil.rmtree(path)
+    checks = 0
+    try:
+        probe.mkdir()
+        checks += 1
+        source = probe / "write_probe.txt"
+        source.write_text("B19C\n", encoding="utf-8")
+        checks += 1
+        if source.read_text(encoding="utf-8") != "B19C\n":
+            raise B19CError("PERMISSION_PROBE_READ")
+        checks += 1
+        target = probe / "renamed_probe.txt"
+        os.replace(source, target)
+        checks += 1
+        child = probe / "child"
+        child.mkdir()
+        checks += 1
+        os.replace(probe, renamed)
+        checks += 1
+        shutil.rmtree(renamed)
+        checks += 1
+    finally:
+        for path in (probe, renamed):
+            if path.exists():
+                shutil.rmtree(path, ignore_errors=True)
+    return {"Checks": checks, "OutputRootWritable": 1}
+
+
+def staged_preflight_prepare(
+    root: Path,
+    config_path: Path,
+    engine_path: Path,
+) -> dict[str, object]:
+    """Run the installed Preflight API phase by phase without changing its semantics."""
+
+    engine = load_python_module(engine_path, "u22_engine_preflight_b19c_diagnostic")
+    phase = "LOAD_VALIDATOR"
+    try:
+        validator = engine.load_validator(root)
+        phase = "LOAD_RUN_CONFIGURATION"
+        run_configuration = engine.load_run_configuration(root, config_path, validator)
+        phase = "RESOLVE_INPUT_PACKAGE"
+        input_package = engine.resolve_input_package(
+            root,
+            str(run_configuration["InputPackage"]),
+        )
+        phase = "REFRESH_AVAILABILITY"
+        availability = engine.refresh_availability(root)
+        phase = "RESOLVE_MODULE_PLAN"
+        modules = engine.resolve_plan(
+            root,
+            run_configuration,
+            availability,
+            validator,
+        )
+        phase = "BUILD_RESOLVED_PLAN"
+        resolved_plan = engine.build_resolved_plan(
+            root,
+            config_path.resolve(),
+            run_configuration,
+            modules,
+            input_package,
+        )
+        phase = "PREPARE_RUN_DIRECTORY"
+        run_root, replay = engine.prepare_run_directory(
+            root,
+            run_configuration,
+            resolved_plan,
+        )
+        return {
+            "RunRoot": str(run_root),
+            "ModuleCount": len(modules),
+            "Replay": bool(replay),
+            "FallbackUsed": True,
+        }
+    except BaseException as error:
+        raise StagedPreflightFailure(phase, error) from error
+
+
+def last_trace_location(error: BaseException) -> tuple[str, int, str]:
+    """Return sanitized filename, line and function for the deepest traceback frame."""
+
+    frames = traceback.extract_tb(error.__traceback__)
+    explicit_filename = getattr(error, "filename", None)
+    if not frames:
+        filename = Path(str(explicit_filename or "NA")).name
+        return filename, 0, "NA"
+    frame = frames[-1]
+    filename = Path(str(explicit_filename)).name if explicit_filename else Path(frame.filename).name
+    return filename, int(frame.lineno), token(frame.name, 40)
+
+
+def staged_failure_to_error(failure: StagedPreflightFailure) -> B19CError:
+    """Convert one rich staged failure into a bounded, machine-readable error."""
+
+    original = failure.original
+    filename, line, function = last_trace_location(original)
+    if isinstance(original, PermissionError):
+        errno_value = getattr(original, "errno", None)
+        winerror = getattr(original, "winerror", None)
+        detail = (
+            f"P{failure.phase}-F{token(filename, 48)}-E{errno_value or 0}"
+            f"-W{winerror or 0}-L{line}-N{function}"
+        )
+        return B19CError("PERMISSION", detail)
+    reason = getattr(original, "reason", original.__class__.__name__)
+    detail_value = getattr(original, "detail", filename)
+    detail = (
+        f"P{failure.phase}-R{token(reason, 56)}-D{token(detail_value, 56)}"
+        f"-L{line}-N{function}"
+    )
+    return B19CError("PREFLIGHT_DIAGNOSTIC", detail)
+
+
+def is_generic_permission_failure(result: subprocess.CompletedProcess[str]) -> bool:
+    """Recognize the old Engine's information-losing PermissionError capsule."""
+
+    combined = (result.stdout + " " + result.stderr).upper()
+    return "PERMISSIONERROR" in combined or "PREMISSIONERROR" in combined
 
 
 def transfer_paths(root: Path) -> tuple[Path, Path]:
@@ -361,6 +521,7 @@ def prepare(root: Path) -> str:
 
     moved, locked = archive_previous_temp(root)
     context = preflight(root)
+    permission = permission_probe(root)
     summary = context["B19BSummary"]
     comparison = summary["Comparison"]
     checks = [
@@ -391,17 +552,24 @@ def prepare(root: Path) -> str:
     )
     print("PASS | Target Run contract | COMPLETE DOCUMENT VALIDATED AGAINST INSTALLED SCHEMA")
     print(
+        "PASS | 07_OUTPUT permission probe | "
+        f"checks={permission['Checks']} create/write/read/rename/delete=OK"
+    )
+    print(
         "PASS | B19B compatibility | "
         f"rows={comparison['Rows']} legacy_mismatch=0 width_valid={comparison['SelectedWidthValidRows']}"
     )
     print(f"WARN | TEMP hygiene | archived={moved} locked_and_retained={locked}")
-    capsule = f"B19CP_M{context['ModuleCount']}-R{comparison['Rows']}-A{moved}-L{locked}-X0-C0"
+    capsule = (
+        f"B19CP-M{context['ModuleCount']}-R{comparison['Rows']}"
+        f"-P{permission['Checks']}-A{moved}-L{locked}-X0-C0"
+    )
     print(capsule)
     return capsule
 
 
 def self_test(root: Path) -> str:
-    """Test config transformation and the installed Stage Executor."""
+    """Test config transformation, diagnostics and installed core programs."""
 
     context = preflight(root)
     preflight_result = subprocess.run(
@@ -434,7 +602,15 @@ def self_test(root: Path) -> str:
     )
     if executor_result.returncode != 0 or "C-0" not in executor_result.stdout:
         raise B19CError("EXECUTOR_SELFTEST", executor_result.stdout[-120:])
-    return f"U22B19C-SELFTEST-PASS-40-M{context['ModuleCount']}-X0-C0"
+    sample = PermissionError(13, "access denied", "sample.lock")
+    try:
+        raise sample
+    except PermissionError as captured:
+        failure = StagedPreflightFailure("PREPARE_RUN_DIRECTORY", captured)
+    converted = staged_failure_to_error(failure)
+    if converted.reason != "PERMISSION" or "PPREPARE_RUN_DIRECTORY" not in converted.detail:
+        raise B19CError("PERMISSION_DIAGNOSTIC_SELFTEST")
+    return f"U22B19C-ST-N48-M{context['ModuleCount']}-X0-C0"
 
 
 def artifact_manifests(run_root: Path) -> list[tuple[Path, dict[str, object]]]:
@@ -506,9 +682,20 @@ def execute(root: Path, timeout_seconds: int) -> str:
         timeout=600,
         check=False,
     )
+    fallback_used = 0
     if prepare_result.returncode != 0 or "C-0" not in prepare_result.stdout:
-        detail = (prepare_result.stdout + " " + prepare_result.stderr)[-240:]
-        raise B19CError("ENGINE_PREFLIGHT", detail)
+        if not is_generic_permission_failure(prepare_result):
+            detail = (prepare_result.stdout + " " + prepare_result.stderr)[-240:]
+            raise B19CError("ENGINE_PREFLIGHT", detail)
+        try:
+            staged_preflight_prepare(
+                root,
+                context["ConfigPath"],
+                context["EnginePreflight"],
+            )
+            fallback_used = 1
+        except StagedPreflightFailure as failure:
+            raise staged_failure_to_error(failure) from failure
     run_root = root / "07_OUTPUT" / OUTPUT_RUN_ID
     if not run_root.is_dir() or run_root.is_symlink():
         raise B19CError("PREPARED_RUN_ROOT", run_root.name)
@@ -578,6 +765,7 @@ def execute(root: Path, timeout_seconds: int) -> str:
         "S7ReviewPackagePresent": True,
         "SourceRunUnchanged": True,
         "ConfigDisposition": config_disposition,
+        "PreflightCliFallbackUsed": bool(fallback_used),
         "GoldenPromotionApproved": False,
         "NextAction": "OPEN_NEW_S7_REVIEW_PACKAGE_IN_U003_AND_COMPLETE_HUMAN_REVIEW",
     }
@@ -589,7 +777,7 @@ def execute(root: Path, timeout_seconds: int) -> str:
     receipt_path.write_bytes(canonical_bytes(summary))
     capsule = (
         f"B19C_N{row_count}-M{context['ModuleCount']}-A{len(manifests)}"
-        f"-S{len(stages)}-W{width_valid}-U1-D1-X0-C0"
+        f"-S{len(stages)}-W{width_valid}-F{fallback_used}-U1-D1-X0-C0"
     )
     (receipt_dir / "B19C_RETURN_CAPSULE.txt").write_text(capsule + "\n", encoding="utf-8")
     return capsule
@@ -622,15 +810,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(execute(root, args.module_timeout_seconds))
         return 0
     except B19CError as error:
-        print(f"B19CE_K{error.reason}-D{error.detail}_X1-C7")
+        print(f"B19CE-K{error.reason}-D{error.detail}-X1-C7")
         return 7
     except PermissionError as error:
         mode = "PREPARE" if args.prepare else "SELFTEST" if args.self_test else "EXECUTE"
-        filename = Path(str(error.filename)).name if error.filename else "NA"
-        print(f"B19CE_KPERMISSION_{mode}-D{token(filename)}_X1-C7")
+        filename, line, function = last_trace_location(error)
+        errno_value = getattr(error, "errno", None) or 0
+        winerror = getattr(error, "winerror", None) or 0
+        print(
+            f"B19CE-KPERMISSION-P{mode}-F{token(filename, 48)}"
+            f"-E{errno_value}-W{winerror}-L{line}-N{function}-X1-C7"
+        )
         return 7
     except Exception as error:
-        print(f"B19CE_KUNEXPECTED-D{token(type(error).__name__)}_X1-C7")
+        filename, line, function = last_trace_location(error)
+        print(
+            f"B19CE-KUNEXPECTED-D{token(type(error).__name__)}"
+            f"-F{token(filename, 48)}-L{line}-N{function}-X1-C7"
+        )
         return 7
 
 
