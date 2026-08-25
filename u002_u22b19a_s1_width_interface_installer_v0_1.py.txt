@@ -1,0 +1,502 @@
+#!/usr/bin/env python3
+"""Install and qualify the additive S1 v0.4 selected-Width interface.
+
+The controller performs four fail-closed duties: TEMP hygiene, package hash
+validation, v0.3/v0.4 selection-equivalence replay, and formal U22 Module
+qualification.  It never edits v0.3 and never changes a Run configuration.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from typing import Mapping, Sequence
+import zipfile
+
+
+PROGRAM_ID = "CameraRadar.B19A.S1WidthInterfaceInstaller"
+PROGRAM_VERSION = "0.1.0"
+MODULE_ID = "CameraRadar.S1.CameraTargetContinuityArbitration"
+BASELINE_VERSION = "0.3.0"
+CANDIDATE_VERSION = "0.4.0"
+PACKAGE_NAME = "UDP002_U22B19A_S1_WIDTH_INTERFACE_PACKAGE_v0_1.zip"
+GUIDE_NAME = "UDP002_U22B19A_START_HERE_CN_v0_1_2026-08-25.txt"
+PROGRAM_NAME = "u002_u22b19a_s1_width_interface_installer_v0_1.py.txt"
+OUTPUT_RUN_ID = "U22B19A_S1_WIDTH_INTERFACE_INSTALL_V01"
+MODULE_FILES = (
+    "algorithm_card.json",
+    "configuration_schema.json",
+    "implementation.py",
+    "module_manifest.json",
+    "selftest.py",
+)
+EXPECTED_HASHES = {
+    "algorithm_card.json": "fda78d2bbd047f19d3c806b3d539d7e709f2281e0d0a534c4a1a3d62d0b548c5",
+    "configuration_schema.json": "9709b65acf80f6a599db0ac6b05f389cac16dedf56477b8fc665e8d55c30cef8",
+    "implementation.py": "40e32753cdfac2503c5f3fc1233319e4bbc4d5efe28bda4c194b112ca996e6da",
+    "module_manifest.json": "ddb87e65041c99c908789877408a385abda86ec8bc1a990b4eb6f3d4bfed0f96",
+    "selftest.py": "0c7ebb3de9327375bf66362914d1acffab6ad5f4f87172d50bd5582abdd60b05",
+}
+PRESERVED_SELECTION_FIELDS = (
+    "CanonicalCameraDistance",
+    "CanonicalCameraValid",
+    "SelectedCameraRole",
+    "SelectionStatus",
+    "SelectionReason",
+    "SelectionChanged",
+    "ContinuityCostCamera1",
+    "ContinuityCostCamera3",
+    "CostMargin",
+    "GeometryPreferredRole",
+    "GeometryAdvantageMeters",
+    "AcquisitionMode",
+    "SegmentId",
+)
+
+
+class B19Error(RuntimeError):
+    """One deterministic B19A failure."""
+
+    def __init__(self, reason: object, detail: object = "NA") -> None:
+        self.reason = token(reason)
+        self.detail = token(detail)
+        super().__init__(self.reason)
+
+
+def token(value: object, limit: int = 96) -> str:
+    """Build one bounded machine-transfer token."""
+
+    normalized = re.sub(r"[^A-Z0-9_]+", "_", str(value).upper()).strip("_")
+    return (normalized or "NA")[:limit]
+
+
+def sha256_file(path: Path) -> str:
+    """Hash one regular file."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def canonical_bytes(value: object) -> bytes:
+    """Serialize deterministic JSON evidence."""
+
+    return (
+        json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    ).encode("utf-8")
+
+
+def write_json(path: Path, value: Mapping[str, object]) -> None:
+    """Write one new evidence document atomically."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".writing")
+    temporary.write_bytes(canonical_bytes(value))
+    os.replace(temporary, path)
+
+
+def require_workspace(value: str) -> Path:
+    """Resolve the fixed company workspace without guessing."""
+
+    root = Path(value).resolve()
+    if not root.is_dir() or root.name != "U-UDP002":
+        raise B19Error("WORKSPACE_ROOT", root.name)
+    return root
+
+
+def transfer_paths(root: Path) -> tuple[Path, Path, Path]:
+    """Return the three exact transfer paths in 04_TEMP."""
+
+    temp = root / "04_TEMP"
+    if not temp.is_dir():
+        raise B19Error("TEMP_ROOT", temp)
+    paths = (temp / PROGRAM_NAME, temp / PACKAGE_NAME, temp / GUIDE_NAME)
+    missing = [path.name for path in paths if not path.is_file()]
+    if missing:
+        raise B19Error("TRANSFER_FILE", missing[0])
+    return paths
+
+
+def archive_previous_temp(root: Path) -> int:
+    """Move stale top-level TEMP items to one reversible timestamped archive."""
+
+    import datetime
+
+    temp = root / "04_TEMP"
+    keep = {"A-Archive", PROGRAM_NAME, PACKAGE_NAME, GUIDE_NAME}
+    stale = sorted(path for path in temp.iterdir() if path.name not in keep)
+    if not stale:
+        return 0
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    destination = temp / "A-Archive" / ("U22B19A_PREPARE_" + stamp)
+    destination.mkdir(parents=True, exist_ok=False)
+    for source in stale:
+        target = destination / source.name
+        if target.exists():
+            raise B19Error("CLEANUP_COLLISION", source.name)
+        shutil.move(str(source), str(target))
+    return len(stale)
+
+
+def safe_members(archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
+    """Reject paths outside the controlled module package."""
+
+    expected_prefix = f"{MODULE_ID}/{CANDIDATE_VERSION}/"
+    members = [member for member in archive.infolist() if not member.is_dir()]
+    names = [member.filename.replace("\\", "/") for member in members]
+    expected = [expected_prefix + name for name in MODULE_FILES]
+    if sorted(names) != sorted(expected):
+        raise B19Error("PACKAGE_FILESET", len(names))
+    for name in names:
+        if name.startswith("/") or ".." in Path(name).parts:
+            raise B19Error("PACKAGE_PATH", name)
+    return members
+
+
+def extract_and_verify(package: Path, destination: Path) -> Path:
+    """Extract only the five approved files and verify hard-coded identities."""
+
+    try:
+        with zipfile.ZipFile(package, "r") as archive:
+            members = safe_members(archive)
+            archive.extractall(destination, members=members)
+    except (OSError, zipfile.BadZipFile) as error:
+        raise B19Error("PACKAGE_ZIP", type(error).__name__) from error
+    module_root = destination / MODULE_ID / CANDIDATE_VERSION
+    for name in MODULE_FILES:
+        path = module_root / name
+        if not path.is_file() or path.is_symlink():
+            raise B19Error("PACKAGE_MEMBER", name)
+        if sha256_file(path) != EXPECTED_HASHES[name]:
+            raise B19Error("PACKAGE_HASH", name)
+    return module_root
+
+
+def load_module(path: Path, identity: str):
+    """Load one explicit implementation file for bounded equivalence testing."""
+
+    spec = importlib.util.spec_from_file_location(identity, path)
+    if spec is None or spec.loader is None:
+        raise B19Error("IMPORT_SPEC", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def source(value: object, eligible: bool = True) -> dict[str, object]:
+    """Build one normalized v0.3 source fixture."""
+
+    return {
+        "Value": value,
+        "Age": 0 if eligible else None,
+        "Valid": eligible,
+        "Eligible": eligible,
+    }
+
+
+def record_v3(frame: int, d1: object, l1: object, d3: object, l3: object,
+              d1_valid: bool = True, l1_valid: bool = True,
+              d3_valid: bool = True, l3_valid: bool = True) -> dict[str, object]:
+    """Build one v0.3 arbitration record."""
+
+    return {
+        "FrameCount": frame,
+        "CAMERA_1_DISTANCE": source(d1, d1_valid),
+        "CAMERA_1_LATERAL_POSITION": source(l1, l1_valid),
+        "CAMERA_3_DISTANCE": source(d3, d3_valid),
+        "CAMERA_3_LATERAL_POSITION": source(l3, l3_valid),
+    }
+
+
+def record_v4(base: Mapping[str, object], width_1: float, width_3: float) -> dict[str, object]:
+    """Extend one v0.3 record with metadata and two same-frame Width states."""
+
+    record: dict[str, object] = {"FrameCount": base["FrameCount"]}
+    for role, state in base.items():
+        if role == "FrameCount":
+            continue
+        enriched = dict(state)
+        enriched["Updated"] = bool(enriched["Valid"])
+        enriched["CanonicalName"] = role
+        record[role] = enriched
+    for role, value in (("CAMERA_1_WIDTH", width_1), ("CAMERA_3_WIDTH", width_3)):
+        state = source(value, True)
+        state["Updated"] = True
+        state["CanonicalName"] = role
+        record[role] = state
+    return record
+
+
+def controlled_configuration() -> dict[str, object]:
+    """Return the frozen v0.3 selection configuration."""
+
+    return {
+        "BindingProfilePath": "02_CONFIG/signal_profiles/not_used.json",
+        "BindingProfileSha256": "0" * 64,
+        "ContinuityScaleMeters": 0.38,
+        "MaxContinuityCost": 3.0,
+        "AcquireConfirmFrames": 3,
+        "SwitchConfirmFrames": 3,
+        "SwitchMargin": 1.0,
+        "ResetAfterBothInvalidFrames": 3,
+        "MaxReacquisitionAbsLateralMeters": 0.75,
+        "MinimumCenterlineAdvantageMeters": 1.0,
+        "GeometryConfirmFrames": 3,
+        "SeedFrame": None,
+        "SeedRole": None,
+        "ContextFrameStart": None,
+    }
+
+
+def differential_replay(baseline_root: Path, candidate_root: Path) -> tuple[int, int]:
+    """Prove that adding Width changes none of the v0.3 public fields."""
+
+    baseline = load_module(baseline_root / "implementation.py", "b19_baseline_v03")
+    candidate = load_module(candidate_root / "implementation.py", "b19_candidate_v04")
+    rows_v3 = [
+        record_v3(100, 20.0, 0.10, 45.0, 2.0),
+        record_v3(101, 20.1, 0.10, 45.1, 2.0),
+        record_v3(102, 20.2, 0.10, 45.2, 2.0),
+        record_v3(103, None, None, 20.3, 0.10, False, False, True, True),
+        record_v3(104, None, None, 20.4, 0.10, False, False, True, True),
+        record_v3(105, None, None, 20.5, 0.10, False, False, True, True),
+        record_v3(106, 50.0, -2.0, 20.6, 0.10),
+        record_v3(107, 50.1, -2.0, 20.7, 0.10),
+    ]
+    rows_v4 = [record_v4(row, 2.0 + index / 10.0, 2.2) for index, row in enumerate(rows_v3)]
+    before = repr(rows_v3), repr(rows_v4)
+    output_v3 = baseline.reconstruct(rows_v3, controlled_configuration())
+    output_v4 = candidate.reconstruct(rows_v4, controlled_configuration())
+    if before != (repr(rows_v3), repr(rows_v4)):
+        raise B19Error("REPLAY_INPUT_MUTATION")
+    if len(output_v3) != len(output_v4):
+        raise B19Error("REPLAY_ROW_COUNT")
+    for index, (old, new) in enumerate(zip(output_v3, output_v4)):
+        for field in baseline.OUTPUT_COLUMNS:
+            if old[field] != new[field]:
+                raise B19Error("REPLAY_FIELD", f"{index}_{field}")
+    for field in PRESERVED_SELECTION_FIELDS:
+        if field not in baseline.OUTPUT_COLUMNS or field not in candidate.OUTPUT_COLUMNS:
+            raise B19Error("REPLAY_CONTRACT", field)
+    if len(candidate.OUTPUT_COLUMNS) - len(baseline.OUTPUT_COLUMNS) != 4:
+        raise B19Error("ADDITIVE_FIELD_COUNT")
+    return len(output_v3), len(baseline.OUTPUT_COLUMNS)
+
+
+def run_candidate_selftest(root: Path, candidate_root: Path) -> str:
+    """Execute the packaged Module self-test before installation."""
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(candidate_root / "selftest.py"),
+            "--module-root",
+            str(candidate_root),
+            "--workspace-root",
+            str(root),
+        ],
+        text=True,
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    capsule = lines[-1] if lines else "MISSING"
+    if result.returncode != 0 or not capsule.endswith("C-0"):
+        raise B19Error("MODULE_SELFTEST", capsule)
+    return capsule
+
+
+def verify_prerequisites(root: Path) -> tuple[Path, Path]:
+    """Require the accepted baseline Module and qualification controller."""
+
+    baseline = root / "01_PROGRAMS/modules/S1" / MODULE_ID / BASELINE_VERSION
+    qualification = root / "01_PROGRAMS/core/u002_u22_module_qualification_v0_1.py"
+    if not baseline.is_dir():
+        raise B19Error("BASELINE_MODULE", baseline)
+    if not qualification.is_file():
+        raise B19Error("QUALIFICATION_CONTROLLER", qualification)
+    return baseline, qualification
+
+
+def prepare(root: Path) -> str:
+    """Clean TEMP, validate inputs, and prove package execution readiness."""
+
+    _, package, _ = transfer_paths(root)
+    moved = archive_previous_temp(root)
+    baseline, _ = verify_prerequisites(root)
+    output = root / "07_OUTPUT" / OUTPUT_RUN_ID
+    if output.exists():
+        raise B19Error("OUTPUT_ALREADY_EXISTS", OUTPUT_RUN_ID)
+    with tempfile.TemporaryDirectory(prefix="u22b19_prepare_") as temporary:
+        candidate = extract_and_verify(package, Path(temporary))
+        replay_rows, baseline_fields = differential_replay(baseline, candidate)
+    return f"B19AP_A{moved}-R{replay_rows}-F{baseline_fields}-X0-C0"
+
+
+def self_test(root: Path) -> str:
+    """Run the packaged Module self-test and differential replay."""
+
+    _, package, _ = transfer_paths(root)
+    baseline, _ = verify_prerequisites(root)
+    with tempfile.TemporaryDirectory(prefix="u22b19_selftest_") as temporary:
+        candidate = extract_and_verify(package, Path(temporary))
+        run_candidate_selftest(root, candidate)
+        replay_rows, baseline_fields = differential_replay(baseline, candidate)
+    checks = 18
+    return f"U22B19A-SELFTEST-PASS-{checks}-R{replay_rows}-F{baseline_fields}-C0"
+
+
+def same_package(left: Path, right: Path) -> bool:
+    """Compare the five controlled Module files by identity."""
+
+    return all(
+        (left / name).is_file()
+        and (right / name).is_file()
+        and sha256_file(left / name) == sha256_file(right / name)
+        for name in MODULE_FILES
+    )
+
+
+def execute(root: Path) -> str:
+    """Install, qualify, audit, and publish one B19A evidence node."""
+
+    _, package, _ = transfer_paths(root)
+    baseline, qualification = verify_prerequisites(root)
+    output = root / "07_OUTPUT" / OUTPUT_RUN_ID
+    if output.exists():
+        raise B19Error("OUTPUT_ALREADY_EXISTS", OUTPUT_RUN_ID)
+    target = root / "01_PROGRAMS/modules/S1" / MODULE_ID / CANDIDATE_VERSION
+    with tempfile.TemporaryDirectory(prefix="u22b19_execute_") as temporary:
+        extracted = extract_and_verify(package, Path(temporary))
+        run_candidate_selftest(root, extracted)
+        replay_rows, baseline_fields = differential_replay(baseline, extracted)
+        if target.exists():
+            if not target.is_dir() or not same_package(target, extracted):
+                raise B19Error("TARGET_VERSION_CONFLICT", target)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            staging = target.with_name(target.name + ".installing")
+            if staging.exists():
+                raise B19Error("INSTALL_STAGING_EXISTS", staging)
+            shutil.copytree(extracted, staging)
+            os.replace(staging, target)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(qualification),
+            "--qualify-module",
+            MODULE_ID + "@" + CANDIDATE_VERSION,
+            "--workspace-root",
+            str(root),
+            "--timeout-seconds",
+            "180",
+        ],
+        text=True,
+        capture_output=True,
+        timeout=240,
+        check=False,
+    )
+    if result.returncode != 0 or "C-0" not in result.stdout:
+        raise B19Error("QUALIFICATION", result.stdout[-120:])
+
+    audit = subprocess.run(
+        [
+            sys.executable,
+            str(qualification),
+            "--audit-module",
+            MODULE_ID + "@" + CANDIDATE_VERSION,
+            "--workspace-root",
+            str(root),
+        ],
+        text=True,
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+    if audit.returncode != 0 or "C-0" not in audit.stdout:
+        raise B19Error("QUALIFICATION_AUDIT", audit.stdout[-120:])
+
+    receipt = (
+        root
+        / "00_CONTROL/registry/qualifications"
+        / MODULE_ID
+        / CANDIDATE_VERSION
+        / "qualification_receipt.json"
+    )
+    if not receipt.is_file():
+        raise B19Error("QUALIFICATION_RECEIPT")
+
+    output.mkdir(parents=True, exist_ok=False)
+    summary = {
+        "Status": "SUCCEEDED",
+        "ProgramId": PROGRAM_ID,
+        "ProgramVersion": PROGRAM_VERSION,
+        "InstalledModuleId": MODULE_ID,
+        "InstalledModuleVersion": CANDIDATE_VERSION,
+        "BaselineModuleVersion": BASELINE_VERSION,
+        "DifferentialReplayRows": replay_rows,
+        "BaselinePublicFieldCount": baseline_fields,
+        "AdditiveFieldCount": 4,
+        "PreservedSelectionFields": list(PRESERVED_SELECTION_FIELDS),
+        "PackageFileHashes": dict(EXPECTED_HASHES),
+        "QualificationReceiptSha256": sha256_file(receipt),
+        "SelectionLogicChanged": False,
+        "WidthUsedForSelection": False,
+        "BindingProfileCreated": False,
+        "GoldenRunExecuted": False,
+        "NextNode": "U22B19B_EXPLICIT_WIDTH_BINDING_AND_CONTROLLED_REAL_REPLAY",
+    }
+    write_json(output / "b19a_installation_summary.json", summary)
+    capsule = f"B19A_NM1-Q1-D{replay_rows}-V4-W4-X0-C0"
+    (output / "B19A_RETURN_CAPSULE.txt").write_text(capsule + "\n", encoding="utf-8")
+    return capsule
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    """Build the fixed three-command company interface."""
+
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--prepare", action="store_true")
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--execute", action="store_true")
+    parser.add_argument("--workspace-root", required=True)
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Execute one B19A mode and emit one bounded capsule."""
+
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        root = require_workspace(args.workspace_root)
+        if args.prepare:
+            print(prepare(root))
+        elif args.self_test:
+            print(self_test(root))
+        else:
+            print(execute(root))
+        return 0
+    except B19Error as error:
+        print(f"B19AE_K{error.reason}-D{error.detail}_X1-C7")
+        return 7
+    except Exception as error:
+        print(f"B19AE_KUNEXPECTED-D{token(type(error).__name__)}_X1-C7")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
