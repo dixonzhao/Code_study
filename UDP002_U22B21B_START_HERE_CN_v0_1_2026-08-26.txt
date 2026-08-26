@@ -1,0 +1,118 @@
+UDP002 U22B21B 执行指南 v0.1
+日期：2026-08-26
+
+目标
+====
+
+把已经通过 B21A 验收的 U002 Review Package 直接交给 U003。
+
+本步骤完成后：
+
+1. U002 不再打开空白 U003；
+2. U003 会先验证 descriptor、SHA-256、Event Queue 和 Review Data；
+3. 验证通过后自动装载 Event Queue 与 Review Data；
+4. 不需要再次手工选择两个 CSV；
+5. 如果 descriptor 属于旧 Run、文件缺失或哈希变化，则拒绝启动 handoff。
+
+
+下载与放置
+============
+
+从 Code_study 下载：
+
+1. UDP002_U22B21B_GOVERNED_U003_LAUNCH_v0_1.zip
+2. 本执行指南
+
+把两个文件放到：
+
+U-UDP002\04_TEMP
+
+在 04_TEMP 内解压 ZIP。解压后，以下四个文件必须直接位于 04_TEMP，
+不能再套一层子文件夹：
+
+- u002_u22b21b_governed_u003_launch_installer_v0_1.py.txt
+- u002_thin_workbench_model_v0_5.py.txt
+- u002_thin_workbench_gui_v0_9.py.txt
+- u003_evidence_review_workbench_v0_11.py.txt
+
+
+执行位置
+========
+
+打开 CMD，进入 C-CODE 根目录。
+
+
+命令 1：Prepare
+================
+
+python U-UDP002\04_TEMP\u002_u22b21b_governed_u003_launch_installer_v0_1.py.txt --prepare --workspace-root U-UDP002
+
+它会：
+
+- 安装 U002 Model v0.5；
+- 安装 U002 GUI v0.9；
+- 把 U003 v0.11 安装到 U-UDP003\01_PROGRAMS；
+- 更新本机 U003 Link；
+- 检查 B21A descriptor；
+- 只归档已被替代的 B21A/B21B 临时传输文件。
+
+
+命令 2：Self-test
+=================
+
+python U-UDP002\04_TEMP\u002_u22b21b_governed_u003_launch_installer_v0_1.py.txt --self-test --workspace-root U-UDP002
+
+它会检查：
+
+- 四个安装文件能够编译和无界面导入；
+- U003 v0.11 的 descriptor 与 payload 验证逻辑；
+- 16 个 Candidate 和 1937 行 Review Data 仍完整；
+- U002 启动命令确实携带 handoff descriptor；
+- 旧 Run 不能复用当前 handoff；
+- Self-test 不打开 GUI，也不重新运行分析。
+
+
+命令 3：Execute / GUI 联动确认
+=============================
+
+python U-UDP002\04_TEMP\u002_u22b21b_governed_u003_launch_installer_v0_1.py.txt --execute --workspace-root U-UDP002
+
+预期现象：
+
+1. U002 Analysis Workbench v0.9 打开；
+2. 右上角显示 U003 HANDOFF READY；
+3. U003 Evidence Review Workbench v0.11 自动打开；
+4. Event Queue 自动出现 16 个 Event；
+5. Synchronized CAN Review Table 自动打开并已有数据；
+6. 不会弹出 Load Event CSV / Load Review Data CSV 的文件选择流程。
+
+本步骤不会自动打开视频，因为视频不是 U002 S7 Review Package 的组成部分。
+打开 U003 后，仍由工程师手动选择对应视频。
+
+
+回传
+====
+
+若三个命令均为 C0，回传 Execute 的 B21B machine code，再补一行：
+
+B21BV-O1-E16-T1-C0
+
+含义：
+
+- O1：U002 与 U003 正常打开；
+- E16：U003 显示 16 个 Event；
+- T1：CAN Review Table 已自动装载；
+- C0：人工 GUI 联动确认通过。
+
+若出现 C7，只回传短 machine code；完整原因保存在：
+
+U-UDP002\04_TEMP\B21B_LAST_ERROR.txt
+
+
+当前边界
+========
+
+- U003 v0.11 当前明确接受单个 Review Batch；
+- 若未来 descriptor 含多个 Batch，会 fail-close，不会静默漏载；
+- 本步骤只改变 handoff 与 GUI 联动，不修改 S0-S7 的分析算法和既有 Golden 结果；
+- 当前 B21A descriptor 是本次 Golden Run 的已验收 handoff。以后新的 Run 必须生成并验收自己的 descriptor，不能复用旧结果。
