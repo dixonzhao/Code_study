@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""Install the governed U3M1 module foundation from its adjacent ZIP file."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import shutil
+import sys
+import tempfile
+import zipfile
+from datetime import datetime
+from pathlib import Path, PurePosixPath
+
+
+PACKAGE_NAME = "UDP003_U3M1_MODULE_FOUNDATION_v0_1.zip"
+REQUIRED_MEMBERS = {
+    "01_PROGRAMS/u003_module_runtime_v0_1.py",
+    "02_CONTROLS/contracts/u003_module_contract_v0_1.json",
+    "02_MODULES/REVIEW_ASSIST/CameraRadar.U003.ReviewDispositionLabels/0.1.0/module_manifest.json",
+    "02_MODULES/REVIEW_ASSIST/CameraRadar.U003.ReviewDispositionLabels/0.1.0/algorithm_card.json",
+    "PACKAGE_SHA256.csv",
+}
+
+
+class InstallError(RuntimeError):
+    """Raised when the transfer package is incomplete or unsafe."""
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def safe_members(archive: zipfile.ZipFile) -> list[str]:
+    members: list[str] = []
+    for name in archive.namelist():
+        pure = PurePosixPath(name)
+        if pure.is_absolute() or ".." in pure.parts:
+            raise InstallError(f"Unsafe ZIP member: {name}")
+        if name.endswith("/"):
+            continue
+        members.append(name)
+    if set(members) != REQUIRED_MEMBERS:
+        missing = sorted(REQUIRED_MEMBERS - set(members))
+        extra = sorted(set(members) - REQUIRED_MEMBERS)
+        raise InstallError(f"Package file inventory mismatch. Missing={missing}; Extra={extra}")
+    return members
+
+
+def validate_extracted_package(package_root: Path) -> list[tuple[str, str, str]]:
+    manifest_path = package_root / "PACKAGE_SHA256.csv"
+    with manifest_path.open("r", encoding="utf-8-sig", newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    if len(rows) != 4:
+        raise InstallError("PACKAGE_SHA256.csv must contain exactly four payload rows.")
+
+    checked: list[tuple[str, str, str]] = []
+    for row in rows:
+        relative = row.get("RelativePath", "").strip()
+        expected = row.get("Sha256", "").strip().lower()
+        purpose = row.get("Purpose", "").strip()
+        target = (package_root / relative).resolve()
+        try:
+            target.relative_to(package_root.resolve())
+        except ValueError as error:
+            raise InstallError(f"Manifest path escapes package root: {relative}") from error
+        if not target.is_file() or target.is_symlink():
+            raise InstallError(f"Package payload is missing: {relative}")
+        actual = sha256_file(target)
+        if actual != expected:
+            raise InstallError(f"Package payload hash mismatch: {relative}")
+        checked.append((relative, actual, purpose))
+    return checked
+
+
+def backup_existing_files(root: Path, relative_paths: list[str]) -> Path | None:
+    existing = [relative for relative in relative_paths if (root / relative).is_file()]
+    if not existing:
+        return None
+    stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+    backup_root = root / "A-Archive" / f"U3M1_REPLACED_{stamp}"
+    for relative in existing:
+        source = root / relative
+        destination = backup_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+    return backup_root
+
+
+def install(package_path: Path, root: Path) -> int:
+    package_path = package_path.resolve()
+    root = root.resolve()
+    if root.name.upper() != "U-UDP003":
+        raise InstallError(f"Expected U-UDP003 root, got: {root}")
+    if not package_path.is_file():
+        raise InstallError(f"Transfer ZIP is missing: {package_path}")
+
+    temp_parent = root / "04_TEMP"
+    temp_parent.mkdir(parents=True, exist_ok=True)
+    prepared = temp_parent / "U3M1_PREPARED"
+    if prepared.exists():
+        shutil.rmtree(prepared)
+    prepared.mkdir(parents=True)
+
+    with zipfile.ZipFile(package_path, "r") as archive:
+        members = safe_members(archive)
+        archive.extractall(prepared)
+
+    checked = validate_extracted_package(prepared)
+    relative_paths = [relative for relative, _digest, _purpose in checked]
+    backup_root = backup_existing_files(root, relative_paths)
+    for relative in relative_paths:
+        source = prepared / relative
+        destination = root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        writing = destination.with_name(destination.name + ".writing")
+        shutil.copy2(source, writing)
+        writing.replace(destination)
+
+    print("U3M1 prepare checks:")
+    print(f"  [OK] U003 root: {root} - keeps company paths explicit")
+    print(f"  [OK] ZIP inventory: {len(members)} files - rejects missing or foreign payloads")
+    for relative, digest, purpose in checked:
+        print(f"  [OK] {relative} | {digest[:12]} - {purpose}")
+    print("  [OK] 02_MODULES created - future modules have one governed location")
+    print("  [OK] U3M1_PREPARED refreshed - stale extraction cannot be reused")
+    if backup_root is not None:
+        print(f"  [OK] Previous owned files archived: {backup_root}")
+    else:
+        print("  [OK] No previous owned payload required archival")
+    print("U3M1P N-R1-Z1-F4-M1-B{}-X0 C-0".format(1 if backup_root else 0))
+    return 0
+
+
+def parse_arguments(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--prepare", action="store_true")
+    parser.add_argument("--root", type=Path)
+    parser.add_argument("--package", type=Path)
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    arguments = parse_arguments(sys.argv[1:] if argv is None else argv)
+    try:
+        if not arguments.prepare:
+            raise InstallError("Use --prepare.")
+        script_directory = Path(__file__).resolve().parent
+        default_root = script_directory.parent
+        root = arguments.root if arguments.root is not None else default_root
+        package = (
+            arguments.package
+            if arguments.package is not None
+            else script_directory / PACKAGE_NAME
+        )
+        return install(package, root)
+    except Exception as error:
+        print(f"U3M1PE K-{type(error).__name__.upper()} D-{error} X1 C-7", file=sys.stderr)
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
