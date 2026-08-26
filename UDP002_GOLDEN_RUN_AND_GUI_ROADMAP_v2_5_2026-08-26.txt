@@ -1,7 +1,7 @@
 CAMERA-RADAR ANALYSIS PLATFORM - GOLDEN RUN AND GUI ROADMAP
-Version: 2.4
+Version: 2.5
 Date: 2026-08-26
-Status: U002 GUI V0.10 LAYOUT CORRECTION LOCALLY ACCEPTED; COMPANY VISUAL ACCEPTANCE NEXT
+Status: U002 GUI V0.10 COMPANY ACCEPTED; B20C CONFIGURATION EQUIVALENCE LOCALLY READY
 
 1. Product objective
 
@@ -75,6 +75,8 @@ Modules may be reordered only within their assigned Stage. Cross-Stage movement 
 - B20A Default Qualified GUI Profile and machine-local Workbench Link contracts completed.
 - B20B v0.5 company GUI launch completed.
 - B20B v0.10 local acceptance completed after human-usability, Profile priority, Stage grouping, post-run-destination and complete Workflow-visibility corrections.
+- B20B v0.10 company visual acceptance completed with B20B10-OPEN3-WF4-S8-DESC1-OUT2-C0.
+- B20C local end-to-end acceptance proves the GUI model preserves all 11 Golden semantic fields while allowing a new RunId.
 
 5. Current B20B v0.10 scope
 
@@ -106,8 +108,8 @@ Frame-domain decision:
 
 6. Immediate acceptance sequence
 
-B20B v0.10 company visual acceptance
--> B20C GUI-generated Default Run Configuration
+B20B v0.10 company visual acceptance [COMPLETE]
+-> B20C GUI-model-generated Default Run Configuration [LOCAL READY]
 -> semantic-equivalence comparison against the accepted CLI Golden configuration
 -> GUI-triggered Validator / Preflight / Executor Golden regression
 -> automatic U003 handoff and final synchronized human review
@@ -145,4 +147,4 @@ A first-time user can select an accepted U001 package, understand and configure 
 
 9. Next action
 
-Install and visually accept B20B v0.10 on the company host. Do not begin B20C until the one-row Profile actions, 2-by-2 complete Workflow, S0-S7 Module grouping, real-Version descriptions and explicit post-run destination are confirmed.
+Run the three B20C commands on the company host. B20C must confirm exact equality for ContractVersion, RunPurpose, RunScope, FrameStart, FrameEnd, InputPackage, SignalProfile, ModulePlan, PrimaryOutcome, CandidatePolicy and OutputSelection; RunId is the only permitted difference. Do not start B20D if any semantic difference is reported.

@@ -1,0 +1,64 @@
+UDP002 U22B20C GUI配置语义等价验收指南
+版本：v0.1
+日期：2026-08-26
+
+一、本阶段做什么
+
+B20B已经通过公司端视觉验收。B20C不再修改GUI，也不运行全量数据。
+
+B20C调用GUI实际使用的同一个ThinWorkbenchModel，按照Default Qualified Profile生成并保存一份新的Run Configuration，然后与Profile引用的已验收Golden Run Configuration逐字段比较。
+
+必须完全相同的11个语义字段为：
+
+ContractVersion、RunPurpose、RunScope、FrameStart、FrameEnd、InputPackage、SignalProfile、ModulePlan、PrimaryOutcome、CandidatePolicy、OutputSelection。
+
+只允许RunId不同，因为一次新运行必须拥有新的身份。任何Module、参数、输入、Frame范围、Outcome或输出选择变化都会C7停止。
+
+本阶段不会启动Validator、Preflight、Executor，不会跑50,198帧数据。
+
+二、下载位置
+
+从Code_study下载以下两个文件，直接放入：
+
+C-CODE\U-UDP002\04_TEMP
+
+文件：
+
+1. u002_u22b20c_gui_config_equivalence_gate_v0_1.py.txt
+2. UDP002_U22B20C_START_HERE_CN_v0_1_2026-08-26.txt
+
+不要创建B20C子文件夹，不要改名。
+
+三、CMD执行
+
+当前目录必须为C-CODE，只执行以下三行：
+
+python U-UDP002\04_TEMP\u002_u22b20c_gui_config_equivalence_gate_v0_1.py.txt --prepare --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b20c_gui_config_equivalence_gate_v0_1.py.txt --self-test --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b20c_gui_config_equivalence_gate_v0_1.py.txt --execute --workspace-root U-UDP002
+
+Prepare与Self-test会用英文说明检查对象及原因。前两步C0不用回传。
+
+四、输出
+
+GUI同源配置：
+
+U-UDP002\02_CONFIG\run_configs\U002_GUI_EQUIVALENCE_B20C.json
+
+等价验收报告：
+
+U-UDP002\07_OUTPUT\U22B20C_GUI_CONFIG_EQUIVALENCE\02_DIAGNOSTICS\u22b20c_gui_config_equivalence_report_v0_1.json
+
+这两个文件都是配置与验收证据，不是数据分析结果。
+
+五、回传
+
+成功时只回传最后一行：
+
+B20C-N11-M5-S4-D1-X0-C0
+
+失败时回传完整B20CE一行。不要让Copilot修改程序或Golden配置。
+
+六、下一阶段
+
+B20C通过后进入B20D：通过GUI调用Validator、Preflight和Executor完成正式Golden回归，并检查U003自动衔接。
