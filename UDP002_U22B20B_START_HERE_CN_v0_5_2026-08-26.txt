@@ -60,7 +60,7 @@ v0.4同时把U003路径明确作为可选的本机便利设置。以前保存过
 
 v0.5新增的都是GUI控制与可视化能力，不修改分析逻辑：S0-S7可点击；Algorithm Card默认结构化显示；Module Configuration和Outcome/Output使用可视化表单；U001 INPUT与U003 REVIEWER分开显示；运行颜色读取正式run_status.json，而不是按时间模拟。
 
-启动GUI时必须先选English或日本語。该选择同时写入支持RequestedReviewLanguage的Module配置。点击“检查”或“运行”后，本次Run的语言立即锁定，右上角语言切换按钮禁用；若需要换语言，必须新建Run，不能让一个Run产生混合语言Review证据。
+启动GUI时必须先选English或日本語。该选择同时写入支持RequestedReviewLanguage的Module配置。点击“保存”“检查”或“运行”后，本次Run的语言立即锁定，右上角语言切换按钮禁用；若需要换语言，必须新建Run，不能让一个Run产生混合语言Review证据。
 
 四、界面首次确认
 
