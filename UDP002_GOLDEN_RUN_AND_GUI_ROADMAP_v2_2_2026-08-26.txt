@@ -1,7 +1,7 @@
 CAMERA-RADAR ANALYSIS PLATFORM - GOLDEN RUN AND GUI ROADMAP
-Version: 2.1
+Version: 2.2
 Date: 2026-08-26
-Status: U002 GUI HUMAN-USABILITY CORRECTION READY FOR COMPANY ACCEPTANCE
+Status: U002 PROFILE WORKFLOW AND MODULE PICKER READY FOR COMPANY ACCEPTANCE
 
 1. Product objective
 
@@ -72,9 +72,9 @@ Modules may be reordered only within their assigned Stage. Cross-Stage movement 
 - First human-closed U001 -> U002 -> U003 Golden review path completed.
 - B20A Default Qualified GUI Profile and machine-local Workbench Link contracts completed.
 - B20B v0.5 company GUI launch completed.
-- B20B v0.6 local acceptance completed after human-usability corrections.
+- B20B v0.7 local acceptance completed after human-usability and Profile-workflow corrections.
 
-5. Current B20B v0.6 scope
+5. Current B20B v0.7 scope
 
 - JA/EN startup choice and Run-language lock.
 - Directly clickable U001 and U003 colored connection states with Reset.
@@ -82,14 +82,18 @@ Modules may be reordered only within their assigned Stage. Cross-Stage movement 
 - Structured Algorithm Card viewer and schema-driven configuration editors.
 - Mouse-wheel support in Edit Configuration.
 - Visible no-cross-Stage boundary rows.
-- One qualified Module row with an explicit retained-Version selector.
+- Load Sample Profile, Save Profile and Open Profile replace the internal Clone-as-Custom workflow.
+- The first analytical edit automatically creates an editable working Profile.
+- Saved Profiles contain reusable analysis choices but never RunId, U001 source or Frame range.
+- Qualified Module selection uses wrapped Module cards and a large list of actual retained Version numbers.
+- Repetitive AVAILABLE status rows are omitted because Registry discovery already filters to qualified available entries.
 - Optional U003 launch and optional independent new-U002 launch after a successful Run.
 
-No analytical Module, Golden configuration, Data Contract or CLI execution meaning changed in v0.6.
+No analytical Module, Golden configuration, Data Contract or CLI execution meaning changed in v0.7.
 
 6. Immediate acceptance sequence
 
-B20B v0.6 company visual acceptance
+B20B v0.7 company visual acceptance
 -> B20C GUI-generated Default Run Configuration
 -> semantic-equivalence comparison against the accepted CLI Golden configuration
 -> GUI-triggered Validator / Preflight / Executor Golden regression
@@ -128,4 +132,4 @@ A first-time user can select an accepted U001 package, understand and configure 
 
 9. Next action
 
-Install and visually accept B20B v0.6 on the company host. Do not begin B20C until scrolling, connection controls, Stage separators, Version selection and independent-new-window behavior are confirmed.
+Install and visually accept B20B v0.7 on the company host. Do not begin B20C until scrolling, connection controls, Stage separators, Sample/Save/Open Profile behavior, wrapped Module selection and the real-Version list are confirmed.
