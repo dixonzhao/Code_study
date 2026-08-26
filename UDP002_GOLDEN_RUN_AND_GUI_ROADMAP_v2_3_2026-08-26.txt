@@ -1,7 +1,7 @@
 CAMERA-RADAR ANALYSIS PLATFORM - GOLDEN RUN AND GUI ROADMAP
-Version: 2.2
+Version: 2.3
 Date: 2026-08-26
-Status: U002 PROFILE WORKFLOW AND MODULE PICKER READY FOR COMPANY ACCEPTANCE
+Status: U002 GUI INFORMATION HIERARCHY AND FRAME-DOMAIN BOUNDARY READY FOR COMPANY ACCEPTANCE
 
 1. Product objective
 
@@ -17,6 +17,8 @@ U001 - Data Foundation
 - Owns FrameCount, signal catalog, validity, age, update provenance and source lineage.
 - Does not own target arbitration, residual analysis, anomaly detection or engineering conclusions.
 - Portable product acceptance is complete; future high-code refactoring is deferred until the U001-U002-U003 Golden path is stable.
+- Retains source update-event identity and native time/provenance even when it also publishes a FrameCount-indexed analytical view.
+- Future source Adapters may ingest other CAN layouts, GNSS, LiDAR or ROS data, but must map them into the same accepted package contract without destroying their original clock identity.
 
 U002 - Analysis Workbench
 
@@ -72,9 +74,9 @@ Modules may be reordered only within their assigned Stage. Cross-Stage movement 
 - First human-closed U001 -> U002 -> U003 Golden review path completed.
 - B20A Default Qualified GUI Profile and machine-local Workbench Link contracts completed.
 - B20B v0.5 company GUI launch completed.
-- B20B v0.7 local acceptance completed after human-usability and Profile-workflow corrections.
+- B20B v0.8 local acceptance completed after human-usability, Profile priority, Stage grouping and post-run-destination corrections.
 
-5. Current B20B v0.7 scope
+5. Current B20B v0.8 scope
 
 - JA/EN startup choice and Run-language lock.
 - Directly clickable U001 and U003 colored connection states with Reset.
@@ -87,13 +89,23 @@ Modules may be reordered only within their assigned Stage. Cross-Stage movement 
 - Saved Profiles contain reusable analysis choices but never RunId, U001 source or Frame range.
 - Qualified Module selection uses wrapped Module cards and a large list of actual retained Version numbers.
 - Repetitive AVAILABLE status rows are omitted because Registry discovery already filters to qualified available entries.
-- Optional U003 launch and optional independent new-U002 launch after a successful Run.
+- Module cards are visibly grouped by S0-S7; selecting a real Version shows the Algorithm Card Purpose before insertion.
+- Open Profile is the main Profile action; Sample Profile is a small recovery/example action.
+- Outcome and Output Settings selects U003 review by default or a new independent U002 without data handoff.
+- A true U002-derived input remains prohibited until the explicit lineage contract and qualified S7 export are implemented.
 
-No analytical Module, Golden configuration, Data Contract or CLI execution meaning changed in v0.7.
+No analytical Module, Golden configuration, Data Contract or CLI execution meaning changed in v0.8.
+
+Frame-domain decision:
+
+- U002 analytical populations use FrameCount as the authoritative analysis index for the current product.
+- FrameStart and FrameEnd remain explicit Run fields and are never hard-coded in a Module.
+- This does not collapse U001 source evidence into FrameCount only. NativeTimestamp, update-event identity, validity, age and provenance remain traceable.
+- Future U001 Adapters own source-clock-to-FrameCount mapping and must report mapping quality.
 
 6. Immediate acceptance sequence
 
-B20B v0.7 company visual acceptance
+B20B v0.8 company visual acceptance
 -> B20C GUI-generated Default Run Configuration
 -> semantic-equivalence comparison against the accepted CLI Golden configuration
 -> GUI-triggered Validator / Preflight / Executor Golden regression
@@ -132,4 +144,4 @@ A first-time user can select an accepted U001 package, understand and configure 
 
 9. Next action
 
-Install and visually accept B20B v0.7 on the company host. Do not begin B20C until scrolling, connection controls, Stage separators, Sample/Save/Open Profile behavior, wrapped Module selection and the real-Version list are confirmed.
+Install and visually accept B20B v0.8 on the company host. Do not begin B20C until Open/Profile priority, S0-S7 Module grouping, real-Version descriptions and explicit post-run destination are confirmed.
