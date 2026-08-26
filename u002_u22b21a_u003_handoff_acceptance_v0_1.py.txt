@@ -1,0 +1,535 @@
+#!/usr/bin/env python3
+"""Accept the exact B20D S7 package against the active U003 v0.10 parser."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import datetime as dt
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import sys
+from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
+
+
+PROGRAM_ID = "CameraRadar.U002.B21A.U003HandoffAcceptance"
+PROGRAM_VERSION = "0.1.0"
+TRANSFER_NAME = "u002_u22b21a_u003_handoff_acceptance_v0_1.py.txt"
+INSTALLED_NAME = "u002_u22b21a_u003_handoff_acceptance_v0_1.py"
+GUIDE_NAME = "UDP002_U22B21A_START_HERE_CN_v0_1_2026-08-26.txt"
+INSTALL_RELATIVE = Path("01_PROGRAMS/gui") / INSTALLED_NAME
+B20D_REPORT_RELATIVE = Path(
+    "07_OUTPUT/U22B20D_FORMAL_GOLDEN_REGRESSION/02_DIAGNOSTICS/"
+    "u22b20d_formal_golden_regression_report_v0_2.json"
+)
+U003_SOURCE_FROM_CCODE = Path(
+    "U-UDP003/02_Programs/u003_evidence_review_workbench_v0_10.py.txt"
+)
+ARTIFACT_INDEX_NAME = "run_artifact_index_v0_1.json"
+ARTIFACT_TYPE = "U003_REVIEW_PACKAGE"
+OUTPUT_ROOT_RELATIVE = Path("07_OUTPUT/U22B21A_U003_HANDOFF_ACCEPTANCE")
+REPORT_RELATIVE = OUTPUT_ROOT_RELATIVE / "02_DIAGNOSTICS/u22b21a_u003_handoff_acceptance_report_v0_1.json"
+DESCRIPTOR_RELATIVE = OUTPUT_ROOT_RELATIVE / "01_HANDOFF/u003_handoff_descriptor_v0_1.json"
+PATHS_RELATIVE = OUTPUT_ROOT_RELATIVE / "01_HANDOFF/U003_LOAD_PATHS.txt"
+
+
+class B21AError(RuntimeError):
+    """Controlled B21A rejection."""
+
+    def __init__(self, reason: object, detail: object = "NA") -> None:
+        self.reason = token(reason)
+        self.detail = detail_token(detail)
+        super().__init__(self.reason)
+
+
+def token(value: object) -> str:
+    """Return one compact return-code token."""
+
+    text = str(value).strip().upper()
+    result = "".join(character if character.isalnum() else "_" for character in text)
+    return result.strip("_") or "NA"
+
+
+def detail_token(value: object, limit: int = 180) -> str:
+    """Keep the first useful failure detail under the manual-transfer limit."""
+
+    return token(value)[:limit]
+
+
+def canonical_bytes(value: object) -> bytes:
+    """Serialize deterministic JSON evidence."""
+
+    return (
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        + "\n"
+    ).encode("utf-8")
+
+
+def read_json(path: Path, label: str) -> Dict[str, Any]:
+    """Read one required regular JSON object."""
+
+    if not path.is_file() or path.is_symlink():
+        raise B21AError(label + "_MISSING", path)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as error:
+        raise B21AError(label + "_JSON", error) from error
+    if not isinstance(value, dict):
+        raise B21AError(label + "_TYPE", type(value).__name__)
+    return value
+
+
+def write_json(path: Path, value: Mapping[str, object]) -> None:
+    """Atomically publish one local handoff or diagnostic document."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writing = path.with_name(path.name + ".writing")
+    if writing.exists():
+        writing.unlink()
+    writing.write_bytes(canonical_bytes(value))
+    os.replace(writing, path)
+
+
+def write_text(path: Path, text: str) -> None:
+    """Atomically publish a human-readable path receipt."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writing = path.with_name(path.name + ".writing")
+    if writing.exists():
+        writing.unlink()
+    writing.write_text(text, encoding="utf-8")
+    os.replace(writing, path)
+
+
+def sha256_file(path: Path) -> str:
+    """Hash a payload without loading it completely into memory."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_module(path: Path, name: str):
+    """Load the active U003 source without constructing tkinter."""
+
+    if not path.is_file() or path.is_symlink():
+        raise B21AError("U003_SOURCE_MISSING", path)
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None:
+        raise B21AError("U003_IMPORT_SPEC", path.name)
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses resolves annotations through sys.modules while the module
+    # body is executing, so a dynamically loaded module must be registered
+    # before exec_module runs.
+    sys.modules[name] = module
+    try:
+        loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(name, None)
+        raise
+    return module
+
+
+def install_exact(source: Path, destination: Path) -> str:
+    """Install this version or accept an identical replay."""
+
+    data = source.read_bytes()
+    if destination.exists():
+        if not destination.is_file() or destination.is_symlink() or destination.read_bytes() != data:
+            raise B21AError("INSTALL_CONFLICT", destination.name)
+        return "REPLAY"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(data)
+    return "CREATED"
+
+
+def archive_obsolete_temp(root: Path, keep: Iterable[str]) -> Tuple[int, int]:
+    """Archive prior B20D/B21A transfer files while leaving unrelated work untouched."""
+
+    temp = root / "04_TEMP"
+    keep_names = set(keep)
+    stale = [
+        path
+        for path in temp.iterdir()
+        if path.name not in keep_names
+        and (
+            path.name.startswith("u002_u22b20d_")
+            or path.name.startswith("UDP002_U22B20D_")
+            or path.name.startswith("u002_u22b21a_")
+            or path.name.startswith("UDP002_U22B21A_")
+        )
+    ]
+    if not stale:
+        return 0, 0
+    archive = temp / "A-Archive" / (
+        "U22B21A_PREPARE_" + dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    )
+    archive.mkdir(parents=True, exist_ok=False)
+    moved = 0
+    locked = 0
+    for path in stale:
+        try:
+            shutil.move(str(path), str(archive / path.name))
+            moved += 1
+        except PermissionError:
+            locked += 1
+    return moved, locked
+
+
+def read_csv(path: Path, label: str) -> Tuple[List[str], List[Dict[str, str]]]:
+    """Read one governed UTF-8 CSV object."""
+
+    if not path.is_file() or path.is_symlink():
+        raise B21AError(label + "_MISSING", path)
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as stream:
+            reader = csv.DictReader(stream)
+            fields = [str(item) for item in (reader.fieldnames or [])]
+            rows = [
+                {str(key): "" if value is None else str(value) for key, value in row.items()}
+                for row in reader
+            ]
+    except Exception as error:
+        raise B21AError(label + "_CSV", error) from error
+    if not fields:
+        raise B21AError(label + "_HEADER")
+    return fields, rows
+
+
+def required_int(row: Mapping[str, str], field: str, label: str) -> int:
+    """Read a nonnegative integer from one governed CSV row."""
+
+    try:
+        value = int(str(row.get(field, "")).strip())
+    except ValueError as error:
+        raise B21AError(label + "_INTEGER", field) from error
+    if value < 0:
+        raise B21AError(label + "_NEGATIVE", field)
+    return value
+
+
+def payload_declarations(manifest: Mapping[str, object]) -> Dict[str, Dict[str, Any]]:
+    """Index complete S7 payload declarations by relative path."""
+
+    payloads = manifest.get("Payloads")
+    if not isinstance(payloads, list):
+        raise B21AError("PAYLOADS_TYPE")
+    result: Dict[str, Dict[str, Any]] = {}
+    for payload in payloads:
+        if not isinstance(payload, dict) or not isinstance(payload.get("RelativePath"), str):
+            raise B21AError("PAYLOAD_DECLARATION")
+        relative = str(payload["RelativePath"])
+        if relative in result:
+            raise B21AError("PAYLOAD_DUPLICATE", relative)
+        result[relative] = payload
+    return result
+
+
+def verify_payload(package_root: Path, declaration: Mapping[str, object], label: str) -> Path:
+    """Verify one declared regular payload and its committed SHA-256."""
+
+    relative = declaration.get("RelativePath")
+    expected = declaration.get("Sha256")
+    if not isinstance(relative, str) or not isinstance(expected, str):
+        raise B21AError(label + "_DECLARATION")
+    path = package_root / Path(relative)
+    if not path.is_file() or path.is_symlink():
+        raise B21AError(label + "_MISSING", relative)
+    if sha256_file(path) != expected:
+        raise B21AError(label + "_HASH", relative)
+    return path
+
+
+def b20d_context(root: Path) -> Tuple[Dict[str, Any], str, Path, Dict[str, Any], Dict[str, Any]]:
+    """Resolve the accepted B20D Run and exact S7 Artifact."""
+
+    report = read_json(root / B20D_REPORT_RELATIVE, "B20D_REPORT")
+    if report.get("Status") != "SUCCEEDED":
+        raise B21AError("B20D_NOT_SUCCEEDED", report.get("Status"))
+    comparison = report.get("BusinessOutputComparison")
+    if not isinstance(comparison, dict) or comparison.get("Equivalent") is not True:
+        raise B21AError("B20D_NOT_EQUIVALENT")
+    review = report.get("U003ReviewPackage")
+    if not isinstance(review, dict) or review.get("CandidateCount") != 16:
+        raise B21AError("B20D_CANDIDATE_COUNT", review)
+    run_id = report.get("CandidateRunId")
+    if not isinstance(run_id, str) or not run_id:
+        raise B21AError("B20D_RUN_ID")
+    run_root = root / "07_OUTPUT" / run_id
+    index = read_json(run_root / ARTIFACT_INDEX_NAME, "ARTIFACT_INDEX")
+    artifacts = index.get("Artifacts")
+    if not isinstance(artifacts, list):
+        raise B21AError("ARTIFACTS_TYPE")
+    matches = [
+        item
+        for item in artifacts
+        if isinstance(item, dict) and item.get("ArtifactType") == ARTIFACT_TYPE
+    ]
+    if len(matches) != 1:
+        raise B21AError("U003_ARTIFACT_COUNT", len(matches))
+    entry = matches[0]
+    relative = entry.get("ManifestRelativePath")
+    if not isinstance(relative, str):
+        raise B21AError("U003_MANIFEST_PATH")
+    manifest = read_json(run_root / relative, "U003_MANIFEST")
+    return report, run_id, run_root, entry, manifest
+
+
+def validate_handoff(root: Path, write_outputs: bool) -> Dict[str, Any]:
+    """Validate the full S7 batch set with the active U003 parser."""
+
+    report, run_id, run_root, entry, manifest = b20d_context(root)
+    if manifest.get("SchemaId") != "U002_U003_REVIEW_PACKAGE":
+        raise B21AError("U003_SCHEMA", manifest.get("SchemaId"))
+    metadata = manifest.get("Metadata")
+    if not isinstance(metadata, dict):
+        raise B21AError("U003_METADATA")
+    expected_flags = {
+        "CandidateIdentityPreserved": True,
+        "CandidateRecomputationApplied": False,
+        "RootCauseClaim": False,
+    }
+    for field, expected in expected_flags.items():
+        if metadata.get(field) is not expected:
+            raise B21AError("U003_FLAG", field)
+    complete_count = metadata.get("CompleteCandidateInventoryCount")
+    batch_count = metadata.get("ReviewBatchCount")
+    if complete_count != 16 or isinstance(batch_count, bool) or not isinstance(batch_count, int) or batch_count < 1:
+        raise B21AError("U003_COUNTS", f"{complete_count}@{batch_count}")
+
+    manifest_relative = entry.get("ManifestRelativePath")
+    package_root = (run_root / str(manifest_relative)).parent
+    declarations = payload_declarations(manifest)
+    for declaration in declarations.values():
+        verify_payload(package_root, declaration, "PAYLOAD")
+
+    batch_declaration = declarations.get("review_batch_index.csv")
+    if batch_declaration is None:
+        raise B21AError("BATCH_INDEX_DECLARATION")
+    batch_index_path = verify_payload(package_root, batch_declaration, "BATCH_INDEX")
+    _fields, batch_rows = read_csv(batch_index_path, "BATCH_INDEX")
+    if len(batch_rows) != batch_count:
+        raise B21AError("BATCH_ROW_COUNT", len(batch_rows))
+
+    u003_path = root.parent / U003_SOURCE_FROM_CCODE
+    u003 = load_module(u003_path, "u003_b21a_active_parser")
+    if str(getattr(u003, "VERSION", "")) != "0.10":
+        raise B21AError("U003_VERSION", getattr(u003, "VERSION", None))
+
+    batch_descriptors = []
+    event_ids: List[str] = []
+    total_review_rows = 0
+    for expected_sequence, batch_row in enumerate(batch_rows, start=1):
+        sequence = required_int(batch_row, "ReviewBatchSequence", "BATCH")
+        if sequence != expected_sequence:
+            raise B21AError("BATCH_SEQUENCE", sequence)
+        batch_id = str(batch_row.get("ReviewBatchId", "")).strip()
+        expected_candidates = required_int(batch_row, "CandidateCount", "BATCH")
+        queue_relative = str(batch_row.get("QueueRelativePath", "")).strip()
+        data_relative = str(batch_row.get("ReviewDataRelativePath", "")).strip()
+        queue_declaration = declarations.get(queue_relative)
+        data_declaration = declarations.get(data_relative)
+        if queue_declaration is None or data_declaration is None:
+            raise B21AError("BATCH_PAYLOAD_DECLARATION", batch_id)
+        queue_path = verify_payload(package_root, queue_declaration, "EVENT_QUEUE")
+        data_path = verify_payload(package_root, data_declaration, "REVIEW_DATA")
+        if sha256_file(queue_path) != str(batch_row.get("QueueSha256", "")):
+            raise B21AError("BATCH_QUEUE_HASH", batch_id)
+        if sha256_file(data_path) != str(batch_row.get("ReviewDataSha256", "")):
+            raise B21AError("BATCH_DATA_HASH", batch_id)
+
+        queue_fields, queue_rows = read_csv(queue_path, "EVENT_QUEUE")
+        events, start_column, peak_column, end_column = u003.parse_review_events(
+            queue_fields,
+            queue_rows,
+        )
+        if len(events) != expected_candidates or peak_column is None:
+            raise B21AError("U003_EVENT_COUNT", f"{batch_id}@{len(events)}")
+        for event in events:
+            if event.event_id in event_ids:
+                raise B21AError("CANDIDATE_DUPLICATE", event.event_id)
+            event_ids.append(event.event_id)
+
+        data_fields, data_rows = read_csv(data_path, "REVIEW_DATA")
+        if "FrameCount" not in data_fields or not data_rows:
+            raise B21AError("REVIEW_DATA_FRAMECOUNT", batch_id)
+        frame_values = []
+        for row in data_rows:
+            try:
+                frame_values.append(int(round(float(row["FrameCount"]))))
+            except ValueError as error:
+                raise B21AError("REVIEW_FRAME_VALUE", batch_id) from error
+        frame_min = min(frame_values)
+        frame_max = max(frame_values)
+        for event in events:
+            if not frame_min <= event.start_framecount <= event.end_framecount <= frame_max:
+                raise B21AError("REVIEW_WINDOW_COVERAGE", event.event_id)
+            if event.peak_framecount is None or not frame_min <= event.peak_framecount <= frame_max:
+                raise B21AError("REVIEW_PEAK_COVERAGE", event.event_id)
+        total_review_rows += len(data_rows)
+        batch_descriptors.append(
+            {
+                "ReviewBatchId": batch_id,
+                "ReviewBatchSequence": sequence,
+                "CandidateCount": len(events),
+                "EventQueuePath": str(queue_path.resolve()),
+                "EventQueueSha256": sha256_file(queue_path),
+                "ReviewDataPath": str(data_path.resolve()),
+                "ReviewDataSha256": sha256_file(data_path),
+                "ReviewDataRowCount": len(data_rows),
+                "FrameStart": frame_min,
+                "FrameEnd": frame_max,
+                "U003StartColumn": start_column,
+                "U003PeakColumn": peak_column,
+                "U003EndColumn": end_column,
+            }
+        )
+
+    if len(event_ids) != complete_count:
+        raise B21AError("COMPLETE_CANDIDATE_IDENTITY", len(event_ids))
+    descriptor = {
+        "ContractId": "U002_U003_LOCAL_HANDOFF_DESCRIPTOR",
+        "ContractVersion": "0.1",
+        "GeneratedAtUtc": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "LocalOnlyNotRunEvidence": True,
+        "RunId": run_id,
+        "ArtifactId": entry.get("ArtifactId"),
+        "ArtifactManifestPath": str((run_root / str(manifest_relative)).resolve()),
+        "CandidateCount": len(event_ids),
+        "ReviewBatchCount": len(batch_descriptors),
+        "ReviewDataRowCount": total_review_rows,
+        "ActiveU003Version": "0.10",
+        "ActiveU003SourcePath": str(u003_path.resolve()),
+        "Batches": batch_descriptors,
+    }
+    if write_outputs:
+        write_json(root / DESCRIPTOR_RELATIVE, descriptor)
+        lines = [
+            "U003 Golden handoff load paths",
+            "RunId: " + run_id,
+            "CandidateCount: " + str(len(event_ids)),
+            "",
+        ]
+        for batch in batch_descriptors:
+            lines.extend(
+                [
+                    str(batch["ReviewBatchId"]),
+                    "Load Event CSV: " + str(batch["EventQueuePath"]),
+                    "Load Review Data CSV: " + str(batch["ReviewDataPath"]),
+                    "",
+                ]
+            )
+        write_text(root / PATHS_RELATIVE, "\n".join(lines))
+        acceptance_report = {
+            "ContractId": "U002_B21A_U003_HANDOFF_ACCEPTANCE_REPORT",
+            "ContractVersion": "0.1",
+            "ProgramId": PROGRAM_ID,
+            "ProgramVersion": PROGRAM_VERSION,
+            "Status": "SUCCEEDED",
+            "B20DReportPath": str((root / B20D_REPORT_RELATIVE).resolve()),
+            "B20DCandidateCount": report["U003ReviewPackage"]["CandidateCount"],
+            "HandoffDescriptor": descriptor,
+            "U003ParserImportAccepted": True,
+            "U003GuiLaunched": False,
+            "VideoReviewRepeated": False,
+            "ReasonVideoReviewNotRepeated": "B20D proved all Event Queue and Review Data payloads equivalent to the already human-reviewed Source Golden package.",
+        }
+        write_json(root / REPORT_RELATIVE, acceptance_report)
+    return descriptor
+
+
+def prepare(root: Path) -> str:
+    """Install B21A and verify the accepted B20D/U003 boundary exists."""
+
+    source = root / "04_TEMP" / TRANSFER_NAME
+    if not source.is_file() or source.is_symlink():
+        raise B21AError("TRANSFER_MISSING", source)
+    disposition = install_exact(source, root / INSTALL_RELATIVE)
+    b20d_context(root)
+    u003_path = root.parent / U003_SOURCE_FROM_CCODE
+    u003 = load_module(u003_path, "u003_b21a_prepare")
+    if str(getattr(u003, "VERSION", "")) != "0.10":
+        raise B21AError("U003_VERSION", getattr(u003, "VERSION", None))
+    moved, locked = archive_obsolete_temp(root, (TRANSFER_NAME, GUIDE_NAME))
+    print("PASS | B20D v0.2 is succeeded | WHY: no review handoff may precede formal Golden acceptance")
+    print("PASS | Exact S7 Review Package and active U003 v0.10 source exist | WHY: path guessing and historical-version selection are prohibited")
+    print(f"INFO | install={disposition} archived={moved} locked={locked}")
+    capsule = f"B21AP-I1-U10-A{moved}-L{locked}-X0-C0"
+    print(capsule)
+    return capsule
+
+
+def self_test(root: Path) -> str:
+    """Run the active U003 parser self-test and inspect the real package read-only."""
+
+    u003_path = root.parent / U003_SOURCE_FROM_CCODE
+    u003 = load_module(u003_path, "u003_b21a_selftest")
+    if u003.run_self_test() != 0:
+        raise B21AError("U003_SELFTEST")
+    descriptor = validate_handoff(root, write_outputs=False)
+    checks = 8
+    print("PASS | Active U003 v0.10 self-test passes | WHY: handoff acceptance must use the actual company parser, not a duplicate parser")
+    print("PASS | All batch payload hashes and event/peak/window fields parse | WHY: a valid manifest alone does not prove human-review usability")
+    print("PASS | Review Data covers every Candidate start peak and end | WHY: U003 must be able to inspect the complete evidence interval")
+    capsule = f"B21AST-N{checks}-C{descriptor['CandidateCount']}-B{descriptor['ReviewBatchCount']}-X0-C0"
+    print(capsule)
+    return capsule
+
+
+def execute(root: Path) -> str:
+    """Publish the stable local handoff descriptor and acceptance report."""
+
+    descriptor = validate_handoff(root, write_outputs=True)
+    capsule = (
+        f"B21A-N{descriptor['CandidateCount']}-B{descriptor['ReviewBatchCount']}-"
+        f"E{descriptor['CandidateCount']}-D{descriptor['ReviewDataRowCount']}-U10-X0-C0"
+    )
+    print(capsule)
+    return capsule
+
+
+def parse_arguments(argv: Sequence[str]) -> argparse.Namespace:
+    """Parse the standard three-command company interface."""
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--prepare", action="store_true")
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--execute", action="store_true")
+    parser.add_argument("--workspace-root", required=True)
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run one fail-closed B21A operation."""
+
+    try:
+        arguments = parse_arguments(sys.argv[1:] if argv is None else argv)
+        root = Path(arguments.workspace_root).resolve()
+        if not root.is_dir() or root.name != "U-UDP002" or root.is_symlink():
+            raise B21AError("WORKSPACE_ROOT", root)
+        if arguments.prepare:
+            prepare(root)
+        elif arguments.self_test:
+            self_test(root)
+        else:
+            execute(root)
+        return 0
+    except B21AError as error:
+        print(f"B21AE-K{error.reason}-D{error.detail}-X1-C7")
+        return 7
+    except Exception as error:
+        print(f"B21AE-K{token(type(error).__name__)}-D{detail_token(error)}-X1-C7")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

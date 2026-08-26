@@ -1,0 +1,71 @@
+UDP002 U22B21A U003交接验收执行指南
+版本：v0.1
+日期：2026-08-26
+
+一、本阶段做什么
+
+B20D已经证明GUI生成的新Run与人工闭环的Source Golden具有相同的16个候选和业务数据。B21A不重新分析、不重新选择候选，也不要求再次人工审核16段视频。
+
+B21A负责：
+
+1. 从B20D v0.2报告定位唯一S7 U003_REVIEW_PACKAGE；
+2. 验证Artifact Manifest和全部Payload SHA-256；
+3. 读取全部Review Batch，不猜文件路径；
+4. 使用公司当前U003 v0.10的真实Parser解析Event Queue；
+5. 确认每个Candidate的Start、Peak、End都被Review Data覆盖；
+6. 生成稳定的本机Handoff Descriptor和两条可读加载路径。
+
+这一步只证明“新Golden结果可直接进入现有U003”。U002自动带包启动U003的界面联动属于下一小节B21B。
+
+二、下载位置
+
+下载以下两个文件，直接放入：
+
+C-CODE\U-UDP002\04_TEMP
+
+1. u002_u22b21a_u003_handoff_acceptance_v0_1.py.txt
+2. UDP002_U22B21A_START_HERE_CN_v0_1_2026-08-26.txt
+
+不要创建子文件夹，不要改名。
+
+三、执行前固定依赖
+
+当前活动U003源程序必须位于：
+
+C-CODE\U-UDP003\02_Programs\u003_evidence_review_workbench_v0_10.py.txt
+
+B21A只使用这个已验收版本，不扫描或猜测其他历史版本。
+
+四、CMD执行
+
+当前目录必须为C-CODE，只执行三行：
+
+python U-UDP002\04_TEMP\u002_u22b21a_u003_handoff_acceptance_v0_1.py.txt --prepare --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b21a_u003_handoff_acceptance_v0_1.py.txt --self-test --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b21a_u003_handoff_acceptance_v0_1.py.txt --execute --workspace-root U-UDP002
+
+Prepare与Self-test通过时不用回传。
+
+五、输出和回传
+
+成功时只回传第三步最后一行，预计：
+
+B21A-N16-B1-E16-D1937-U10-X0-C0
+
+其中：
+
+- N16：完整候选数；
+- B1：Review Batch数量；
+- E16：U003实际解析的Event数；
+- D1937：Review Data数据行数；
+- U10：明确使用U003 v0.10。
+
+详细Handoff Descriptor与加载路径保存在：
+
+U-UDP002\07_OUTPUT\U22B21A_U003_HANDOFF_ACCEPTANCE\01_HANDOFF
+
+失败时回传完整B21AE一行，不要切换U003版本尝试绕过。
+
+六、下一步
+
+B21A通过后进入B21B：让U002在成功Run后把这份受控Handoff Descriptor直接传给U003，而不是只启动一个空白Reviewer窗口。

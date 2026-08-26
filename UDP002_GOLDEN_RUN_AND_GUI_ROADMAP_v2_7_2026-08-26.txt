@@ -1,7 +1,7 @@
 CAMERA-RADAR ANALYSIS PLATFORM - GOLDEN RUN AND GUI ROADMAP
-Version: 2.6
+Version: 2.7
 Date: 2026-08-26
-Status: B20C CONFIGURATION EQUIVALENCE COMPANY ACCEPTED; B20D FORMAL GOLDEN REGRESSION LOCALLY READY
+Status: B20D FORMAL GOLDEN REGRESSION COMPANY ACCEPTED; B21A U003 PARSER HANDOFF LOCALLY READY
 
 1. Product objective
 
@@ -78,6 +78,8 @@ Modules may be reordered only within their assigned Stage. Cross-Stage movement 
 - B20B v0.10 company visual acceptance completed with B20B10-OPEN3-WF4-S8-DESC1-OUT2-C0.
 - B20C company acceptance proves the GUI model preserves all 11 Golden semantic fields while allowing a new RunId: B20C-N11-M5-S4-D1-X0-C0.
 - B20D local fresh-run and completed-run replay acceptance proves the formal Validator -> Preflight -> Executor chain, five selected business Artifacts and U003 handoff contract can be checked together.
+- B20D company acceptance proves five qualified Modules, five selected Artifacts and five controlled business comparisons remain valid: B20D-M5-A5-O5-I2-C16-B1-X0-C0.
+- B21A locally proves the exact S7 Review Package can be hash-verified and parsed by the active U003 v0.10 parser without Candidate recomputation or repeated video review.
 
 5. Current B20B v0.10 scope
 
@@ -111,8 +113,9 @@ Frame-domain decision:
 
 B20B v0.10 company visual acceptance [COMPLETE]
 -> B20C GUI-model-generated Default Run Configuration and semantic-equivalence comparison [COMPANY COMPLETE]
--> B20D formal Validator / Preflight / Executor Golden regression [COMPANY NEXT]
--> automatic U003 handoff and final synchronized human review
+-> B20D formal Validator / Preflight / Executor Golden regression [COMPANY COMPLETE]
+-> B21A exact S7 package acceptance with active U003 v0.10 parser [COMPANY NEXT]
+-> B21B package-aware U002 -> U003 direct launch
 -> U002 GUI MVP freeze and node report.
 
 Lifecycle replay rule:
@@ -149,8 +152,8 @@ Priority 4 - Deferred refactoring
 
 8. Current success criterion
 
-A first-time user can select an accepted U001 package, understand and configure the qualified S0-S7 plan, run the accepted formal chain, and open the resulting U003 review package without editing JSON or using the CLI directly.
+A first-time user can select an accepted U001 package, understand and configure the qualified S0-S7 plan, run the accepted formal chain, and open the exact resulting U003 review package without path guessing, editing JSON or using the CLI directly.
 
 9. Next action
 
-Run the three B20D commands on the company host. Acceptance requires M5, A5, O5, B1, X0 and C0. The Candidate count is data-derived and therefore is reported dynamically rather than fixed in the expected capsule. If B20D passes, open its U003 Review Package for the final synchronized handoff check and then freeze the GUI MVP.
+Run the three B21A commands on the company host. Acceptance requires N16, B1, E16, D1937, U10, X0 and C0. B21A invokes the active U003 v0.10 parser, checks every manifest hash and confirms Review Data coverage for every Candidate start, peak and end. It does not repeat the already completed 16-window video review. After B21A, implement B21B direct package-aware U003 launch, then freeze the first GUI Golden MVP.
