@@ -1,0 +1,71 @@
+UDP002 U22B21D 执行指南
+日期：2026-08-26
+
+一、这一步做什么
+
+B21D把B21C已经通过的U002→U003启动接口，从Python源码切换到真实的
+Windows单文件EXE，并验证U002无需依赖U003源码文件名或Python运行环境即可
+继续打开同一份B21A Handoff Descriptor。
+
+本步骤不重新分析CAN数据，不改变16个候选，也不修改B21A/B21C证据。
+
+执行完成后：
+
+- U003 v0.13会被打包为单文件EXE；
+- U002会记录EXE路径、SHA-256、接口版本和LaunchKind；
+- U002仍通过 --handoff-descriptor <path> 启动U003；
+- 以后替换U003版本时只需重新验证同一能力契约。
+
+二、运行前放置
+
+1. 将ZIP解压后的7个文件直接放入：
+   C-CODE\U-UDP002\04_TEMP
+2. 将本指南也放在同一个04_TEMP。
+3. 不要建立B21D子文件夹。
+4. 使用已经能运行U003、OpenCV和PyInstaller的同一个Python/venv。
+5. 从C-CODE目录打开CMD。
+
+三、只运行以下三条CMD命令
+
+python U-UDP002\04_TEMP\u002_u22b21d_u003_onefile_acceptance_installer_v0_1.py.txt --prepare --container-root .
+
+python U-UDP002\04_TEMP\u002_u22b21d_u003_onefile_acceptance_installer_v0_1.py.txt --self-test --container-root .
+
+python U-UDP002\04_TEMP\u002_u22b21d_u003_onefile_acceptance_installer_v0_1.py.txt --execute --container-root .
+
+Prepare会自动归档04_TEMP旧内容，并检查PyInstaller、OpenCV和Tkinter。
+Execute首次打包可能持续数分钟；没有报错时不要中止。
+
+四、成功标准
+
+Self-test应输出：
+
+B21DST-N16-C16-D1937-U13-G11-P1-T1-C1-X0-C0
+
+Execute先输出一个B21DB构建码，再输出：
+
+B21D-N16-D1937-U13-G11-LE-H<12位SHA>-X0-C0
+
+随后U002应打开。请确认U002中的U003连接为ONLINE，启动U003后：
+
+1. U003单文件EXE正常打开；
+2. 自动装入16个Event；
+3. 右侧CAN Review Table正常显示。
+
+人工回传最多三行：
+
+B21DB-...
+B21D-...
+B21DV-O1-E16-T1-C0
+
+其中LE表示U002当前连接的是Native Executable，不是Python Source。
+
+五、失败时
+
+只回传屏幕上的 B21DE-...-C7 短码。
+如需详细诊断，再读取：
+
+C-CODE\U-UDP002\04_TEMP\U22B21D_ERROR.txt
+
+不要自行修改U003源码、Builder、Model、GUI、Capability Contract或B21A
+Handoff Descriptor。
