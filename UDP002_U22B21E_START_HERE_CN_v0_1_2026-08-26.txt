@@ -1,0 +1,62 @@
+UDP002 U22B21E 执行指南
+日期：2026-08-26
+
+一、这一步做什么
+
+B21E不运行新的数据分析，也不修改B20D、B21A或B21D结果。
+
+它只读验证并冻结第一版GUI Golden MVP：
+
+- B20D已经成功的Golden Run；
+- 当前Golden Profile中的5个已认证Module及其文件Hash；
+- B21A的16个Event和1,937行Review Data；
+- B21D真实U003 EXE、Build Result和Launcher Receipt；
+- U002 Model v0.7、GUI v0.11与四个Core程序；
+- 当前Golden Run目录内全部文件。
+
+输出是Release Manifest、文件Hash清单和冻结回执。完成后才开始生成
+U002用户、接口和维护手册。
+
+二、放置位置
+
+将以下两个文件直接放入 C-CODE\U-UDP002\04_TEMP：
+
+1. u002_u22b21e_golden_mvp_release_freeze_v0_1.py.txt
+2. 本执行指南
+
+从C-CODE目录打开CMD。
+
+三、只运行三条命令
+
+python U-UDP002\04_TEMP\u002_u22b21e_golden_mvp_release_freeze_v0_1.py.txt --prepare --container-root .
+
+python U-UDP002\04_TEMP\u002_u22b21e_golden_mvp_release_freeze_v0_1.py.txt --self-test --container-root .
+
+python U-UDP002\04_TEMP\u002_u22b21e_golden_mvp_release_freeze_v0_1.py.txt --execute --container-root .
+
+四、成功结果
+
+Self-test：
+
+B21EST-N19-P1-H1-A1-X0-C0
+
+Execute：
+
+B21E-M5-R...-C16-D1937-U13-Hbf142add5851-N3-P0-X0-C0
+
+其中R是实际冻结的文件数量；首次运行N3-P0，完全相同的重复运行是N0-P3。
+
+成功输出目录：
+
+C-CODE\U-UDP002\07_OUTPUT\U22B21E_GOLDEN_MVP_RELEASE_FREEZE
+
+只需回传最后一行B21E机器码。Self-test成功后无需另行回传。
+
+五、失败时
+
+只回传 B21EE-...-C7。需要详细诊断时再查看：
+
+C-CODE\U-UDP002\04_TEMP\U22B21E_ERROR.txt
+
+不要修改旧Run、Module Registry、Handoff Descriptor、Launcher Receipt、
+U003 EXE或Build Result来绕过检查。

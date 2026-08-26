@@ -1,0 +1,638 @@
+#!/usr/bin/env python3
+"""Freeze the first Camera-Radar GUI Golden MVP as deterministic evidence."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+import os
+from pathlib import Path
+import py_compile
+import re
+import shutil
+import sys
+import tempfile
+import traceback
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+
+PROGRAM_ID = "CameraRadar.U002.B21E.GoldenMvpReleaseFreeze"
+PROGRAM_VERSION = "0.1.0"
+RELEASE_ID = "CAMERA_RADAR_GUI_GOLDEN_MVP_2026_08_26"
+TRANSFER_NAME = "u002_u22b21e_golden_mvp_release_freeze_v0_1.py.txt"
+RUNTIME_RELATIVE = Path(
+    "U-UDP002/01_PROGRAMS/release/"
+    "u002_u22b21e_golden_mvp_release_freeze_v0_1.py"
+)
+GUIDE_NAME = "UDP002_U22B21E_START_HERE_CN_v0_1_2026-08-26.txt"
+
+PROFILE_RELATIVE = Path(
+    "U-UDP002/02_CONFIG/gui_profiles/"
+    "u002_radar_loss_golden_reference_v0_1.json"
+)
+REGISTRY_RELATIVE = Path(
+    "U-UDP002/00_CONTROL/registry/"
+    "u002_module_availability_snapshot_v0_1.json"
+)
+B20D_REPORT_RELATIVE = Path(
+    "U-UDP002/07_OUTPUT/U22B20D_FORMAL_GOLDEN_REGRESSION/02_DIAGNOSTICS/"
+    "u22b20d_formal_golden_regression_report_v0_2.json"
+)
+B21A_HANDOFF_RELATIVE = Path(
+    "U-UDP002/07_OUTPUT/U22B21A_U003_HANDOFF_ACCEPTANCE/01_HANDOFF/"
+    "u003_handoff_descriptor_v0_1.json"
+)
+LAUNCH_RECEIPT_RELATIVE = Path(
+    "U-UDP002/02_CONFIG/workbench_links/"
+    "u003_launcher_capability_local_v0_1.json"
+)
+LAUNCH_CONTRACT_RELATIVE = Path(
+    "U-UDP002/00_CONTROL/contracts/review/"
+    "u003_launcher_capability_contract_v0_1.json"
+)
+MODEL_RELATIVE = Path(
+    "U-UDP002/01_PROGRAMS/gui/u002_thin_workbench_model_v0_7.py"
+)
+GUI_RELATIVE = Path(
+    "U-UDP002/01_PROGRAMS/gui/u002_thin_workbench_gui_v0_11.py"
+)
+U003_SOURCE_RELATIVE = Path(
+    "U-UDP003/01_PROGRAMS/u003_evidence_review_workbench_v0_13.py"
+)
+U003_BUILD_RESULT_RELATIVE = Path(
+    "U-UDP003/05_TESTS/03_RUNS/U22B21D/U22B21D_BUILD_RESULT.json"
+)
+OUTPUT_RELATIVE = Path(
+    "U-UDP002/07_OUTPUT/U22B21E_GOLDEN_MVP_RELEASE_FREEZE"
+)
+ERROR_RELATIVE = Path("U-UDP002/04_TEMP/U22B21E_ERROR.txt")
+CORE_RELATIVES = (
+    Path("U-UDP002/01_PROGRAMS/core/u002_u22_contract_validator_v0_1.py"),
+    Path("U-UDP002/01_PROGRAMS/core/u002_u22_module_registry_v0_1.py"),
+    Path("U-UDP002/01_PROGRAMS/core/u002_u22_engine_preflight_v0_1.py"),
+    Path("U-UDP002/01_PROGRAMS/core/u002_u22_stage_executor_v0_1.py"),
+)
+
+
+class FreezeError(RuntimeError):
+    """One bounded fail-closed release-freeze rejection."""
+
+    def __init__(self, reason: object, detail: object = "NA") -> None:
+        self.reason = token(reason)
+        self.detail = detail_token(detail)
+        super().__init__(self.reason)
+
+
+def token(value: object, limit: int = 90) -> str:
+    text = re.sub(r"[^A-Z0-9_]+", "_", str(value).upper()).strip("_")
+    return (text or "NA")[:limit]
+
+
+def detail_token(value: object, limit: int = 700) -> str:
+    text = re.sub(r"[^A-Z0-9_.:/\\\-]+", "_", str(value).upper()).strip("_.-")
+    return (text or "NA")[:limit]
+
+
+def canonical_json(value: object) -> bytes:
+    return (
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+
+
+def sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def require_file(path: Path, label: str) -> Path:
+    if not path.is_file() or path.is_symlink():
+        raise FreezeError(label + "_MISSING", path)
+    return path
+
+
+def read_object(path: Path, label: str) -> Dict[str, Any]:
+    require_file(path, label)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as error:
+        raise FreezeError(label + "_JSON", error) from error
+    if not isinstance(value, dict):
+        raise FreezeError(label + "_TYPE", type(value).__name__)
+    return value
+
+
+def require_ccode(value: object) -> Path:
+    root = Path(str(value)).resolve()
+    if not root.is_dir():
+        raise FreezeError("CONTAINER_ROOT", root)
+    for name in ("U-UDP002", "U-UDP003"):
+        if not (root / name).is_dir():
+            raise FreezeError("PRODUCT_ROOT", name)
+    return root
+
+
+def logical_path(ccode: Path, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(ccode.resolve()).as_posix()
+    except ValueError as error:
+        raise FreezeError("PATH_OUTSIDE_CCODE", path) from error
+
+
+def add_file(
+    inventory: Dict[str, Dict[str, Any]],
+    ccode: Path,
+    path: Path,
+    role: str,
+) -> None:
+    require_file(path, role)
+    logical = logical_path(ccode, path)
+    record = {
+        "LogicalPath": logical,
+        "Role": role,
+        "SizeBytes": path.stat().st_size,
+        "Sha256": sha256_file(path),
+    }
+    previous = inventory.get(logical)
+    if previous is not None and previous != record:
+        raise FreezeError("INVENTORY_COLLISION", logical)
+    inventory[logical] = record
+
+
+def add_tree(
+    inventory: Dict[str, Dict[str, Any]],
+    ccode: Path,
+    root: Path,
+    role: str,
+) -> int:
+    if not root.is_dir() or root.is_symlink():
+        raise FreezeError(role + "_ROOT", root)
+    count = 0
+    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix().lower()):
+        if path.is_symlink():
+            raise FreezeError(role + "_SYMLINK", path)
+        if path.is_file():
+            add_file(inventory, ccode, path, role)
+            count += 1
+    if count < 1:
+        raise FreezeError(role + "_EMPTY", root)
+    return count
+
+
+def resolve_declared_path(ccode: Path, value: object, label: str) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise FreezeError(label + "_PATH")
+    path = Path(value.strip())
+    resolved = path.resolve() if path.is_absolute() else (ccode / path).resolve()
+    logical_path(ccode, resolved)
+    return require_file(resolved, label)
+
+
+def resolve_u002_path(ccode: Path, value: object, label: str) -> Path:
+    """Resolve one Registry path whose authority is the U-UDP002 root."""
+
+    if not isinstance(value, str) or not value.strip():
+        raise FreezeError(label + "_PATH")
+    path = Path(value.strip())
+    resolved = path.resolve() if path.is_absolute() else (ccode / "U-UDP002" / path).resolve()
+    logical_path(ccode, resolved)
+    return require_file(resolved, label)
+
+
+def registry_entry(
+    registry: Mapping[str, Any],
+    module: Mapping[str, Any],
+) -> Dict[str, Any]:
+    entries = registry.get("Entries")
+    if not isinstance(entries, list):
+        raise FreezeError("REGISTRY_ENTRIES")
+    matches = [
+        item for item in entries
+        if isinstance(item, dict)
+        and item.get("ModuleId") == module.get("ModuleId")
+        and item.get("ModuleVersion") == module.get("ModuleVersion")
+        and item.get("Stage") == module.get("Stage")
+    ]
+    if len(matches) != 1 or matches[0].get("RegistryStatus") != "AVAILABLE":
+        raise FreezeError("MODULE_NOT_AVAILABLE", module.get("ModuleId"))
+    return matches[0]
+
+
+def verify_registry_file(
+    inventory: Dict[str, Dict[str, Any]],
+    ccode: Path,
+    relative: object,
+    expected_hash: object,
+    role: str,
+) -> None:
+    path = resolve_u002_path(ccode, relative, role)
+    if not isinstance(expected_hash, str) or sha256_file(path) != expected_hash:
+        raise FreezeError(role + "_HASH", path.name)
+    add_file(inventory, ccode, path, role)
+
+
+def extract_constant(path: Path, constant: str) -> str:
+    text = require_file(path, constant).read_text(encoding="utf-8-sig")
+    match = re.search(
+        rf"^{re.escape(constant)}\s*=\s*[\"']([^\"']+)[\"']",
+        text,
+        flags=re.MULTILINE,
+    )
+    if match is None:
+        raise FreezeError("PROGRAM_CONSTANT", constant)
+    return match.group(1)
+
+
+def validate_handoff_payloads(
+    inventory: Dict[str, Dict[str, Any]],
+    ccode: Path,
+    handoff: Mapping[str, Any],
+) -> Tuple[int, int, int]:
+    candidate_count = handoff.get("CandidateCount")
+    data_count = handoff.get("ReviewDataRowCount")
+    batches = handoff.get("Batches")
+    if candidate_count != 16 or data_count != 1937 or not isinstance(batches, list):
+        raise FreezeError("HANDOFF_COUNTS", f"{candidate_count}.{data_count}")
+    if handoff.get("ContractId") != "U002_U003_LOCAL_HANDOFF_DESCRIPTOR":
+        raise FreezeError("HANDOFF_CONTRACT")
+    payload_count = 0
+    for batch in batches:
+        if not isinstance(batch, dict):
+            raise FreezeError("HANDOFF_BATCH_TYPE")
+        for prefix in ("EventQueue", "ReviewData"):
+            path = resolve_declared_path(ccode, batch.get(prefix + "Path"), prefix)
+            if sha256_file(path) != batch.get(prefix + "Sha256"):
+                raise FreezeError(prefix.upper() + "_HASH")
+            add_file(inventory, ccode, path, "B21A_" + prefix.upper())
+            payload_count += 1
+    return int(candidate_count), int(data_count), payload_count
+
+
+def collect_release(ccode: Path) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    inventory: Dict[str, Dict[str, Any]] = {}
+    profile_path = ccode / PROFILE_RELATIVE
+    registry_path = ccode / REGISTRY_RELATIVE
+    report_path = ccode / B20D_REPORT_RELATIVE
+    handoff_path = ccode / B21A_HANDOFF_RELATIVE
+    receipt_path = ccode / LAUNCH_RECEIPT_RELATIVE
+    contract_path = ccode / LAUNCH_CONTRACT_RELATIVE
+    model_path = ccode / MODEL_RELATIVE
+    gui_path = ccode / GUI_RELATIVE
+    u003_source_path = ccode / U003_SOURCE_RELATIVE
+    build_result_path = ccode / U003_BUILD_RESULT_RELATIVE
+
+    profile = read_object(profile_path, "PROFILE")
+    registry = read_object(registry_path, "REGISTRY")
+    report = read_object(report_path, "B20D_REPORT")
+    handoff = read_object(handoff_path, "B21A_HANDOFF")
+    receipt = read_object(receipt_path, "LAUNCH_RECEIPT")
+    build = read_object(build_result_path, "U003_BUILD_RESULT")
+
+    if report.get("Status") != "SUCCEEDED":
+        raise FreezeError("B20D_STATUS", report.get("Status"))
+    business = report.get("BusinessOutputComparison")
+    if not isinstance(business, dict) or business.get("Equivalent") is not True:
+        raise FreezeError("B20D_EQUIVALENCE")
+    run_status = report.get("RunStatus")
+    if not isinstance(run_status, dict) or run_status.get("LastCompletedStage") != "S7":
+        raise FreezeError("B20D_RUN_STATUS")
+    candidate_run_id = report.get("CandidateRunId")
+    if not isinstance(candidate_run_id, str) or not candidate_run_id:
+        raise FreezeError("B20D_RUN_ID")
+
+    if receipt.get("ContractId") != "U003_LAUNCHER_CAPABILITY":
+        raise FreezeError("LAUNCH_RECEIPT_CONTRACT")
+    if receipt.get("InterfaceId") != "CameraRadar.U003.HandoffLauncher":
+        raise FreezeError("LAUNCH_INTERFACE")
+    if receipt.get("InterfaceVersion") != "0.1":
+        raise FreezeError("LAUNCH_INTERFACE_VERSION")
+    if receipt.get("LaunchKind") != "NATIVE_EXECUTABLE":
+        raise FreezeError("LAUNCH_KIND", receipt.get("LaunchKind"))
+    if receipt.get("ProgramVersion") != "0.13":
+        raise FreezeError("U003_PROGRAM_VERSION")
+    executable = resolve_declared_path(ccode, receipt.get("TargetPath"), "U003_EXE")
+    executable_hash = sha256_file(executable)
+    if executable_hash != receipt.get("TargetSha256"):
+        raise FreezeError("U003_EXE_RECEIPT_HASH")
+    if receipt.get("ContractSchemaSha256") != sha256_file(contract_path):
+        raise FreezeError("LAUNCH_CONTRACT_HASH")
+    if build.get("ExecutableSha256") != executable_hash:
+        raise FreezeError("U003_BUILD_HASH")
+    if build.get("ExecutableSizeBytes") != executable.stat().st_size:
+        raise FreezeError("U003_BUILD_SIZE")
+    capability = build.get("Capability")
+    if not isinstance(capability, dict) or capability.get("ProgramVersion") != "0.13":
+        raise FreezeError("PACKAGED_CAPABILITY")
+
+    if extract_constant(model_path, "MODEL_VERSION") != "0.7.0":
+        raise FreezeError("MODEL_VERSION")
+    if extract_constant(gui_path, "GUI_VERSION") != "0.11.0":
+        raise FreezeError("GUI_VERSION")
+    if extract_constant(u003_source_path, "VERSION") != "0.13":
+        raise FreezeError("U003_SOURCE_VERSION")
+
+    module_plan = profile.get("ModulePlan")
+    if not isinstance(module_plan, list) or len(module_plan) != 5:
+        raise FreezeError("MODULE_PLAN_COUNT", len(module_plan) if isinstance(module_plan, list) else -1)
+    for module in module_plan:
+        if not isinstance(module, dict):
+            raise FreezeError("MODULE_PLAN_TYPE")
+        entry = registry_entry(registry, module)
+        verify_registry_file(
+            inventory, ccode, entry.get("ManifestPath"),
+            entry.get("ManifestSha256"), "MODULE_MANIFEST",
+        )
+        package_files = entry.get("PackageFiles")
+        if not isinstance(package_files, dict):
+            raise FreezeError("MODULE_PACKAGE_FILES")
+        for role, declaration in sorted(package_files.items()):
+            if not isinstance(declaration, dict):
+                raise FreezeError("MODULE_FILE_DECLARATION")
+            verify_registry_file(
+                inventory, ccode, declaration.get("RelativePath"),
+                declaration.get("Sha256"), "MODULE_" + token(role),
+            )
+        qualification = entry.get("QualificationEvidence")
+        add_file(
+            inventory, ccode,
+            resolve_u002_path(ccode, qualification, "MODULE_QUALIFICATION"),
+            "MODULE_QUALIFICATION",
+        )
+
+    fixed_files = [
+        (profile_path, "GOLDEN_PROFILE"),
+        (registry_path, "MODULE_REGISTRY"),
+        (report_path, "B20D_ACCEPTANCE"),
+        (handoff_path, "B21A_HANDOFF"),
+        (receipt_path, "B21D_LAUNCH_RECEIPT"),
+        (contract_path, "U003_LAUNCH_CONTRACT"),
+        (model_path, "U002_MODEL"),
+        (gui_path, "U002_GUI"),
+        (u003_source_path, "U003_SOURCE"),
+        (build_result_path, "U003_BUILD_RESULT"),
+        (executable, "U003_EXECUTABLE"),
+    ]
+    fixed_files.extend((ccode / relative, "U002_CORE") for relative in CORE_RELATIVES)
+    for path, role in fixed_files:
+        add_file(inventory, ccode, path, role)
+
+    candidate_count, data_count, payload_count = validate_handoff_payloads(
+        inventory, ccode, handoff,
+    )
+    run_file_count = add_tree(
+        inventory,
+        ccode,
+        ccode / "U-UDP002/07_OUTPUT" / candidate_run_id,
+        "GOLDEN_RUN_FILE",
+    )
+    records = [inventory[key] for key in sorted(inventory)]
+    manifest: Dict[str, Any] = {
+        "ContractId": "CAMERA_RADAR_GUI_GOLDEN_MVP_RELEASE_MANIFEST",
+        "ContractVersion": "0.1",
+        "ReleaseId": RELEASE_ID,
+        "ReleaseStatus": "FROZEN_INTERNAL_MVP",
+        "ProgramId": PROGRAM_ID,
+        "ProgramVersion": PROGRAM_VERSION,
+        "B20DRunId": candidate_run_id,
+        "SourceGoldenRunId": report.get("SourceGoldenRunId"),
+        "BusinessOutputEquivalent": True,
+        "RootCauseClaim": False,
+        "ModuleCount": len(module_plan),
+        "ModulePlan": module_plan,
+        "CandidateCount": candidate_count,
+        "ReviewDataRowCount": data_count,
+        "HandoffPayloadCount": payload_count,
+        "GoldenRunFileCount": run_file_count,
+        "InventoryFileCount": len(records),
+        "U002ModelVersion": "0.7.0",
+        "U002GuiVersion": "0.11.0",
+        "U003ProgramVersion": "0.13",
+        "U003LaunchKind": "NATIVE_EXECUTABLE",
+        "U003ExecutableSizeBytes": executable.stat().st_size,
+        "U003ExecutableSha256": executable_hash,
+        "LauncherInterfaceId": receipt.get("InterfaceId"),
+        "LauncherInterfaceVersion": receipt.get("InterfaceVersion"),
+        "ExcludedFromReleaseIdentity": [
+            "Raw CAN CSV", "DBC files", "Video files", "Engineer-edited review labels",
+            "TEMP files", "absolute paths and file timestamps",
+        ],
+    }
+    return manifest, records
+
+
+def inventory_csv(records: Sequence[Mapping[str, Any]]) -> bytes:
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=["LogicalPath", "Role", "SizeBytes", "Sha256"],
+            lineterminator="\n",
+        )
+        writer.writeheader()
+        writer.writerows(records)
+        stream.seek(0)
+        return stream.read().encode("utf-8")
+
+
+def atomic_exact(path: Path, data: bytes) -> str:
+    if path.exists():
+        if not path.is_file() or path.is_symlink() or path.read_bytes() != data:
+            raise FreezeError("OUTPUT_CONFLICT", path.name)
+        return "REPLAY"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writing = path.with_name(path.name + ".writing")
+    if writing.exists():
+        writing.unlink()
+    writing.write_bytes(data)
+    os.replace(writing, path)
+    return "CREATED"
+
+
+def archive_temp(ccode: Path) -> Tuple[int, int]:
+    temp = ccode / "U-UDP002/04_TEMP"
+    keep = {"A-Archive", TRANSFER_NAME, GUIDE_NAME}
+    archive = temp / "A-Archive/U22B21E_PREPARE"
+    moved = 0
+    locked = 0
+    for item in list(temp.iterdir()):
+        if item.name in keep:
+            continue
+        try:
+            archive.mkdir(parents=True, exist_ok=True)
+            destination = archive / item.name
+            suffix = 1
+            while destination.exists():
+                destination = archive / f"{item.stem}_{suffix:03d}{item.suffix}"
+                suffix += 1
+            shutil.move(str(item), str(destination))
+            moved += 1
+        except (OSError, PermissionError):
+            locked += 1
+    return moved, locked
+
+
+def prepare(ccode: Path) -> str:
+    transfer = require_file(ccode / "U-UDP002/04_TEMP" / TRANSFER_NAME, "TRANSFER")
+    require_file(ccode / "U-UDP002/04_TEMP" / GUIDE_NAME, "GUIDE")
+    moved, locked = archive_temp(ccode)
+    destination = ccode / RUNTIME_RELATIVE
+    disposition = atomic_exact(destination, transfer.read_bytes())
+    print("=== U22B21E PREPARE / GOLDEN MVP RELEASE FREEZE ===")
+    print("PASS | B21E installed outside TEMP | WHY: release identity must survive TEMP cleanup")
+    print("PASS | completed transfer files archived | WHY: stale controllers cannot enter the freeze inventory")
+    print("PASS | analytical outputs remain read-only | WHY: release freeze records evidence and never regenerates it")
+    capsule = (
+        f"B21EP-I1-N{int(disposition == 'CREATED')}-R{int(disposition == 'REPLAY')}"
+        f"-A{moved}-K{locked}-X0-C0"
+    )
+    print(capsule)
+    return capsule
+
+
+def self_test(ccode: Path) -> str:
+    runtime = require_file(ccode / RUNTIME_RELATIVE, "RUNTIME")
+    with tempfile.TemporaryDirectory(prefix="b21e_compile_", dir=str(ccode / "U-UDP002/04_TEMP")) as temp:
+        py_compile.compile(runtime, cfile=str(Path(temp) / "b21e.pyc"), doraise=True)
+    checks: List[str] = []
+
+    def check(condition: bool, label: str) -> None:
+        if not condition:
+            raise FreezeError("SELFTEST", label)
+        checks.append(label)
+
+    check(PROGRAM_VERSION == "0.1.0", "VERSION")
+    check(RELEASE_ID.endswith("2026_08_26"), "RELEASE_ID")
+    check(len(CORE_RELATIVES) == 4, "CORE_COUNT")
+    check(B20D_REPORT_RELATIVE.name.endswith("v0_2.json"), "B20D_REPORT")
+    check(B21A_HANDOFF_RELATIVE.name == "u003_handoff_descriptor_v0_1.json", "HANDOFF")
+    check(LAUNCH_RECEIPT_RELATIVE.name == "u003_launcher_capability_local_v0_1.json", "RECEIPT")
+    check(MODEL_RELATIVE.name == "u002_thin_workbench_model_v0_7.py", "MODEL")
+    check(GUI_RELATIVE.name == "u002_thin_workbench_gui_v0_11.py", "GUI")
+    check(U003_SOURCE_RELATIVE.name == "u003_evidence_review_workbench_v0_13.py", "U003")
+    check(OUTPUT_RELATIVE.parts[-1] == "U22B21E_GOLDEN_MVP_RELEASE_FREEZE", "OUTPUT")
+
+    sample = b"sample\n"
+    check(sha256_bytes(sample) == hashlib.sha256(sample).hexdigest(), "HASH")
+    check(token("a-b") == "A_B", "TOKEN")
+    check(detail_token("a/b") == "A/B", "DETAIL")
+    check(canonical_json({"b": 2, "a": 1}) == b'{"a":1,"b":2}\n', "CANONICAL")
+    rows = [{"LogicalPath": "A", "Role": "R", "SizeBytes": 1, "Sha256": "0" * 64}]
+    csv_data = inventory_csv(rows)
+    check(csv_data.startswith(b"LogicalPath,Role,SizeBytes,Sha256\n"), "CSV_HEADER")
+    check(csv_data.count(b"\n") == 2, "CSV_ROWS")
+    with tempfile.TemporaryDirectory(prefix="b21e_output_", dir=str(ccode / "U-UDP002/04_TEMP")) as temp:
+        path = Path(temp) / "exact.bin"
+        check(atomic_exact(path, sample) == "CREATED", "ATOMIC_CREATE")
+        check(atomic_exact(path, sample) == "REPLAY", "ATOMIC_REPLAY")
+        try:
+            atomic_exact(path, b"different")
+            check(False, "ATOMIC_CONFLICT")
+        except FreezeError as error:
+            check(error.reason == "OUTPUT_CONFLICT", "ATOMIC_CONFLICT")
+    if len(checks) != 19:
+        raise FreezeError("SELFTEST_COUNT", len(checks))
+    print("=== U22B21E SELF-TEST / RELEASE-FREEZE CONTROLS ===")
+    print("PASS | deterministic JSON, CSV, hashing and atomic replay | WHY: a freeze must be reproducible")
+    print("PASS | exact B20D/B21A/B21D/versioned paths | WHY: a nearby historical file cannot satisfy release identity")
+    print("PASS | conflict rejection and no timestamp identity | WHY: rerun is replay, not a silent new release")
+    capsule = "B21EST-N19-P1-H1-A1-X0-C0"
+    print(capsule)
+    return capsule
+
+
+def execute(ccode: Path) -> str:
+    manifest, records = collect_release(ccode)
+    csv_data = inventory_csv(records)
+    manifest["InventorySha256"] = sha256_bytes(csv_data)
+    manifest_data = canonical_json(manifest)
+    fingerprint = sha256_bytes(manifest_data)
+    receipt = (
+        "CAMERA-RADAR GUI GOLDEN MVP RELEASE FREEZE\n"
+        f"ReleaseId: {RELEASE_ID}\n"
+        f"ReleaseFingerprintSha256: {fingerprint}\n"
+        f"InventorySha256: {manifest['InventorySha256']}\n"
+        f"InventoryFileCount: {manifest['InventoryFileCount']}\n"
+        f"CandidateCount: {manifest['CandidateCount']}\n"
+        f"ReviewDataRowCount: {manifest['ReviewDataRowCount']}\n"
+        f"U003ExecutableSha256: {manifest['U003ExecutableSha256']}\n"
+        "Status: FROZEN_INTERNAL_MVP\n"
+    ).encode("utf-8")
+    output = ccode / OUTPUT_RELATIVE
+    dispositions = [
+        atomic_exact(output / "golden_mvp_release_manifest_v0_1.json", manifest_data),
+        atomic_exact(output / "golden_mvp_release_file_inventory_v0_1.csv", csv_data),
+        atomic_exact(output / "golden_mvp_release_receipt_v0_1.txt", receipt),
+    ]
+    created = sum(item == "CREATED" for item in dispositions)
+    replayed = sum(item == "REPLAY" for item in dispositions)
+    capsule = (
+        f"B21E-M{manifest['ModuleCount']}-R{manifest['InventoryFileCount']}"
+        f"-C{manifest['CandidateCount']}-D{manifest['ReviewDataRowCount']}"
+        f"-U13-H{str(manifest['U003ExecutableSha256'])[:12]}"
+        f"-N{created}-P{replayed}-X0-C0"
+    )
+    print("=== U22B21E EXECUTE / FROZEN RELEASE IDENTITY ===")
+    print("PASS | accepted Golden Run tree and five qualified Modules hash-bound")
+    print("PASS | B21A C16/D1937 handoff payloads reverified without modification")
+    print("PASS | real U003 native executable, build result and launcher receipt agree")
+    print(capsule)
+    return capsule
+
+
+def record_error(ccode: Optional[Path], reason: object, detail: object) -> None:
+    if ccode is None:
+        return
+    try:
+        path = ccode / ERROR_RELATIVE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"B21E FAILURE\nReason: {reason}\nDetail: {detail}\n\n{traceback.format_exc()}",
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def parse_arguments(argv: Sequence[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--prepare", action="store_true")
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--execute", action="store_true")
+    parser.add_argument("--container-root", required=True)
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    ccode: Optional[Path] = None
+    try:
+        arguments = parse_arguments(sys.argv[1:] if argv is None else argv)
+        ccode = require_ccode(arguments.container_root)
+        if arguments.prepare:
+            prepare(ccode)
+        elif arguments.self_test:
+            self_test(ccode)
+        else:
+            execute(ccode)
+        return 0
+    except FreezeError as error:
+        record_error(ccode, error.reason, error.detail)
+        print(f"B21EE-K{error.reason[:30]}-X1-C7")
+        return 7
+    except Exception as error:
+        reason = token(type(error).__name__)
+        record_error(ccode, reason, error)
+        print(f"B21EE-K{reason[:30]}-X1-C7")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
