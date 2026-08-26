@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install the governed U3M1 module foundation from its adjacent ZIP file."""
+"""Install the governed U3M2 execution bridge from its adjacent ZIP file."""
 
 from __future__ import annotations
 
@@ -8,24 +8,25 @@ import csv
 import hashlib
 import shutil
 import sys
-import tempfile
 import zipfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 
-PACKAGE_NAME = "UDP003_U3M1_MODULE_FOUNDATION_v0_1.zip"
+PACKAGE_NAME = "UDP003_U3M2_EXECUTION_BRIDGE_v0_1.zip"
+FOUNDATION_RELATIVE_PATH = "01_PROGRAMS/u003_module_runtime_v0_1.py"
 REQUIRED_MEMBERS = {
-    "01_PROGRAMS/u003_module_runtime_v0_1.py",
-    "02_CONTROLS/contracts/u003_module_contract_v0_1.json",
-    "02_MODULES/REVIEW_ASSIST/CameraRadar.U003.ReviewDispositionLabels/0.1.0/module_manifest.json",
-    "02_MODULES/REVIEW_ASSIST/CameraRadar.U003.ReviewDispositionLabels/0.1.0/algorithm_card.json",
+    "01_PROGRAMS/u003_module_executor_v0_1.py",
+    "02_CONTROLS/contracts/u003_module_execution_contract_bundle_v0_1.json",
+    "02_MODULES/REVIEW_ASSIST/CameraRadar.U003.SampleMemoDraft/0.1.0/module_manifest.json",
+    "02_MODULES/REVIEW_ASSIST/CameraRadar.U003.SampleMemoDraft/0.1.0/algorithm_card.json",
+    "02_MODULES/REVIEW_ASSIST/CameraRadar.U003.SampleMemoDraft/0.1.0/implementation.py",
     "PACKAGE_SHA256.csv",
 }
 
 
 class InstallError(RuntimeError):
-    """Raised when the transfer package is incomplete or unsafe."""
+    """Raised when U3M1 is absent or the U3M2 package is unsafe."""
 
 
 def sha256_file(path: Path) -> str:
@@ -42,54 +43,53 @@ def safe_members(archive: zipfile.ZipFile) -> list[str]:
         pure = PurePosixPath(name)
         if pure.is_absolute() or ".." in pure.parts:
             raise InstallError(f"Unsafe ZIP member: {name}")
-        if name.endswith("/"):
-            continue
-        members.append(name)
+        if not name.endswith("/"):
+            members.append(name)
     if set(members) != REQUIRED_MEMBERS:
         missing = sorted(REQUIRED_MEMBERS - set(members))
         extra = sorted(set(members) - REQUIRED_MEMBERS)
-        raise InstallError(f"Package file inventory mismatch. Missing={missing}; Extra={extra}")
+        raise InstallError(f"Package inventory mismatch. Missing={missing}; Extra={extra}")
     return members
 
 
-def validate_extracted_package(package_root: Path) -> list[tuple[str, str, str]]:
+def validate_payloads(package_root: Path) -> list[tuple[str, str, str]]:
     manifest_path = package_root / "PACKAGE_SHA256.csv"
     with manifest_path.open("r", encoding="utf-8-sig", newline="") as stream:
         rows = list(csv.DictReader(stream))
-    if len(rows) != 4:
-        raise InstallError("PACKAGE_SHA256.csv must contain exactly four payload rows.")
+    if len(rows) != 5:
+        raise InstallError("PACKAGE_SHA256.csv must contain exactly five payload rows.")
 
     checked: list[tuple[str, str, str]] = []
     for row in rows:
         relative = row.get("RelativePath", "").strip()
         expected = row.get("Sha256", "").strip().lower()
         purpose = row.get("Purpose", "").strip()
-        target = (package_root / relative).resolve()
+        payload = (package_root / relative).resolve()
         try:
-            target.relative_to(package_root.resolve())
+            payload.relative_to(package_root.resolve())
         except ValueError as error:
             raise InstallError(f"Manifest path escapes package root: {relative}") from error
-        if not target.is_file() or target.is_symlink():
-            raise InstallError(f"Package payload is missing: {relative}")
-        actual = sha256_file(target)
+        if not payload.is_file() or payload.is_symlink():
+            raise InstallError(f"Payload is missing: {relative}")
+        actual = sha256_file(payload)
         if actual != expected:
-            raise InstallError(f"Package payload hash mismatch: {relative}")
+            raise InstallError(f"Payload hash mismatch: {relative}")
         checked.append((relative, actual, purpose))
     return checked
 
 
-def backup_existing_files(root: Path, relative_paths: list[str]) -> Path | None:
+def archive_existing(root: Path, relative_paths: list[str]) -> Path | None:
     existing = [relative for relative in relative_paths if (root / relative).is_file()]
     if not existing:
         return None
     stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
-    backup_root = root / "A-Archive" / f"U3M1_REPLACED_{stamp}"
+    archive_root = root / "A-Archive" / f"U3M2_REPLACED_{stamp}"
     for relative in existing:
         source = root / relative
-        destination = backup_root / relative
+        destination = archive_root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
-    return backup_root
+    return archive_root
 
 
 def install(package_path: Path, root: Path) -> int:
@@ -97,43 +97,45 @@ def install(package_path: Path, root: Path) -> int:
     root = root.resolve()
     if root.name.upper() != "U-UDP003":
         raise InstallError(f"Expected U-UDP003 root, got: {root}")
+    foundation = root / FOUNDATION_RELATIVE_PATH
+    if not foundation.is_file():
+        raise InstallError(
+            "U3M1 foundation is missing. Complete U3M1 before installing U3M2."
+        )
     if not package_path.is_file():
         raise InstallError(f"Transfer ZIP is missing: {package_path}")
 
-    temp_parent = root / "04_TEMP"
-    temp_parent.mkdir(parents=True, exist_ok=True)
-    prepared = temp_parent / "U3M1_PREPARED"
-    if prepared.exists():
-        shutil.rmtree(prepared)
-    prepared.mkdir(parents=True)
-
+    temp_root = root / "04_TEMP" / "U3M2_PREPARED"
+    if temp_root.exists():
+        shutil.rmtree(temp_root)
+    temp_root.mkdir(parents=True)
     with zipfile.ZipFile(package_path, "r") as archive:
         members = safe_members(archive)
-        archive.extractall(prepared)
-
-    checked = validate_extracted_package(prepared)
+        archive.extractall(temp_root)
+    checked = validate_payloads(temp_root)
     relative_paths = [relative for relative, _digest, _purpose in checked]
-    backup_root = backup_existing_files(root, relative_paths)
+    archive_root = archive_existing(root, relative_paths)
+
     for relative in relative_paths:
-        source = prepared / relative
+        source = temp_root / relative
         destination = root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         writing = destination.with_name(destination.name + ".writing")
         shutil.copy2(source, writing)
         writing.replace(destination)
 
-    print("U3M1 prepare checks:")
-    print(f"  [OK] U003 root: {root} - keeps company paths explicit")
-    print(f"  [OK] ZIP inventory: {len(members)} files - rejects missing or foreign payloads")
+    print("U3M2 prepare checks:")
+    print(f"  [OK] U003 root: {root} - company topology is explicit")
+    print(f"  [OK] U3M1 foundation: {foundation} - execution reuses the accepted scanner")
+    print(f"  [OK] ZIP inventory: {len(members)} files - foreign payloads are rejected")
     for relative, digest, purpose in checked:
         print(f"  [OK] {relative} | {digest[:12]} - {purpose}")
-    print("  [OK] 02_MODULES created - future modules have one governed location")
-    print("  [OK] U3M1_PREPARED refreshed - stale extraction cannot be reused")
-    if backup_root is not None:
-        print(f"  [OK] Previous owned files archived: {backup_root}")
+    print("  [OK] U3M2_PREPARED refreshed - stale extraction cannot be reused")
+    if archive_root is None:
+        print("  [OK] No previous U3M2-owned file required archival")
     else:
-        print("  [OK] No previous owned payload required archival")
-    print("U3M1P N-R1-Z1-F4-M1-B{}-X0 C-0".format(1 if backup_root else 0))
+        print(f"  [OK] Previous U3M2-owned files archived: {archive_root}")
+    print("U3M2P N-R1-F5-M1-B{}-X0 C-0".format(1 if archive_root else 0))
     return 0
 
 
@@ -151,16 +153,11 @@ def main(argv: list[str] | None = None) -> int:
         if not arguments.prepare:
             raise InstallError("Use --prepare.")
         script_directory = Path(__file__).resolve().parent
-        default_root = script_directory.parent
-        root = arguments.root if arguments.root is not None else default_root
-        package = (
-            arguments.package
-            if arguments.package is not None
-            else script_directory / PACKAGE_NAME
-        )
+        root = arguments.root if arguments.root is not None else script_directory.parent
+        package = arguments.package if arguments.package is not None else script_directory / PACKAGE_NAME
         return install(package, root)
     except Exception as error:
-        print(f"U3M1PE K-{type(error).__name__.upper()} D-{error} X1 C-7", file=sys.stderr)
+        print(f"U3M2PE K-{type(error).__name__.upper()} D-{error} X1 C-7", file=sys.stderr)
         return 7
 
 

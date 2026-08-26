@@ -1,0 +1,48 @@
+U003 / U3M2 隔离模块执行桥执行指南
+日期：2026-08-27
+
+本步骤做什么
+------------
+U3M2让U003能够在独立子进程中运行经过契约校验的PROCESS Module，
+并保存Request、Result、stdout、stderr和ModuleTrace。
+
+模块不能修改U002候选、Peak FrameCount、ReviewResult或工程师最终Memo。
+模块失败时必须留下可见证据，但不会破坏已加载的Review数据。
+
+下载位置
+--------
+把以下两个文件下载到：
+
+  C-CODE\U-UDP003\04_TEMP
+
+  UDP003_U3M2_EXECUTION_BRIDGE_v0_1.zip
+  u003_u3m2_execution_bridge_installer_v0_1.py.txt
+
+无需手动解压ZIP。
+
+执行
+----
+使用CMD进入C-CODE根目录，只执行以下三行：
+
+  python U-UDP003\04_TEMP\u003_u3m2_execution_bridge_installer_v0_1.py.txt --prepare
+  python U-UDP003\01_PROGRAMS\u003_module_executor_v0_1.py --self-test
+  python U-UDP003\01_PROGRAMS\u003_module_executor_v0_1.py --demo --module-root U-UDP003\02_MODULES --run-root U-UDP003\05_TESTS\03_RUNS\U3M2
+
+三行的意义
+----------
+第1行：确认U3M1存在，核对ZIP和5个payload的SHA-256，再安装U3M2。
+第2行：验证Request/Result、受保护字段、进程隔离、日语输出和Trace。
+第3行：真正运行英文和日文各一次Sample Memo Module，并留下完整证据。
+
+回传
+----
+Self-test成功无需回传，只回传最后一行：
+
+  U3M2R N-M1-E2-T2-O2-J1-X0 C-0
+
+失败时回传完整U3M2PE、U3M2E或U3M2ME错误行。
+
+现实意义
+--------
+U3M2证明第三方Module可以失败、超时或返回错误，而不会把代码直接注入
+U003 GUI进程。它是后续Module Manager和可插拔导出的安全执行基础。
