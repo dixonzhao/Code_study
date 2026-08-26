@@ -19,14 +19,14 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
 PROGRAM_ID = "CameraRadar.U002.B21E.GoldenMvpReleaseFreeze"
-PROGRAM_VERSION = "0.1.0"
+PROGRAM_VERSION = "0.2.0"
 RELEASE_ID = "CAMERA_RADAR_GUI_GOLDEN_MVP_2026_08_26"
-TRANSFER_NAME = "u002_u22b21e_golden_mvp_release_freeze_v0_1.py.txt"
+TRANSFER_NAME = "u002_u22b21e_golden_mvp_release_freeze_v0_2.py.txt"
 RUNTIME_RELATIVE = Path(
     "U-UDP002/01_PROGRAMS/release/"
-    "u002_u22b21e_golden_mvp_release_freeze_v0_1.py"
+    "u002_u22b21e_golden_mvp_release_freeze_v0_2.py"
 )
-GUIDE_NAME = "UDP002_U22B21E_START_HERE_CN_v0_1_2026-08-26.txt"
+GUIDE_NAME = "UDP002_U22B21E_START_HERE_CN_v0_2_2026-08-26.txt"
 
 PROFILE_RELATIVE = Path(
     "U-UDP002/02_CONFIG/gui_profiles/"
@@ -156,16 +156,37 @@ def add_file(
 ) -> None:
     require_file(path, role)
     logical = logical_path(ccode, path)
+    normalized_role = token(role)
     record = {
         "LogicalPath": logical,
-        "Role": role,
+        "Role": normalized_role,
         "SizeBytes": path.stat().st_size,
         "Sha256": sha256_file(path),
     }
     previous = inventory.get(logical)
-    if previous is not None and previous != record:
-        raise FreezeError("INVENTORY_COLLISION", logical)
-    inventory[logical] = record
+    if previous is None:
+        inventory[logical] = record
+        return
+
+    # One immutable file may legitimately satisfy several evidence roles. This
+    # occurs when a B21A handoff payload also lives inside the frozen Golden Run
+    # tree. Preserve one physical-file row and merge its semantic roles. Only a
+    # byte/size change at the same logical path is a real collision.
+    if (
+        previous.get("SizeBytes") != record["SizeBytes"]
+        or previous.get("Sha256") != record["Sha256"]
+    ):
+        raise FreezeError(
+            "INVENTORY_COLLISION",
+            f"{logical}:{previous.get('Sha256')}:{record['Sha256']}",
+        )
+    roles = {
+        item
+        for item in str(previous.get("Role", "")).split("|")
+        if item
+    }
+    roles.add(normalized_role)
+    previous["Role"] = "|".join(sorted(roles))
 
 
 def add_tree(
@@ -369,6 +390,7 @@ def collect_release(ccode: Path) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         )
 
     fixed_files = [
+        (ccode / RUNTIME_RELATIVE, "RELEASE_FREEZER"),
         (profile_path, "GOLDEN_PROFILE"),
         (registry_path, "MODULE_REGISTRY"),
         (report_path, "B20D_ACCEPTANCE"),
@@ -508,7 +530,7 @@ def self_test(ccode: Path) -> str:
             raise FreezeError("SELFTEST", label)
         checks.append(label)
 
-    check(PROGRAM_VERSION == "0.1.0", "VERSION")
+    check(PROGRAM_VERSION == "0.2.0", "VERSION")
     check(RELEASE_ID.endswith("2026_08_26"), "RELEASE_ID")
     check(len(CORE_RELATIVES) == 4, "CORE_COUNT")
     check(B20D_REPORT_RELATIVE.name.endswith("v0_2.json"), "B20D_REPORT")
@@ -537,13 +559,27 @@ def self_test(ccode: Path) -> str:
             check(False, "ATOMIC_CONFLICT")
         except FreezeError as error:
             check(error.reason == "OUTPUT_CONFLICT", "ATOMIC_CONFLICT")
-    if len(checks) != 19:
+
+        inventory: Dict[str, Dict[str, Any]] = {}
+        add_file(inventory, ccode, path, "ROLE_B")
+        add_file(inventory, ccode, path, "ROLE_A")
+        logical = logical_path(ccode, path)
+        check(inventory[logical]["Role"] == "ROLE_A|ROLE_B", "ROLE_MERGE")
+        add_file(inventory, ccode, path, "ROLE_A")
+        check(len(inventory) == 1, "ROLE_REPLAY")
+        path.write_bytes(b"changed")
+        try:
+            add_file(inventory, ccode, path, "ROLE_C")
+            check(False, "BYTE_COLLISION")
+        except FreezeError as error:
+            check(error.reason == "INVENTORY_COLLISION", "BYTE_COLLISION")
+    if len(checks) != 22:
         raise FreezeError("SELFTEST_COUNT", len(checks))
     print("=== U22B21E SELF-TEST / RELEASE-FREEZE CONTROLS ===")
     print("PASS | deterministic JSON, CSV, hashing and atomic replay | WHY: a freeze must be reproducible")
     print("PASS | exact B20D/B21A/B21D/versioned paths | WHY: a nearby historical file cannot satisfy release identity")
     print("PASS | conflict rejection and no timestamp identity | WHY: rerun is replay, not a silent new release")
-    capsule = "B21EST-N19-P1-H1-A1-X0-C0"
+    capsule = "B21EST-N22-P1-H1-A1-X0-C0"
     print(capsule)
     return capsule
 

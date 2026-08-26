@@ -21,30 +21,31 @@ U002用户、接口和维护手册。
 
 将以下两个文件直接放入 C-CODE\U-UDP002\04_TEMP：
 
-1. u002_u22b21e_golden_mvp_release_freeze_v0_1.py.txt
+1. u002_u22b21e_golden_mvp_release_freeze_v0_2.py.txt
 2. 本执行指南
 
 从C-CODE目录打开CMD。
 
 三、只运行三条命令
 
-python U-UDP002\04_TEMP\u002_u22b21e_golden_mvp_release_freeze_v0_1.py.txt --prepare --container-root .
+python U-UDP002\04_TEMP\u002_u22b21e_golden_mvp_release_freeze_v0_2.py.txt --prepare --container-root .
 
-python U-UDP002\04_TEMP\u002_u22b21e_golden_mvp_release_freeze_v0_1.py.txt --self-test --container-root .
+python U-UDP002\04_TEMP\u002_u22b21e_golden_mvp_release_freeze_v0_2.py.txt --self-test --container-root .
 
-python U-UDP002\04_TEMP\u002_u22b21e_golden_mvp_release_freeze_v0_1.py.txt --execute --container-root .
+python U-UDP002\04_TEMP\u002_u22b21e_golden_mvp_release_freeze_v0_2.py.txt --execute --container-root .
 
 四、成功结果
 
 Self-test：
 
-B21EST-N19-P1-H1-A1-X0-C0
+B21EST-N22-P1-H1-A1-X0-C0
 
 Execute：
 
 B21E-M5-R...-C16-D1937-U13-Hbf142add5851-N3-P0-X0-C0
 
-其中R是实际冻结的文件数量；首次运行N3-P0，完全相同的重复运行是N0-P3。
+其中R是实际冻结的物理文件数量；同一文件承担多个证据角色时只计一次并合并Role。
+首次运行N3-P0，完全相同的重复运行是N0-P3。
 
 成功输出目录：
 
