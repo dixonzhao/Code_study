@@ -1,0 +1,58 @@
+UDP002 B20D业务产物差异诊断指南
+版本：v0.1
+日期：2026-08-26
+
+一、当前判断
+
+本次C7不是“U003主程序历史版本过多”。差异已经从S6 ANOMALY_CANDIDATES开始，S7 U003_REVIEW_PACKAGE只是继续封装S6候选，因此同步出现差异。
+
+不要删除U003版本，不要修改Module，不要清理已经成功生成的Run。
+
+本诊断只读取以下两套既有结果：
+
+- Profile记录的Source Golden Run；
+- B20C生成并由B20D正式执行的新Run。
+
+它会逐文件比较CSV单元格、JSON语义路径和文本行，区分：
+
+- PRIMARY：候选主体内容确实不同；
+- AUX：候选主体一致，仅质量/辅助证据不同；
+- EQUAL：不存在实际差异。
+
+二、下载位置
+
+下载程序并直接放入：
+
+C-CODE\U-UDP002\04_TEMP
+
+文件名不得修改：
+
+u002_u22b20d_business_output_diagnostic_v0_1.py.txt
+
+三、CMD执行
+
+当前目录为C-CODE，只执行三行：
+
+python U-UDP002\04_TEMP\u002_u22b20d_business_output_diagnostic_v0_1.py.txt --prepare --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b20d_business_output_diagnostic_v0_1.py.txt --self-test --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b20d_business_output_diagnostic_v0_1.py.txt --execute --workspace-root U-UDP002
+
+四、回传
+
+前两步C0不用回传。只回传第三步最后一行，例如：
+
+B20DD-N2-S6D1-S7D1-P2-A0-CR16-CN16-FCANDIDATE_INVENTORY_CSV-R1-J4-KPRIMARY-X0-C0
+
+字段含义：
+
+- S6D / S7D：两个Artifact各有多少Payload不同；
+- P / A：主体Payload与辅助Payload差异数；
+- CR / CN：历史Golden与新Run的候选数量；
+- F / R / J：第一个差异文件、数据行、列序号；
+- K：PRIMARY、AUX或EQUAL。
+
+详细报告自动写入：
+
+U-UDP002\07_OUTPUT\U22B20D_FORMAL_GOLDEN_REGRESSION\02_DIAGNOSTICS\u22b20d_business_output_difference_diagnostic_v0_1.json
+
+本轮不需要人工打开该JSON。
