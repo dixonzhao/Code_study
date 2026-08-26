@@ -1,5 +1,5 @@
 UDP002 U22B20B Thin GUI执行指南（中文）
-版本：v0.8（Profile视觉优先级、Stage分组与输出去向校正版）
+版本：v0.10（Profile按钮比例与Workflow可见性校正版）
 日期：2026-08-26
 
 一、本节点做什么
@@ -25,8 +25,8 @@ Thin GUI不会重新实现算法。现有CLI Golden Path保持不变。
 
 从Code_study下载：
 
-1. UDP002_U22B20B_PACKAGE_v0_8.zip
-2. UDP002_U22B20B_START_HERE_CN_v0_8_2026-08-26.txt
+1. UDP002_U22B20B_PACKAGE_v0_10.zip
+2. UDP002_U22B20B_START_HERE_CN_v0_10_2026-08-26.txt
 
 把ZIP内三个文件解压到：
 
@@ -36,10 +36,10 @@ C-CODE\U-UDP002\04_TEMP
 
 最终应有：
 
-- u002_u22b20b_thin_gui_installer_v0_8.py.txt
+- u002_u22b20b_thin_gui_installer_v0_10.py.txt
 - u002_thin_workbench_model_v0_4.py.txt
-- u002_thin_workbench_gui_v0_6.py.txt
-- UDP002_U22B20B_START_HERE_CN_v0_8_2026-08-26.txt
+- u002_thin_workbench_gui_v0_8.py.txt
+- UDP002_U22B20B_START_HERE_CN_v0_10_2026-08-26.txt
 
 不要改名，不要再创建B20B子文件夹。
 
@@ -47,9 +47,9 @@ C-CODE\U-UDP002\04_TEMP
 
 当前目录必须为C-CODE，只执行以下三行：
 
-python U-UDP002\04_TEMP\u002_u22b20b_thin_gui_installer_v0_8.py.txt --prepare --workspace-root U-UDP002
-python U-UDP002\04_TEMP\u002_u22b20b_thin_gui_installer_v0_8.py.txt --self-test --workspace-root U-UDP002
-python U-UDP002\04_TEMP\u002_u22b20b_thin_gui_installer_v0_8.py.txt --open-gui --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b20b_thin_gui_installer_v0_10.py.txt --prepare --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b20b_thin_gui_installer_v0_10.py.txt --self-test --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b20b_thin_gui_installer_v0_10.py.txt --open-gui --workspace-root U-UDP002
 
 Prepare和Self-test会用英文显示：检查了什么，以及为什么检查。两步C0时不用回传。
 
@@ -59,7 +59,7 @@ v0.3不再把本地测试用的FULL_CASE当成固定产品规则。GUI会保留B
 
 v0.4同时把U003路径明确作为可选的本机便利设置。以前保存过但现在失效的U003路径不会阻止U002 Self-test或分析；真正点击Open U003时才检查该文件是否存在。
 
-v0.8继续只修正GUI信息层级与运行后去向，不修改分析逻辑、Data Contract、Module算法或Golden配置。
+v0.10继续只修正GUI空间分配，不修改分析逻辑、Data Contract、Module算法或Golden配置。
 
 Profile窗口不再要求理解Clone as Custom。界面提供Load Sample Profile、Save Profile、Open Profile；用户第一次修改Module、Configuration、PrimaryOutcome、SignalProfile或CandidatePolicy时，程序自动进入Editable Working Profile。若用户完全不修改Sample，仍保持Default Qualified语义，供B20C和CLI Golden配置比较。
 
@@ -70,6 +70,10 @@ Add Qualified Module改成左右两区：左侧是可换行的Module卡片，右
 v0.8进一步按S0-S7插入明显的Stage分组标题；右侧Version区大于左侧Module区。选择具体Version后，黑体Module标题下方显示来自该Version Algorithm Card的两行Purpose简介。
 
 Profile区以Open Profile为最大主操作，Save Profile为次操作；Load Sample Profile缩小并放在右下角。Sample只用于恢复示例配置，不再抢占正常Profile工作的视觉中心。
+
+v0.10修正试作v0.9的比例过度：Open与Save回到同一横排的正常宽度，Sample保持最右侧自然小尺寸，不再让Open横跨两列，也不再把Save与Sample上下堆叠。
+
+Run Workflow固定为2×2按钮区：第一排Save/Check，第二排Run/Review。即使窗口使用最小允许高度，1-4四个正式动作也必须同时可见。
 
 Outcome and Output Settings增加运行后去向：默认进入U003 Evidence Review，或者启动一个完全独立的新U002。后者目前不传递数据；真正的U002派生数据回灌仍需SourceKind、ParentRunId、ArtifactRole和EntryStage契约，因此没有被伪装成已完成功能。
 
@@ -82,7 +86,7 @@ Outcome and Output Settings增加运行后去向：默认进入U003 Evidence Rev
 GUI打开后先不要启动完整分析，只检查：
 
 1. 启动时先出现English/日本語选择窗口；
-2. 选择English后标题为U002 Analysis Workbench v0.6，选择日本語后显示日语标题；
+2. 选择English后标题为U002 Analysis Workbench v0.8，选择日本語后显示日语标题；
 3. Profile显示Default Qualified Profile；若语言选择改变了Golden Profile内的Review语言，则应如实显示Custom Profile；
 4. Module表显示5个Module；
 5. 顶部Stage条中S0、S1、S6、S7为激活状态；
@@ -103,10 +107,11 @@ GUI打开后先不要启动完整分析，只检查：
 20. Profile区域显示Load Sample Profile、Save Profile、Open Profile，不再显示Clone as Custom；
 21. 直接点击Add/Edit/Remove/Move即可修改，不需要先切换内部模式；
 22. Save Profile保存后，Open Profile可以重新载入分析配置，同时当前RunId、U001输入和Frame范围不变。
-23. Open Profile是Profile区最大按钮；Load Sample Profile只位于右下角且尺寸较小；
+23. Open与Save位于同一横排且宽度正常；Sample位于最右侧、使用自然小尺寸，三个按钮不允许上下堆叠；
 24. Add Qualified列表按S0-S7明确分组，右侧Available Versions区域宽于左侧；
 25. 选择Version后，黑体Module标题下面显示两行以内的功能简介；
 26. Outcome and Output Settings可选择U003 Review（默认）或独立新U002；界面明确说明新U002不接收上一轮数据。
+27. Run Workflow的1、2、3、4四个动作以2×2方式同时可见，不需要扩大窗口或滚动才能看到Run和Review。
 
 本节点只验收GUI控制边界，不运行50,198帧全量分析。
 
@@ -114,7 +119,7 @@ GUI打开后先不要启动完整分析，只检查：
 
 三条命令均成功并且GUI正常打开：
 
-B20B8-OPEN-OPENBIG-S8-DESC1-OUT2-C0
+B20B10-OPEN3-WF4-S8-DESC1-OUT2-C0
 
 如果Prepare或Self-test失败，只回传最后一行完整B20BE机器码，不让Copilot自行修改。
 

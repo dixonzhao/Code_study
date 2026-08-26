@@ -1,7 +1,7 @@
 CAMERA-RADAR ANALYSIS PLATFORM - GOLDEN RUN AND GUI ROADMAP
-Version: 2.3
+Version: 2.4
 Date: 2026-08-26
-Status: U002 GUI INFORMATION HIERARCHY AND FRAME-DOMAIN BOUNDARY READY FOR COMPANY ACCEPTANCE
+Status: U002 GUI V0.10 LAYOUT CORRECTION LOCALLY ACCEPTED; COMPANY VISUAL ACCEPTANCE NEXT
 
 1. Product objective
 
@@ -74,9 +74,9 @@ Modules may be reordered only within their assigned Stage. Cross-Stage movement 
 - First human-closed U001 -> U002 -> U003 Golden review path completed.
 - B20A Default Qualified GUI Profile and machine-local Workbench Link contracts completed.
 - B20B v0.5 company GUI launch completed.
-- B20B v0.8 local acceptance completed after human-usability, Profile priority, Stage grouping and post-run-destination corrections.
+- B20B v0.10 local acceptance completed after human-usability, Profile priority, Stage grouping, post-run-destination and complete Workflow-visibility corrections.
 
-5. Current B20B v0.8 scope
+5. Current B20B v0.10 scope
 
 - JA/EN startup choice and Run-language lock.
 - Directly clickable U001 and U003 colored connection states with Reset.
@@ -90,11 +90,12 @@ Modules may be reordered only within their assigned Stage. Cross-Stage movement 
 - Qualified Module selection uses wrapped Module cards and a large list of actual retained Version numbers.
 - Repetitive AVAILABLE status rows are omitted because Registry discovery already filters to qualified available entries.
 - Module cards are visibly grouped by S0-S7; selecting a real Version shows the Algorithm Card Purpose before insertion.
-- Open Profile is the main Profile action; Sample Profile is a small recovery/example action.
+- Open Profile and Save Profile use one normal horizontal action row; Sample Profile remains a small rightmost recovery/example action.
+- Run Workflow is a fixed 2-by-2 action grid so Save, Check, Run and Review remain simultaneously visible.
 - Outcome and Output Settings selects U003 review by default or a new independent U002 without data handoff.
 - A true U002-derived input remains prohibited until the explicit lineage contract and qualified S7 export are implemented.
 
-No analytical Module, Golden configuration, Data Contract or CLI execution meaning changed in v0.8.
+No analytical Module, Golden configuration, Data Contract or CLI execution meaning changed in v0.10.
 
 Frame-domain decision:
 
@@ -105,7 +106,7 @@ Frame-domain decision:
 
 6. Immediate acceptance sequence
 
-B20B v0.8 company visual acceptance
+B20B v0.10 company visual acceptance
 -> B20C GUI-generated Default Run Configuration
 -> semantic-equivalence comparison against the accepted CLI Golden configuration
 -> GUI-triggered Validator / Preflight / Executor Golden regression
@@ -144,4 +145,4 @@ A first-time user can select an accepted U001 package, understand and configure 
 
 9. Next action
 
-Install and visually accept B20B v0.8 on the company host. Do not begin B20C until Open/Profile priority, S0-S7 Module grouping, real-Version descriptions and explicit post-run destination are confirmed.
+Install and visually accept B20B v0.10 on the company host. Do not begin B20C until the one-row Profile actions, 2-by-2 complete Workflow, S0-S7 Module grouping, real-Version descriptions and explicit post-run destination are confirmed.
