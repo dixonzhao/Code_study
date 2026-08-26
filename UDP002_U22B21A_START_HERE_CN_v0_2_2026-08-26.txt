@@ -1,5 +1,5 @@
 UDP002 U22B21A U003交接验收执行指南
-版本：v0.1
+版本：v0.2
 日期：2026-08-26
 
 一、本阶段做什么
@@ -23,26 +23,30 @@ B21A负责：
 
 C-CODE\U-UDP002\04_TEMP
 
-1. u002_u22b21a_u003_handoff_acceptance_v0_1.py.txt
-2. UDP002_U22B21A_START_HERE_CN_v0_1_2026-08-26.txt
+1. u002_u22b21a_u003_handoff_acceptance_v0_2.py.txt
+2. UDP002_U22B21A_START_HERE_CN_v0_2_2026-08-26.txt
 
 不要创建子文件夹，不要改名。
 
 三、执行前固定依赖
 
-当前活动U003源程序必须位于：
+当前活动U003源程序必须位于公司正式运行目录：
 
-C-CODE\U-UDP003\02_Programs\u003_evidence_review_workbench_v0_10.py.txt
+C-CODE\U-UDP003\01_PROGRAMS\u003_evidence_review_workbench_v0_10.py
 
-B21A只使用这个已验收版本，不扫描或猜测其他历史版本。
+如果公司端保留下载尾缀，以下名称也可接受：
+
+C-CODE\U-UDP003\01_PROGRAMS\u003_evidence_review_workbench_v0_10.py.txt
+
+B21A只在01_PROGRAMS中检查这两个明确名称，不扫描、不调用02_Programs，也不猜测其他历史版本。若两者同时存在但内容不同，将fail-close。
 
 四、CMD执行
 
 当前目录必须为C-CODE，只执行三行：
 
-python U-UDP002\04_TEMP\u002_u22b21a_u003_handoff_acceptance_v0_1.py.txt --prepare --workspace-root U-UDP002
-python U-UDP002\04_TEMP\u002_u22b21a_u003_handoff_acceptance_v0_1.py.txt --self-test --workspace-root U-UDP002
-python U-UDP002\04_TEMP\u002_u22b21a_u003_handoff_acceptance_v0_1.py.txt --execute --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b21a_u003_handoff_acceptance_v0_2.py.txt --prepare --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b21a_u003_handoff_acceptance_v0_2.py.txt --self-test --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b21a_u003_handoff_acceptance_v0_2.py.txt --execute --workspace-root U-UDP002
 
 Prepare与Self-test通过时不用回传。
 
@@ -64,7 +68,11 @@ B21A-N16-B1-E16-D1937-U10-X0-C0
 
 U-UDP002\07_OUTPUT\U22B21A_U003_HANDOFF_ACCEPTANCE\01_HANDOFF
 
-失败时回传完整B21AE一行，不要切换U003版本尝试绕过。
+失败时只回传末尾的短B21AE一行，例如：
+
+B21AE-KU3SRC-X1-C7
+
+完整错误原因会保存在U-UDP002\04_TEMP\B21A_LAST_ERROR.txt，不再要求手敲长路径。
 
 六、下一步
 

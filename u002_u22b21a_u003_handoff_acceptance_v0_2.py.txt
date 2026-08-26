@@ -18,24 +18,27 @@ from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 
 PROGRAM_ID = "CameraRadar.U002.B21A.U003HandoffAcceptance"
-PROGRAM_VERSION = "0.1.0"
-TRANSFER_NAME = "u002_u22b21a_u003_handoff_acceptance_v0_1.py.txt"
-INSTALLED_NAME = "u002_u22b21a_u003_handoff_acceptance_v0_1.py"
-GUIDE_NAME = "UDP002_U22B21A_START_HERE_CN_v0_1_2026-08-26.txt"
+PROGRAM_VERSION = "0.2.0"
+TRANSFER_NAME = "u002_u22b21a_u003_handoff_acceptance_v0_2.py.txt"
+INSTALLED_NAME = "u002_u22b21a_u003_handoff_acceptance_v0_2.py"
+GUIDE_NAME = "UDP002_U22B21A_START_HERE_CN_v0_2_2026-08-26.txt"
 INSTALL_RELATIVE = Path("01_PROGRAMS/gui") / INSTALLED_NAME
 B20D_REPORT_RELATIVE = Path(
     "07_OUTPUT/U22B20D_FORMAL_GOLDEN_REGRESSION/02_DIAGNOSTICS/"
     "u22b20d_formal_golden_regression_report_v0_2.json"
 )
-U003_SOURCE_FROM_CCODE = Path(
-    "U-UDP003/02_Programs/u003_evidence_review_workbench_v0_10.py.txt"
+U003_SOURCE_CANDIDATES_FROM_CCODE = (
+    Path("U-UDP003/01_PROGRAMS/u003_evidence_review_workbench_v0_10.py"),
+    Path("U-UDP003/01_PROGRAMS/u003_evidence_review_workbench_v0_10.py.txt"),
 )
 ARTIFACT_INDEX_NAME = "run_artifact_index_v0_1.json"
 ARTIFACT_TYPE = "U003_REVIEW_PACKAGE"
 OUTPUT_ROOT_RELATIVE = Path("07_OUTPUT/U22B21A_U003_HANDOFF_ACCEPTANCE")
-REPORT_RELATIVE = OUTPUT_ROOT_RELATIVE / "02_DIAGNOSTICS/u22b21a_u003_handoff_acceptance_report_v0_1.json"
+REPORT_RELATIVE = OUTPUT_ROOT_RELATIVE / "02_DIAGNOSTICS/u22b21a_u003_handoff_acceptance_report_v0_2.json"
 DESCRIPTOR_RELATIVE = OUTPUT_ROOT_RELATIVE / "01_HANDOFF/u003_handoff_descriptor_v0_1.json"
 PATHS_RELATIVE = OUTPUT_ROOT_RELATIVE / "01_HANDOFF/U003_LOAD_PATHS.txt"
+ERROR_REPORT_RELATIVE = Path("04_TEMP/B21A_LAST_ERROR.txt")
+RETIRED_V01_NAME = "u002_u22b21a_u003_handoff_acceptance_v0_1.py"
 
 
 class B21AError(RuntimeError):
@@ -136,6 +139,78 @@ def load_module(path: Path, name: str):
         sys.modules.pop(name, None)
         raise
     return module
+
+
+def resolve_u003_source(root: Path) -> Path:
+    """Resolve only the accepted v0.10 source inside company 01_PROGRAMS."""
+
+    candidates = [root.parent / relative for relative in U003_SOURCE_CANDIDATES_FROM_CCODE]
+    existing = [path for path in candidates if path.is_file() and not path.is_symlink()]
+    if not existing:
+        raise B21AError("U3SRC", "U-UDP003/01_PROGRAMS/V010")
+    if len(existing) == 2 and sha256_file(existing[0]) != sha256_file(existing[1]):
+        raise B21AError("U3CONFLICT", "PY_AND_PYTXT_DIFFER")
+    return existing[0]
+
+
+def retire_known_bad_v01(root: Path) -> int:
+    """Move the superseded wrong-runtime-path v0.1 installation out of service."""
+
+    old = root / "01_PROGRAMS/gui" / RETIRED_V01_NAME
+    if not old.exists():
+        return 0
+    if not old.is_file() or old.is_symlink():
+        raise B21AError("V01TYPE", old.name)
+    archive = root / "A-Archive" / "U22B21A_V01_WRONG_RUNTIME_PATH_RETIRED"
+    archive.mkdir(parents=True, exist_ok=True)
+    destination = archive / old.name
+    if destination.exists():
+        if not destination.is_file() or destination.read_bytes() != old.read_bytes():
+            raise B21AError("V01ARCHIVE", destination.name)
+        old.unlink()
+    else:
+        shutil.move(str(old), str(destination))
+    return 1
+
+
+def short_reason(reason: object) -> str:
+    """Bound the manually returned failure code; full detail stays on disk."""
+
+    value = token(reason)
+    aliases = {
+        "U003_SOURCE_MISSING": "U3SRC",
+        "U003_VERSION": "U3VER",
+        "WORKSPACE_ROOT": "ROOT",
+        "TRANSFER_MISSING": "TRANSFER",
+        "INSTALL_CONFLICT": "INSTALL",
+    }
+    if value in aliases:
+        return aliases[value]
+    for prefix, code in (
+        ("B20D_", "B20D"),
+        ("U003_", "U3"),
+        ("PAYLOAD", "PAYLOAD"),
+        ("BATCH", "BATCH"),
+        ("REVIEW", "REVIEW"),
+        ("CANDIDATE", "CAND"),
+    ):
+        if value.startswith(prefix):
+            return code
+    return value[:24]
+
+
+def record_failure(root: Path | None, reason: object, detail: object) -> None:
+    """Keep complete local diagnostics without expanding the return capsule."""
+
+    if root is None or not root.is_dir():
+        return
+    try:
+        write_text(
+            root / ERROR_REPORT_RELATIVE,
+            "B21A failure detail\nReason: " + str(reason) + "\nDetail: " + str(detail) + "\n",
+        )
+    except Exception:
+        pass
 
 
 def install_exact(source: Path, destination: Path) -> str:
@@ -319,7 +394,7 @@ def validate_handoff(root: Path, write_outputs: bool) -> Dict[str, Any]:
     if len(batch_rows) != batch_count:
         raise B21AError("BATCH_ROW_COUNT", len(batch_rows))
 
-    u003_path = root.parent / U003_SOURCE_FROM_CCODE
+    u003_path = resolve_u003_source(root)
     u003 = load_module(u003_path, "u003_b21a_active_parser")
     if str(getattr(u003, "VERSION", "")) != "0.10":
         raise B21AError("U003_VERSION", getattr(u003, "VERSION", None))
@@ -454,15 +529,16 @@ def prepare(root: Path) -> str:
         raise B21AError("TRANSFER_MISSING", source)
     disposition = install_exact(source, root / INSTALL_RELATIVE)
     b20d_context(root)
-    u003_path = root.parent / U003_SOURCE_FROM_CCODE
+    u003_path = resolve_u003_source(root)
     u003 = load_module(u003_path, "u003_b21a_prepare")
     if str(getattr(u003, "VERSION", "")) != "0.10":
         raise B21AError("U003_VERSION", getattr(u003, "VERSION", None))
+    retired = retire_known_bad_v01(root)
     moved, locked = archive_obsolete_temp(root, (TRANSFER_NAME, GUIDE_NAME))
     print("PASS | B20D v0.2 is succeeded | WHY: no review handoff may precede formal Golden acceptance")
     print("PASS | Exact S7 Review Package and active U003 v0.10 source exist | WHY: path guessing and historical-version selection are prohibited")
-    print(f"INFO | install={disposition} archived={moved} locked={locked}")
-    capsule = f"B21AP-I1-U10-A{moved}-L{locked}-X0-C0"
+    print(f"INFO | install={disposition} retired_v01={retired} archived={moved} locked={locked}")
+    capsule = f"B21AP-I1-U10-R{retired}-A{moved}-L{locked}-X0-C0"
     print(capsule)
     return capsule
 
@@ -470,7 +546,7 @@ def prepare(root: Path) -> str:
 def self_test(root: Path) -> str:
     """Run the active U003 parser self-test and inspect the real package read-only."""
 
-    u003_path = root.parent / U003_SOURCE_FROM_CCODE
+    u003_path = resolve_u003_source(root)
     u003 = load_module(u003_path, "u003_b21a_selftest")
     if u003.run_self_test() != 0:
         raise B21AError("U003_SELFTEST")
@@ -511,10 +587,16 @@ def parse_arguments(argv: Sequence[str]) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run one fail-closed B21A operation."""
 
+    root: Path | None = None
     try:
         arguments = parse_arguments(sys.argv[1:] if argv is None else argv)
         root = Path(arguments.workspace_root).resolve()
-        if not root.is_dir() or root.name != "U-UDP002" or root.is_symlink():
+        if (
+            not root.is_dir()
+            or root.name != "U-UDP002"
+            or root.parent.name != "C-CODE"
+            or root.is_symlink()
+        ):
             raise B21AError("WORKSPACE_ROOT", root)
         if arguments.prepare:
             prepare(root)
@@ -524,10 +606,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             execute(root)
         return 0
     except B21AError as error:
-        print(f"B21AE-K{error.reason}-D{error.detail}-X1-C7")
+        record_failure(root, error.reason, error.detail)
+        print(f"B21AE-K{short_reason(error.reason)}-X1-C7")
         return 7
     except Exception as error:
-        print(f"B21AE-K{token(type(error).__name__)}-D{detail_token(error)}-X1-C7")
+        reason = token(type(error).__name__)
+        record_failure(root, reason, error)
+        print(f"B21AE-K{short_reason(reason)}-X1-C7")
         return 7
 
 
