@@ -1,7 +1,7 @@
 CAMERA-RADAR ANALYSIS PLATFORM - GOLDEN RUN AND GUI ROADMAP
-Version: 2.5
+Version: 2.6
 Date: 2026-08-26
-Status: U002 GUI V0.10 COMPANY ACCEPTED; B20C CONFIGURATION EQUIVALENCE LOCALLY READY
+Status: B20C CONFIGURATION EQUIVALENCE COMPANY ACCEPTED; B20D FORMAL GOLDEN REGRESSION LOCALLY READY
 
 1. Product objective
 
@@ -76,7 +76,8 @@ Modules may be reordered only within their assigned Stage. Cross-Stage movement 
 - B20B v0.5 company GUI launch completed.
 - B20B v0.10 local acceptance completed after human-usability, Profile priority, Stage grouping, post-run-destination and complete Workflow-visibility corrections.
 - B20B v0.10 company visual acceptance completed with B20B10-OPEN3-WF4-S8-DESC1-OUT2-C0.
-- B20C local end-to-end acceptance proves the GUI model preserves all 11 Golden semantic fields while allowing a new RunId.
+- B20C company acceptance proves the GUI model preserves all 11 Golden semantic fields while allowing a new RunId: B20C-N11-M5-S4-D1-X0-C0.
+- B20D local fresh-run and completed-run replay acceptance proves the formal Validator -> Preflight -> Executor chain, five selected business Artifacts and U003 handoff contract can be checked together.
 
 5. Current B20B v0.10 scope
 
@@ -109,11 +110,16 @@ Frame-domain decision:
 6. Immediate acceptance sequence
 
 B20B v0.10 company visual acceptance [COMPLETE]
--> B20C GUI-model-generated Default Run Configuration [LOCAL READY]
--> semantic-equivalence comparison against the accepted CLI Golden configuration
--> GUI-triggered Validator / Preflight / Executor Golden regression
+-> B20C GUI-model-generated Default Run Configuration and semantic-equivalence comparison [COMPANY COMPLETE]
+-> B20D formal Validator / Preflight / Executor Golden regression [COMPANY NEXT]
 -> automatic U003 handoff and final synchronized human review
 -> U002 GUI MVP freeze and node report.
+
+Lifecycle replay rule:
+
+- A fresh Run executes Validator -> Preflight -> Executor.
+- An already SUCCEEDED Run is never forced back to PREPARED and its successful evidence is never deleted. B20D revalidates the configuration, records Preflight as SKIPPED_ALREADY_SUCCEEDED_C-0 and uses Executor audit replay.
+- RUNNING or FAILED lifecycle state remains fail-closed and requires explicit diagnosis rather than silent replay.
 
 7. Post-MVP roadmap
 
@@ -147,4 +153,4 @@ A first-time user can select an accepted U001 package, understand and configure 
 
 9. Next action
 
-Run the three B20C commands on the company host. B20C must confirm exact equality for ContractVersion, RunPurpose, RunScope, FrameStart, FrameEnd, InputPackage, SignalProfile, ModulePlan, PrimaryOutcome, CandidatePolicy and OutputSelection; RunId is the only permitted difference. Do not start B20D if any semantic difference is reported.
+Run the three B20D commands on the company host. Acceptance requires M5, A5, O5, B1, X0 and C0. The Candidate count is data-derived and therefore is reported dynamically rather than fixed in the expected capsule. If B20D passes, open its U003 Review Package for the final synchronized handoff check and then freeze the GUI MVP.
