@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare and install the governed U3M3A high-code core split."""
+"""Prepare and install the governed U3M3B high-code composition."""
 
 from __future__ import annotations
 
@@ -13,18 +13,23 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 
-PACKAGE_NAME = "UDP003_U3M3A_CORE_SPLIT_v0_1.zip"
+PACKAGE_NAME = "UDP003_U3M3B_HIGH_CODE_COMPOSITION_v0_1.zip"
+LEGACY_RELATIVE_PATH = "01_PROGRAMS/u003_evidence_review_workbench_v0_13.py"
+LEGACY_SHA256 = "a9b4f4a14d43fd51dce0bc577c74a9482606a3d918c4c2fec935b56d99c56758"
 REQUIRED_MEMBERS = {
-    "01_PROGRAMS/u003_evidence_review_workbench_v0_13.py",
-    "01_PROGRAMS/u003_domain_core_v0_1.py",
-    "01_PROGRAMS/u003_handoff_core_v0_1.py",
-    "01_PROGRAMS/u003_characterization_gate_v0_1.py",
-    "02_CONTROLS/contracts/u003_internal_component_contract_v0_1.json",
+    "01_PROGRAMS/u003_gui_shell_v0_1.py",
+    "01_PROGRAMS/u003_evidence_review_workbench_v0_14.py",
+    "01_PROGRAMS/u003_domain_core_v0_2.py",
+    "01_PROGRAMS/u003_handoff_core_v0_2.py",
+    "01_PROGRAMS/u003_u3m3b_acceptance_gate_v0_1.py",
+    "02_CONTROLS/contracts/u003_high_code_composition_contract_v0_1.json",
+    "03_DEVELOPMENT/u003_gui_shell_recomposer_v0_1.py",
     "PACKAGE_SHA256.csv",
 }
-PREVIOUS_NODE_NAMES = (
+PREVIOUS_PREPARED_NAMES = (
     "U3M1_PREPARED",
     "U3M2_PREPARED",
+    "U3M3A_PREPARED",
 )
 PREVIOUS_TRANSFER_PREFIXES = (
     "U3M1_START_HERE",
@@ -33,6 +38,9 @@ PREVIOUS_TRANSFER_PREFIXES = (
     "U3M2_START_HERE",
     "UDP003_U3M2",
     "u003_u3m2",
+    "U3M3A_START_HERE",
+    "UDP003_U3M3A",
+    "u003_u3m3a",
 )
 
 
@@ -69,8 +77,8 @@ def validate_payloads(package_root: Path) -> list[tuple[str, str, str]]:
     manifest_path = package_root / "PACKAGE_SHA256.csv"
     with manifest_path.open("r", encoding="utf-8-sig", newline="") as stream:
         rows = list(csv.DictReader(stream))
-    if len(rows) != 5:
-        raise InstallError("PACKAGE_SHA256.csv must contain exactly five payload rows.")
+    if len(rows) != 7:
+        raise InstallError("PACKAGE_SHA256.csv must contain exactly seven payload rows.")
 
     checked: list[tuple[str, str, str]] = []
     for row in rows:
@@ -108,31 +116,27 @@ def move_to_archive(source: Path, archive_root: Path, relative: Path) -> None:
 
 
 def archive_previous_temp(root: Path) -> tuple[Path | None, int]:
-    """Move previous-node transfer debris out of 04_TEMP before installation."""
-
     temp_root = root / "04_TEMP"
     temp_root.mkdir(parents=True, exist_ok=True)
     selected: list[tuple[Path, Path]] = []
 
-    for name in PREVIOUS_NODE_NAMES:
+    for name in PREVIOUS_PREPARED_NAMES:
         candidate = temp_root / name
         if candidate.exists():
             selected.append((candidate, Path(name)))
-
     for candidate in temp_root.iterdir():
-        if candidate.name in PREVIOUS_NODE_NAMES:
+        if candidate.name in PREVIOUS_PREPARED_NAMES:
             continue
         if any(candidate.name.startswith(prefix) for prefix in PREVIOUS_TRANSFER_PREFIXES):
             selected.append((candidate, Path(candidate.name)))
 
-    prepared = temp_root / "U3M3A_PREPARED"
-    if prepared.exists():
-        selected.append((prepared, Path("U3M3A_PREPARED_PREVIOUS")))
-
+    current_prepared = temp_root / "U3M3B_PREPARED"
+    if current_prepared.exists():
+        selected.append((current_prepared, Path("U3M3B_PREPARED_PREVIOUS")))
     if not selected:
         return None, 0
 
-    archive_root = next_archive_root(root, "U3M3A_TEMP_CLEANUP")
+    archive_root = next_archive_root(root, "U3M3B_TEMP_CLEANUP")
     for source, relative in selected:
         move_to_archive(source, archive_root, Path("04_TEMP") / relative)
     return archive_root, len(selected)
@@ -142,7 +146,7 @@ def archive_replaced_payloads(root: Path, relative_paths: list[str]) -> tuple[Pa
     existing = [relative for relative in relative_paths if (root / relative).is_file()]
     if not existing:
         return None, 0
-    archive_root = next_archive_root(root, "U3M3A_REPLACED")
+    archive_root = next_archive_root(root, "U3M3B_REPLACED")
     for relative in existing:
         source = root / relative
         destination = archive_root / relative
@@ -159,14 +163,15 @@ def install(package_path: Path, root: Path) -> int:
     if not package_path.is_file():
         raise InstallError(f"Transfer ZIP is missing: {package_path}")
 
-    legacy = root / "01_PROGRAMS" / "u003_evidence_review_workbench_v0_13.py"
-    if not legacy.is_file():
+    legacy = root / LEGACY_RELATIVE_PATH
+    if not legacy.is_file() or legacy.is_symlink():
         raise InstallError("Accepted U003 v0.13 baseline is missing.")
+    if sha256_file(legacy) != LEGACY_SHA256:
+        raise InstallError("Accepted U003 v0.13 baseline SHA-256 is not approved.")
 
     temp_archive, temp_count = archive_previous_temp(root)
-    prepared = root / "04_TEMP" / "U3M3A_PREPARED"
+    prepared = root / "04_TEMP" / "U3M3B_PREPARED"
     prepared.mkdir(parents=True, exist_ok=False)
-
     with zipfile.ZipFile(package_path, "r") as archive:
         members = safe_members(archive)
         archive.extractall(prepared)
@@ -182,23 +187,23 @@ def install(package_path: Path, root: Path) -> int:
         shutil.copy2(source, writing)
         writing.replace(destination)
 
-    print("U3M3A prepare checks:")
+    print("U3M3B prepare checks:")
     print(f"  [OK] U003 root: {root} - company directory topology is explicit")
-    print(f"  [OK] Accepted v0.13 baseline: {legacy} - refactoring has a fixed oracle")
+    print(f"  [OK] Frozen v0.13 oracle: {legacy} - SHA-256 is approved")
     print(f"  [OK] ZIP inventory: {len(members)} files - unknown payloads are rejected")
     for relative, digest, purpose in checked:
         print(f"  [OK] {relative} | {digest[:12]} - {purpose}")
     if temp_archive is None:
-        print("  [OK] TEMP hygiene: no previous-node transfer item required archival")
+        print("  [OK] TEMP hygiene: no previous-node item required archival")
     else:
         print(f"  [OK] TEMP hygiene: {temp_count} previous-node items archived to {temp_archive}")
     if replaced_archive is None:
-        print("  [OK] Program preservation: no installed payload required backup")
+        print("  [OK] Program preservation: no installed U3M3B payload required backup")
     else:
         print(f"  [OK] Program preservation: {replaced_count} payloads backed up to {replaced_archive}")
-    print("  [OK] U3M3A_PREPARED recreated from the verified ZIP")
+    print("  [OK] U3M3B_PREPARED recreated from the verified ZIP")
     print(
-        "U3M3AP N-R1-F5-L1-D1-H1-A{}-B{}-X0 C-0".format(
+        "U3M3BP N-R1-F7-L1-G1-D1-H1-A{}-B{}-X0 C-0".format(
             temp_count,
             replaced_count,
         )
@@ -225,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
         return install(package, root)
     except Exception as error:
         print(
-            f"U3M3APE K-{type(error).__name__.upper()} D-{error} X1 C-7",
+            f"U3M3BPE K-{type(error).__name__.upper()} D-{error} X1 C-7",
             file=sys.stderr,
         )
         return 7
