@@ -1,0 +1,73 @@
+UDP002 U22B20D 正式Golden回归执行指南
+版本：v0.2
+日期：2026-08-26
+
+一、本阶段做什么
+
+B20C已经证明GUI同源配置与CLI Golden配置的11项分析语义完全一致。B20D开始正式运行这份配置。
+
+B20D严格按照GUI Model定义的固定顺序执行：
+
+Validator -> Preflight -> Executor
+
+运行后不只检查C0，还会：
+
+1. 确认5个Module全部成功、没有Optional Failure；
+2. 校验所有选中Payload的SHA-256；
+3. 将新Run的5类业务Artifact与之前人工闭环的Source Golden Run逐一比较；
+4. 确认U003 Review Package保持Candidate身份、不重新计算Candidate、不宣称Root Cause。
+
+只有程序成功和业务Payload等价同时成立，才会C0。
+
+v0.2修正了一项过度严格的验收定义：新Run与Source Golden的16个候选、Primary表、Evidence表和Quality文件均一致；唯一差异是S6和S7的module_review_trace.jsonl中，SourceArtifactIds依法携带各自RunId前缀。v0.2只对这一个明确字段进行受控归一化，其他任何ReviewTrace字段变化仍然C7。
+
+二、下载位置
+
+从Code_study下载以下两个文件，直接放入：
+
+C-CODE\U-UDP002\04_TEMP
+
+1. u002_u22b20d_formal_golden_regression_controller_v0_2.py.txt
+2. UDP002_U22B20D_START_HERE_CN_v0_2_2026-08-26.txt
+
+不要创建B20D子文件夹，不要改名。
+
+三、CMD执行
+
+当前目录必须为C-CODE，只执行以下三行：
+
+python U-UDP002\04_TEMP\u002_u22b20d_formal_golden_regression_controller_v0_2.py.txt --prepare --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b20d_formal_golden_regression_controller_v0_2.py.txt --self-test --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b20d_formal_golden_regression_controller_v0_2.py.txt --execute --workspace-root U-UDP002
+
+Prepare与Self-test使用英文说明检查对象及原因。前两步C0不用回传。
+
+第三步会运行全视频Golden链路，时间取决于公司电脑和数据规模。运行期间不要重复启动第二次，不要关闭CMD。
+
+如果该Run之前已经完整SUCCEEDED，B20D不会删除成功证据重建目录，而是重新执行Validator并由Executor完成审计重放；已完成的Preflight会明确记录为SKIPPED_ALREADY_SUCCEEDED。
+
+四、输出
+
+正式Run目录：
+
+U-UDP002\07_OUTPUT\U002_GUI_EQUIVALENCE_B20C
+
+B20D回归报告：
+
+U-UDP002\07_OUTPUT\U22B20D_FORMAL_GOLDEN_REGRESSION\02_DIAGNOSTICS\u22b20d_formal_golden_regression_report_v0_2.json
+
+U003 Review Package位于正式Run的S7 Artifact目录，由报告中的U003ReviewPackage.ArtifactId精确标识。
+
+五、回传
+
+成功时只回传最后一行，格式类似：
+
+B20D-M5-A5-O5-I2-C16-B1-X0-C0
+
+C后的数字是本次实际Candidate数量；本次应为16。I2表示S6与S7各有一份ReviewTrace，仅RunId前缀经过受控归一化。M5、A5、O5、I2、C16、B1和C0必须成立。
+
+失败时回传完整B20DE一行。不要让Copilot修改Golden配置、Module或Validator。
+
+六、下一阶段
+
+B20D通过后，检查U003是否能够直接装入本次S7 Review Package，然后冻结U002 GUI Golden MVP。

@@ -1,0 +1,809 @@
+#!/usr/bin/env python3
+"""U22B20D - execute and independently verify the GUI-model Golden Run.
+
+The controller invokes the same Validator, Preflight and Executor commands that
+the U002 GUI obtains from ThinWorkbenchModel.  It then verifies the succeeded
+Run, audits payload hashes, and compares all selected business Artifacts with
+the already accepted Source Golden Run.  It never changes configuration or
+algorithm parameters.
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import datetime as dt
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
+
+
+PROGRAM_ID = "CameraRadar.U002.B20D.FormalGoldenRegressionController"
+PROGRAM_VERSION = "0.2.0"
+TRANSFER_NAME = "u002_u22b20d_formal_golden_regression_controller_v0_2.py.txt"
+INSTALLED_NAME = "u002_u22b20d_formal_golden_regression_controller_v0_2.py"
+GUIDE_NAME = "UDP002_U22B20D_START_HERE_CN_v0_2_2026-08-26.txt"
+INSTALL_RELATIVE = Path("01_PROGRAMS/gui") / INSTALLED_NAME
+MODEL_RELATIVE = Path("01_PROGRAMS/gui/u002_thin_workbench_model_v0_4.py")
+PROFILE_RELATIVE = Path(
+    "02_CONFIG/gui_profiles/u002_radar_loss_golden_reference_v0_1.json"
+)
+B20C_CONFIG_RELATIVE = Path("02_CONFIG/run_configs/U002_GUI_EQUIVALENCE_B20C.json")
+B20C_REPORT_RELATIVE = Path(
+    "07_OUTPUT/U22B20C_GUI_CONFIG_EQUIVALENCE/02_DIAGNOSTICS/"
+    "u22b20c_gui_config_equivalence_report_v0_1.json"
+)
+OUTPUT_ID = "U22B20D_FORMAL_GOLDEN_REGRESSION"
+REPORT_RELATIVE = Path("07_OUTPUT") / OUTPUT_ID / "02_DIAGNOSTICS" / (
+    "u22b20d_formal_golden_regression_report_v0_2.json"
+)
+ARTIFACT_INDEX_NAME = "run_artifact_index_v0_1.json"
+MODULE_TIMEOUT_SECONDS = 1800
+COMMAND_TIMEOUT_SECONDS = 10800
+
+
+class B20DError(RuntimeError):
+    """Controlled B20D failure with compact owner and evidence detail."""
+
+    def __init__(self, reason: object, detail: object = "NA") -> None:
+        self.reason = token(reason)
+        self.detail = detail_token(detail)
+        super().__init__(f"{self.reason}: {self.detail}")
+
+
+def token(value: object) -> str:
+    """Convert text to one manual-return-safe token."""
+
+    text = str(value).strip().upper()
+    result = "".join(character if character.isalnum() else "_" for character in text)
+    return result.strip("_") or "NA"
+
+
+def detail_token(value: object, limit: int = 180) -> str:
+    """Bound detailed diagnostics while retaining the first useful cause."""
+
+    return token(value)[:limit]
+
+
+def canonical_bytes(value: object) -> bytes:
+    """Serialize deterministic JSON evidence."""
+
+    return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode(
+        "utf-8"
+    )
+
+
+def sha256_bytes(value: bytes) -> str:
+    """Return SHA-256 for immutable evidence bytes."""
+
+    return hashlib.sha256(value).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    """Hash one regular file without loading it all into memory."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_object(path: Path, label: str) -> Dict[str, Any]:
+    """Read one required regular JSON object."""
+
+    if not path.is_file() or path.is_symlink():
+        raise B20DError(label + "_MISSING", path)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise B20DError(label + "_JSON", error) from error
+    if not isinstance(value, dict):
+        raise B20DError(label + "_TYPE", type(value).__name__)
+    return value
+
+
+def write_object(path: Path, value: Mapping[str, object]) -> None:
+    """Atomically publish or replace one diagnostic report."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writing = path.with_name(path.name + ".writing")
+    if writing.exists():
+        writing.unlink()
+    writing.write_bytes(canonical_bytes(value))
+    os.replace(writing, path)
+
+
+def load_module(path: Path, name: str):
+    """Load the exact installed GUI model without constructing tkinter."""
+
+    if not path.is_file() or path.is_symlink():
+        raise B20DError("MODEL_MISSING", path)
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None:
+        raise B20DError("MODEL_IMPORT_SPEC", path.name)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def install_exact(source: Path, destination: Path) -> str:
+    """Install one versioned program or accept an identical replay."""
+
+    data = source.read_bytes()
+    if destination.exists():
+        if not destination.is_file() or destination.is_symlink() or destination.read_bytes() != data:
+            raise B20DError("INSTALL_CONFLICT", destination.name)
+        return "REPLAY"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    writing = destination.with_name(destination.name + ".writing")
+    if writing.exists():
+        raise B20DError("INSTALL_WRITING_EXISTS", writing.name)
+    writing.write_bytes(data)
+    os.replace(writing, destination)
+    return "CREATED"
+
+
+def archive_obsolete_temp(root: Path, keep: Iterable[str]) -> Tuple[int, int]:
+    """Archive superseded B20D transfer files and leave unrelated TEMP work alone."""
+
+    temp = root / "04_TEMP"
+    keep_names = set(keep)
+    stale = [
+        path
+        for path in temp.iterdir()
+        if path.name not in keep_names
+        and (
+            path.name.startswith("u002_u22b20d_")
+            or path.name.startswith("UDP002_U22B20D_")
+        )
+    ]
+    if not stale:
+        return 0, 0
+    archive = temp / "A-Archive" / (
+        "U22B20D_PREPARE_" + dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    )
+    archive.mkdir(parents=True, exist_ok=False)
+    moved = 0
+    locked = 0
+    for path in stale:
+        try:
+            shutil.move(str(path), str(archive / path.name))
+            moved += 1
+        except PermissionError:
+            locked += 1
+    return moved, locked
+
+
+def require_b20c(root: Path) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Require the accepted B20C configuration and equivalence evidence."""
+
+    configuration = read_object(root / B20C_CONFIG_RELATIVE, "B20C_CONFIGURATION")
+    report = read_object(root / B20C_REPORT_RELATIVE, "B20C_REPORT")
+    comparison = report.get("Comparison")
+    if report.get("Status") != "SUCCEEDED" or not isinstance(comparison, dict):
+        raise B20DError("B20C_NOT_SUCCEEDED", report.get("Status"))
+    if comparison.get("Equivalent") is not True:
+        raise B20DError("B20C_NOT_EQUIVALENT", comparison.get("FirstDifference"))
+    if configuration.get("RunId") != report.get("Comparison", {}).get("CandidateRunId"):
+        raise B20DError("B20C_RUN_ID_MISMATCH", configuration.get("RunId"))
+    return configuration, report
+
+
+def reference_context(root: Path) -> Tuple[str, Path, Dict[str, Any]]:
+    """Resolve the succeeded Source Golden Run referenced by the GUI Profile."""
+
+    profile = read_object(root / PROFILE_RELATIVE, "PROFILE")
+    run_id = profile.get("SourceGoldenRunId")
+    if not isinstance(run_id, str) or not run_id:
+        raise B20DError("SOURCE_GOLDEN_RUN_ID", run_id)
+    run_root = root / "07_OUTPUT" / run_id
+    status = read_object(run_root / "run_status.json", "SOURCE_STATUS")
+    if status.get("Status") != "SUCCEEDED":
+        raise B20DError("SOURCE_NOT_SUCCEEDED", status.get("Status"))
+    index = read_object(run_root / ARTIFACT_INDEX_NAME, "SOURCE_ARTIFACT_INDEX")
+    if index.get("RunId") != run_id:
+        raise B20DError("SOURCE_INDEX_RUN_ID", index.get("RunId"))
+    return run_id, run_root, index
+
+
+def selected_entries(
+    index: Mapping[str, object],
+    selected_types: Sequence[str],
+    label: str,
+) -> Dict[str, Dict[str, Any]]:
+    """Select exactly one Artifact per requested business output type."""
+
+    artifacts = index.get("Artifacts")
+    if not isinstance(artifacts, list):
+        raise B20DError(label + "_ARTIFACTS_TYPE")
+    result: Dict[str, Dict[str, Any]] = {}
+    for artifact_type in selected_types:
+        matches = [
+            item
+            for item in artifacts
+            if isinstance(item, dict) and item.get("ArtifactType") == artifact_type
+        ]
+        if len(matches) != 1:
+            raise B20DError(label + "_ARTIFACT_COUNT", f"{artifact_type}@{len(matches)}")
+        result[artifact_type] = matches[0]
+    return result
+
+
+def payload_signature(entry: Mapping[str, object]) -> List[Dict[str, Any]]:
+    """Return business payload identity without Run-specific ArtifactId or manifest path."""
+
+    payloads = entry.get("Payloads")
+    if not isinstance(payloads, list):
+        raise B20DError("PAYLOADS_TYPE", entry.get("ArtifactType"))
+    signature = []
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            raise B20DError("PAYLOAD_TYPE", entry.get("ArtifactType"))
+        signature.append(
+            {
+                "RelativePath": payload.get("RelativePath"),
+                "PayloadKind": payload.get("PayloadKind"),
+                "RowCount": payload.get("RowCount"),
+                "Sha256": payload.get("Sha256"),
+            }
+        )
+    signature.sort(key=lambda item: (str(item["RelativePath"]), str(item["PayloadKind"])))
+    return signature
+
+
+def payload_declarations(entry: Mapping[str, object]) -> Dict[str, Dict[str, Any]]:
+    """Index payload declarations by stable relative path."""
+
+    payloads = entry.get("Payloads")
+    if not isinstance(payloads, list):
+        raise B20DError("PAYLOADS_TYPE", entry.get("ArtifactType"))
+    result: Dict[str, Dict[str, Any]] = {}
+    for payload in payloads:
+        if not isinstance(payload, dict) or not isinstance(payload.get("RelativePath"), str):
+            raise B20DError("PAYLOAD_DECLARATION", entry.get("ArtifactType"))
+        relative = str(payload["RelativePath"])
+        if relative in result:
+            raise B20DError("PAYLOAD_DUPLICATE", relative)
+        result[relative] = payload
+    return result
+
+
+def artifact_package_root(run_root: Path, entry: Mapping[str, object]) -> Path:
+    """Resolve the package folder containing one Artifact manifest."""
+
+    relative = entry.get("ManifestRelativePath")
+    if not isinstance(relative, str) or not relative:
+        raise B20DError("MANIFEST_PATH", entry.get("ArtifactType"))
+    return (run_root / relative).parent
+
+
+def normalized_review_trace(path: Path, run_id: str) -> List[Dict[str, Any]]:
+    """Normalize only approved Run-specific parent Artifact identity in ReviewTrace.
+
+    ReviewTrace is business evidence, so every field remains exact except the
+    RunId prefix of EvidenceValues.SourceArtifactIds.  That prefix must equal
+    the owning RunId before it is replaced.  Any other occurrence of RunId is
+    rejected rather than silently ignored.
+    """
+
+    if not path.is_file() or path.is_symlink():
+        raise B20DError("TRACE_MISSING", path.name)
+    projection: List[Dict[str, Any]] = []
+    prefix = run_id + "."
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except (OSError, UnicodeError) as error:
+        raise B20DError("TRACE_READ", error) from error
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            raise B20DError("TRACE_BLANK_LINE", line_number)
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise B20DError("TRACE_JSON", line_number) from error
+        if not isinstance(row, dict):
+            raise B20DError("TRACE_ROW_TYPE", line_number)
+        normalized = copy.deepcopy(row)
+        evidence_values = normalized.get("EvidenceValues")
+        if not isinstance(evidence_values, dict):
+            raise B20DError("TRACE_EVIDENCE_VALUES", line_number)
+        source_ids = evidence_values.get("SourceArtifactIds")
+        if not isinstance(source_ids, list) or not source_ids:
+            raise B20DError("TRACE_SOURCE_IDS", line_number)
+        controlled = []
+        for source_id in source_ids:
+            if not isinstance(source_id, str) or not source_id.startswith(prefix):
+                raise B20DError("TRACE_SOURCE_IDENTITY", f"{line_number}@{source_id}")
+            controlled.append("<RUN_ID>." + source_id[len(prefix) :])
+        evidence_values["SourceArtifactIds"] = controlled
+        if run_id.encode("utf-8") in canonical_bytes(normalized):
+            raise B20DError("TRACE_UNAPPROVED_RUN_ID", line_number)
+        projection.append(normalized)
+    return projection
+
+
+def controlled_business_comparison(
+    reference_root: Path,
+    candidate_root: Path,
+    reference_index: Mapping[str, object],
+    candidate_index: Mapping[str, object],
+    selected_types: Sequence[str],
+) -> Dict[str, Any]:
+    """Compare payloads exactly, allowing one explicit ReviewTrace identity field.
+
+    Primary payloads, evidence tables, quality JSON and every other auxiliary
+    payload remain byte-exact.  Only module_review_trace.jsonl may differ, and
+    then only because SourceArtifactIds carry the owning RunId prefix.
+    """
+
+    reference_run_id = reference_index.get("RunId")
+    candidate_run_id = candidate_index.get("RunId")
+    if not isinstance(reference_run_id, str) or not isinstance(candidate_run_id, str):
+        raise B20DError("COMPARISON_RUN_ID")
+    reference = selected_entries(reference_index, selected_types, "SOURCE")
+    candidate = selected_entries(candidate_index, selected_types, "CANDIDATE")
+    differing: List[str] = []
+    controlled: List[Dict[str, Any]] = []
+    exact_payload_count = 0
+    for artifact_type in selected_types:
+        left_entry = reference[artifact_type]
+        right_entry = candidate[artifact_type]
+        left_payloads = payload_declarations(left_entry)
+        right_payloads = payload_declarations(right_entry)
+        artifact_equal = set(left_payloads) == set(right_payloads)
+        if artifact_equal:
+            left_package = artifact_package_root(reference_root, left_entry)
+            right_package = artifact_package_root(candidate_root, right_entry)
+            for relative in sorted(left_payloads):
+                left = left_payloads[relative]
+                right = right_payloads[relative]
+                structural_fields = ("PayloadKind", "RowCount")
+                if any(left.get(field) != right.get(field) for field in structural_fields):
+                    artifact_equal = False
+                    break
+                if left.get("Sha256") == right.get("Sha256"):
+                    exact_payload_count += 1
+                    continue
+                if relative != "module_review_trace.jsonl" or left.get("PayloadKind") == "PRIMARY":
+                    artifact_equal = False
+                    break
+                left_projection = normalized_review_trace(
+                    left_package / relative,
+                    reference_run_id,
+                )
+                right_projection = normalized_review_trace(
+                    right_package / relative,
+                    candidate_run_id,
+                )
+                if left_projection != right_projection:
+                    artifact_equal = False
+                    break
+                controlled.append(
+                    {
+                        "ArtifactType": artifact_type,
+                        "RelativePath": relative,
+                        "NormalizedField": "EvidenceValues.SourceArtifactIds[].RunIdPrefix",
+                        "ReferenceRunId": reference_run_id,
+                        "CandidateRunId": candidate_run_id,
+                        "SemanticEqual": True,
+                    }
+                )
+        if not artifact_equal:
+            differing.append(artifact_type)
+    return {
+        "Equivalent": not differing,
+        "ComparisonPolicy": "BYTE_EXACT_EXCEPT_CONTROLLED_REVIEW_TRACE_SOURCE_RUN_ID_PREFIX",
+        "SelectedArtifactTypes": list(selected_types),
+        "EquivalentArtifactCount": len(selected_types) - len(differing),
+        "DifferingArtifactTypes": differing,
+        "ExactPayloadCount": exact_payload_count,
+        "ControlledIdentityPayloadCount": len(controlled),
+        "ControlledIdentityDifferences": controlled,
+        "PrimaryPayloadDifferenceCount": 0 if not differing else None,
+        "ReferenceSignatureSha256": sha256_bytes(
+            canonical_bytes({key: payload_signature(value) for key, value in reference.items()})
+        ),
+        "CandidateSignatureSha256": sha256_bytes(
+            canonical_bytes({key: payload_signature(value) for key, value in candidate.items()})
+        ),
+    }
+
+
+def verify_payload_files(run_root: Path, entries: Mapping[str, Mapping[str, object]]) -> int:
+    """Verify every selected payload exists and matches the committed index hash."""
+
+    verified = 0
+    for artifact_type, entry in entries.items():
+        manifest_relative = entry.get("ManifestRelativePath")
+        if not isinstance(manifest_relative, str) or not manifest_relative:
+            raise B20DError("MANIFEST_PATH", artifact_type)
+        package_root = (run_root / manifest_relative).parent
+        payloads = entry.get("Payloads")
+        if not isinstance(payloads, list):
+            raise B20DError("PAYLOADS_TYPE", artifact_type)
+        for payload in payloads:
+            relative = payload.get("RelativePath") if isinstance(payload, dict) else None
+            expected = payload.get("Sha256") if isinstance(payload, dict) else None
+            if not isinstance(relative, str) or not isinstance(expected, str):
+                raise B20DError("PAYLOAD_DECLARATION", artifact_type)
+            path = package_root / relative
+            if not path.is_file() or path.is_symlink():
+                raise B20DError("PAYLOAD_MISSING", f"{artifact_type}@{relative}")
+            if sha256_file(path) != expected:
+                raise B20DError("PAYLOAD_HASH", f"{artifact_type}@{relative}")
+            verified += 1
+    return verified
+
+
+def compare_business_outputs(
+    reference_index: Mapping[str, object],
+    candidate_index: Mapping[str, object],
+    selected_types: Sequence[str],
+) -> Dict[str, Any]:
+    """Compare all selected payloads and identify every differing Artifact type."""
+
+    reference = selected_entries(reference_index, selected_types, "SOURCE")
+    candidate = selected_entries(candidate_index, selected_types, "CANDIDATE")
+    differing = [
+        artifact_type
+        for artifact_type in selected_types
+        if payload_signature(reference[artifact_type]) != payload_signature(candidate[artifact_type])
+    ]
+    return {
+        "Equivalent": not differing,
+        "SelectedArtifactTypes": list(selected_types),
+        "EquivalentArtifactCount": len(selected_types) - len(differing),
+        "DifferingArtifactTypes": differing,
+        "ReferenceSignatureSha256": sha256_bytes(
+            canonical_bytes({key: payload_signature(value) for key, value in reference.items()})
+        ),
+        "CandidateSignatureSha256": sha256_bytes(
+            canonical_bytes({key: payload_signature(value) for key, value in candidate.items()})
+        ),
+    }
+
+
+def review_package_summary(
+    run_root: Path,
+    candidate_entries: Mapping[str, Mapping[str, object]],
+) -> Dict[str, Any]:
+    """Validate the U003 Review Package handoff contract and summarize its size."""
+
+    entry = candidate_entries.get("U003_REVIEW_PACKAGE")
+    if entry is None:
+        raise B20DError("U003_REVIEW_PACKAGE_MISSING")
+    manifest_relative = entry.get("ManifestRelativePath")
+    if not isinstance(manifest_relative, str):
+        raise B20DError("U003_MANIFEST_PATH")
+    manifest = read_object(run_root / manifest_relative, "U003_MANIFEST")
+    metadata = manifest.get("Metadata")
+    if manifest.get("SchemaId") != "U002_U003_REVIEW_PACKAGE" or not isinstance(metadata, dict):
+        raise B20DError("U003_SCHEMA", manifest.get("SchemaId"))
+    required_flags = {
+        "CandidateIdentityPreserved": True,
+        "CandidateRecomputationApplied": False,
+        "RootCauseClaim": False,
+    }
+    for field, expected in required_flags.items():
+        if metadata.get(field) is not expected:
+            raise B20DError("U003_METADATA", field)
+    count = metadata.get("CompleteCandidateInventoryCount")
+    assigned = metadata.get("AssignedCandidateCount")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0 or assigned != count:
+        raise B20DError("U003_CANDIDATE_COUNT", f"{count}@{assigned}")
+    return {
+        "ArtifactId": entry.get("ArtifactId"),
+        "CandidateCount": count,
+        "ReviewBatchCount": metadata.get("ReviewBatchCount"),
+        "CandidateIdentityPreserved": True,
+        "CandidateRecomputationApplied": False,
+        "RootCauseClaim": False,
+    }
+
+
+def last_output_line(result: subprocess.CompletedProcess[str]) -> str:
+    """Return one compact child result line for evidence and failures."""
+
+    combined = (result.stdout + "\n" + result.stderr).strip()
+    return combined.splitlines()[-1] if combined else "NO_OUTPUT"
+
+
+def run_formal_commands(root: Path, configuration_path: Path) -> List[Dict[str, Any]]:
+    """Run the exact model-owned Validate, Preflight and Execute sequence."""
+
+    model_module = load_module(root / MODEL_RELATIVE, "u002_b20d_workbench_model")
+    model = model_module.ThinWorkbenchModel(root)
+    commands = model.formal_commands(configuration_path, MODULE_TIMEOUT_SECONDS)
+    if [name for name, _command in commands] != ["VALIDATE", "PREFLIGHT", "EXECUTE"]:
+        raise B20DError("COMMAND_ORDER", [name for name, _command in commands])
+    configuration = read_object(configuration_path, "FORMAL_CONFIGURATION")
+    existing_status_path = root / "07_OUTPUT" / str(configuration["RunId"]) / "run_status.json"
+    existing_status = (
+        read_object(existing_status_path, "EXISTING_RUN_STATUS")
+        if existing_status_path.is_file() and not existing_status_path.is_symlink()
+        else None
+    )
+    succeeded_replay = existing_status is not None and existing_status.get("Status") == "SUCCEEDED"
+    if existing_status is not None and existing_status.get("Status") in {"RUNNING", "FAILED"}:
+        raise B20DError("EXISTING_RUN_STATE", existing_status.get("Status"))
+    evidence = []
+    for phase, command in commands:
+        # The accepted Preflight owns initial Run-directory creation.  Its old
+        # replay contract expects PREPARED status bytes and therefore rejects a
+        # byte-identical Run after Executor has legitimately published
+        # SUCCEEDED.  On a succeeded replay, Validator still rechecks the source
+        # configuration and Executor performs its own immutable audit; skipping
+        # only the already-completed Preflight avoids deleting valid evidence.
+        if phase == "PREFLIGHT" and succeeded_replay:
+            evidence.append(
+                {
+                    "Phase": phase,
+                    "ExitCode": 0,
+                    "LastLine": "SKIPPED_ALREADY_SUCCEEDED_C-0",
+                    "ReplayPolicy": "VALIDATOR_PLUS_EXECUTOR_AUDIT",
+                }
+            )
+            continue
+        try:
+            result = subprocess.run(
+                command,
+                cwd=str(root.parent),
+                text=True,
+                capture_output=True,
+                timeout=COMMAND_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise B20DError("CHILD_TIMEOUT", phase) from error
+        record = {
+            "Phase": phase,
+            "ExitCode": result.returncode,
+            "LastLine": last_output_line(result),
+        }
+        evidence.append(record)
+        if result.returncode != 0 or not record["LastLine"].endswith("C-0"):
+            raise B20DError("CHILD_" + phase, record["LastLine"])
+    return evidence
+
+
+def prepare(root: Path) -> str:
+    """Install the controller and verify every formal and Golden dependency."""
+
+    source = root / "04_TEMP" / TRANSFER_NAME
+    if not source.is_file() or source.is_symlink():
+        raise B20DError("TRANSFER_MISSING", source)
+    disposition = install_exact(source, root / INSTALL_RELATIVE)
+    configuration, _report = require_b20c(root)
+    source_id, _source_root, source_index = reference_context(root)
+    model_module = load_module(root / MODEL_RELATIVE, "u002_b20d_prepare_model")
+    model = model_module.ThinWorkbenchModel(root)
+    commands = model.formal_commands(root / B20C_CONFIG_RELATIVE, MODULE_TIMEOUT_SECONDS)
+    if [name for name, _command in commands] != ["VALIDATE", "PREFLIGHT", "EXECUTE"]:
+        raise B20DError("COMMAND_ORDER")
+    selected_entries(source_index, configuration["OutputSelection"], "SOURCE")
+    moved, locked = archive_obsolete_temp(root, (TRANSFER_NAME, GUIDE_NAME))
+    print("=== U22B20D PREPARE / FORMAL GOLDEN REGRESSION ===")
+    print("PASS | B20C configuration and report are succeeded | WHY: execution cannot precede semantic equivalence")
+    print("PASS | Source Golden Run and selected Artifacts are present | WHY: process success alone is insufficient")
+    print("PASS | GUI model owns Validate Preflight Execute order | WHY: the controller must not invent a second pipeline")
+    print("PASS | Five selected business outputs have one reference Artifact each | WHY: regression comparison must be complete")
+    print("PASS | ReviewTrace identity policy is explicit | WHY: only SourceArtifactIds RunId prefix may differ between otherwise equivalent Runs")
+    print(f"INFO | install={disposition} source={source_id} archived={moved} locked={locked}")
+    capsule = f"B20DP-I1-C1-G1-O5-A{moved}-L{locked}-X0-C0"
+    print(capsule)
+    return capsule
+
+
+def self_test(root: Path) -> str:
+    """Verify controller order, payload coverage, mutations and U003 contract without execution."""
+
+    configuration, _report = require_b20c(root)
+    _source_id, source_root, source_index = reference_context(root)
+    selected_types = configuration["OutputSelection"]
+    reference_entries = selected_entries(source_index, selected_types, "SOURCE")
+    checks: List[bool] = []
+
+    def check(value: bool, label: str) -> None:
+        if not value:
+            raise B20DError("SELFTEST_" + label)
+        checks.append(True)
+
+    check(len(selected_types) == 5, "OUTPUT_COUNT")
+    check(len(reference_entries) == 5, "REFERENCE_COUNT")
+    check(verify_payload_files(source_root, reference_entries) > 0, "REFERENCE_PAYLOADS")
+
+    model_module = load_module(root / MODEL_RELATIVE, "u002_b20d_selftest_model")
+    model = model_module.ThinWorkbenchModel(root)
+    commands = model.formal_commands(root / B20C_CONFIG_RELATIVE, MODULE_TIMEOUT_SECONDS)
+    check([name for name, _command in commands] == ["VALIDATE", "PREFLIGHT", "EXECUTE"], "ORDER")
+    check(str(root / B20C_CONFIG_RELATIVE) in commands[0][1], "VALIDATOR_CONFIG")
+    check(str(root / B20C_CONFIG_RELATIVE) in commands[1][1], "PREFLIGHT_CONFIG")
+    check(str(configuration["RunId"]) in " ".join(commands[2][1]), "EXECUTOR_RUN_ID")
+
+    identical = copy.deepcopy(source_index)
+    identical["RunId"] = configuration["RunId"]
+    comparison = compare_business_outputs(source_index, identical, selected_types)
+    check(comparison["Equivalent"] is True, "POSITIVE_EQUIVALENCE")
+
+    mutated = copy.deepcopy(identical)
+    mutated["Artifacts"][0]["Payloads"][0]["Sha256"] = "0" * 64
+    changed = compare_business_outputs(source_index, mutated, selected_types)
+    check(changed["Equivalent"] is False, "PAYLOAD_MUTATION")
+    check(len(changed["DifferingArtifactTypes"]) == 1, "DIFFERENCE_SCOPE")
+
+    review_entry = reference_entries["U003_REVIEW_PACKAGE"]
+    check(review_entry["ArtifactType"] == "U003_REVIEW_PACKAGE", "U003_TYPE")
+    check(any(item.get("PayloadKind") == "PRIMARY" for item in review_entry["Payloads"]), "U003_PRIMARY")
+
+    with tempfile.TemporaryDirectory(prefix="u22b20d_trace_") as temporary:
+        temporary_root = Path(temporary)
+        reference_trace = temporary_root / "reference.jsonl"
+        candidate_trace = temporary_root / "candidate.jsonl"
+        trace = {
+            "TraceId": "C0001.S6.RADAR_LOSS",
+            "ContributionCode": "RADAR_MEASUREMENT_INVALID_PERSISTENT",
+            "EvidenceValues": {
+                "LossStartFrame": 100,
+                "SourceArtifactIds": ["SOURCE_RUN.CameraRadar.S1.Camera.2"],
+            },
+        }
+        changed_identity = copy.deepcopy(trace)
+        changed_identity["EvidenceValues"]["SourceArtifactIds"] = [
+            "CANDIDATE_RUN.CameraRadar.S1.Camera.2"
+        ]
+        reference_trace.write_bytes(canonical_bytes(trace))
+        candidate_trace.write_bytes(canonical_bytes(changed_identity))
+        check(
+            normalized_review_trace(reference_trace, "SOURCE_RUN")
+            == normalized_review_trace(candidate_trace, "CANDIDATE_RUN"),
+            "CONTROLLED_TRACE_IDENTITY",
+        )
+        changed_business = copy.deepcopy(changed_identity)
+        changed_business["ContributionCode"] = "DIFFERENT_BUSINESS_REASON"
+        candidate_trace.write_bytes(canonical_bytes(changed_business))
+        check(
+            normalized_review_trace(reference_trace, "SOURCE_RUN")
+            != normalized_review_trace(candidate_trace, "CANDIDATE_RUN"),
+            "TRACE_BUSINESS_MUTATION",
+        )
+
+    print("=== U22B20D SELF-TEST / EXECUTION AND BUSINESS EQUIVALENCE ===")
+    print("PASS | Command order is Validate Preflight Execute | WHY: GUI and controller share one accepted chain")
+    print("PASS | Five selected reference Artifacts and payload hashes are complete | WHY: Golden means business output, not exit code")
+    print("PASS | One payload mutation is localized to one Artifact type | WHY: mismatch diagnosis must avoid another probe")
+    print("PASS | U003 Review Package has a primary payload | WHY: the final human evidence handoff must remain loadable")
+    print("PASS | ReviewTrace normalization allows only SourceArtifactIds RunId prefix | WHY: new Run identity is expected but evidence meaning must remain exact")
+    print("PASS | ReviewTrace business mutation is rejected | WHY: controlled normalization must not weaken Golden regression")
+    capsule = f"B20DST-N{len(checks)}-O5-D1-X0-C0"
+    print(capsule)
+    return capsule
+
+
+def execute(root: Path) -> str:
+    """Run the complete formal chain and prove exact selected-payload equivalence."""
+
+    configuration, b20c_report = require_b20c(root)
+    selected_types = configuration["OutputSelection"]
+    source_id, source_root, source_index = reference_context(root)
+    report_path = root / REPORT_RELATIVE
+    report: Dict[str, Any] = {
+        "ContractId": "U002_FORMAL_GOLDEN_REGRESSION_REPORT",
+        "ContractVersion": "0.1",
+        "ProgramId": PROGRAM_ID,
+        "ProgramVersion": PROGRAM_VERSION,
+        "Status": "RUNNING",
+        "SourceGoldenRunId": source_id,
+        "CandidateRunId": configuration["RunId"],
+        "B20CProjectionSha256": b20c_report["Comparison"]["CandidateProjectionSha256"],
+        "PhaseResults": [],
+    }
+    write_object(report_path, report)
+    try:
+        phase_results = run_formal_commands(root, root / B20C_CONFIG_RELATIVE)
+        run_root = root / "07_OUTPUT" / str(configuration["RunId"])
+        status = read_object(run_root / "run_status.json", "CANDIDATE_STATUS")
+        if status.get("Status") != "SUCCEEDED":
+            raise B20DError("RUN_NOT_SUCCEEDED", status.get("Status"))
+        if status.get("CompletedModuleCount") != len(configuration["ModulePlan"]):
+            raise B20DError("COMPLETED_MODULE_COUNT", status.get("CompletedModuleCount"))
+        if status.get("OptionalFailureCount") != 0:
+            raise B20DError("OPTIONAL_FAILURES", status.get("OptionalFailureCount"))
+        candidate_index = read_object(run_root / ARTIFACT_INDEX_NAME, "CANDIDATE_ARTIFACT_INDEX")
+        if candidate_index.get("RunId") != configuration["RunId"]:
+            raise B20DError("CANDIDATE_INDEX_RUN_ID", candidate_index.get("RunId"))
+        reference_entries = selected_entries(source_index, selected_types, "SOURCE")
+        candidate_entries = selected_entries(candidate_index, selected_types, "CANDIDATE")
+        source_payload_count = verify_payload_files(source_root, reference_entries)
+        candidate_payload_count = verify_payload_files(run_root, candidate_entries)
+        equivalence = controlled_business_comparison(
+            source_root,
+            run_root,
+            source_index,
+            candidate_index,
+            selected_types,
+        )
+        if not equivalence["Equivalent"]:
+            raise B20DError("BUSINESS_OUTPUT_DIFFERENCE", ".".join(equivalence["DifferingArtifactTypes"]))
+        review = review_package_summary(run_root, candidate_entries)
+        report.update(
+            {
+                "Status": "SUCCEEDED",
+                "PhaseResults": phase_results,
+                "RunStatus": status,
+                "BusinessOutputComparison": equivalence,
+                "SourceVerifiedPayloadCount": source_payload_count,
+                "CandidateVerifiedPayloadCount": candidate_payload_count,
+                "U003ReviewPackage": review,
+                "U003LaunchPerformed": False,
+                "RootCauseClaim": False,
+            }
+        )
+        write_object(report_path, report)
+        capsule = (
+            f"B20D-M{status['CompletedModuleCount']}-A{len(candidate_entries)}-"
+            f"O{equivalence['EquivalentArtifactCount']}-I{equivalence['ControlledIdentityPayloadCount']}-"
+            f"C{review['CandidateCount']}-B1-X0-C0"
+        )
+        print(capsule)
+        return capsule
+    except Exception as error:
+        if isinstance(error, B20DError):
+            reason = error.reason
+            detail = error.detail
+        else:
+            reason = token(type(error).__name__)
+            detail = detail_token(error)
+        report.update({"Status": "FAILED", "FailureReason": reason, "FailureDetail": detail})
+        write_object(report_path, report)
+        if isinstance(error, B20DError):
+            raise
+        raise B20DError(reason, detail) from error
+
+
+def parse_arguments(argv: Sequence[str]) -> argparse.Namespace:
+    """Parse the standard three-command company interface."""
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--prepare", action="store_true")
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--execute", action="store_true")
+    parser.add_argument("--workspace-root", required=True)
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run one fail-closed B20D operation."""
+
+    try:
+        arguments = parse_arguments(sys.argv[1:] if argv is None else argv)
+        root = Path(arguments.workspace_root).resolve()
+        if not root.is_dir() or root.is_symlink():
+            raise B20DError("WORKSPACE_ROOT", root)
+        if arguments.prepare:
+            prepare(root)
+        elif arguments.self_test:
+            self_test(root)
+        else:
+            execute(root)
+        return 0
+    except B20DError as error:
+        print(f"B20DE-K{error.reason}-D{error.detail}-X1-C7")
+        return 7
+    except Exception as error:  # pragma: no cover
+        print(f"B20DE-K{token(type(error).__name__)}-D{detail_token(error)}-X1-C7")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
