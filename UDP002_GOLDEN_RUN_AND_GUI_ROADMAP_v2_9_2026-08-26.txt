@@ -1,7 +1,7 @@
 CAMERA-RADAR ANALYSIS PLATFORM - GOLDEN RUN AND GUI ROADMAP
-Version: 2.8
+Version: 2.9
 Date: 2026-08-26
-Status: B20D COMPANY ACCEPTED; B21A V0.1 RUNTIME-PATH DEFECT REJECTED; B21A V0.2 LOCALLY READY
+Status: B20D COMPANY ACCEPTED; B21A V0.1/V0.2 REJECTED; B21A V0.3 LOCALLY READY
 
 1. Product objective
 
@@ -81,6 +81,7 @@ Modules may be reordered only within their assigned Stage. Cross-Stage movement 
 - B20D company acceptance proves five qualified Modules, five selected Artifacts and five controlled business comparisons remain valid: B20D-M5-A5-O5-I2-C16-B1-X0-C0.
 - B21A locally proves the exact S7 Review Package can be hash-verified and parsed by the active U003 v0.10 parser without Candidate recomputation or repeated video review.
 - B21A v0.1 company execution exposed an invalid U003 runtime path inherited from archive taxonomy. v0.1 is rejected. v0.2 is tested against a persistent exact C-CODE mirror and resolves only U-UDP003/01_PROGRAMS.
+- B21A v0.2 then exposed an over-strict outer-container basename check. v0.3 validates the real U-UDP002 and sibling U-UDP003 interface while remaining independent of the enclosing folder label.
 
 5. Current B20B v0.10 scope
 
@@ -115,7 +116,7 @@ Frame-domain decision:
 B20B v0.10 company visual acceptance [COMPLETE]
 -> B20C GUI-model-generated Default Run Configuration and semantic-equivalence comparison [COMPANY COMPLETE]
 -> B20D formal Validator / Preflight / Executor Golden regression [COMPANY COMPLETE]
--> B21A v0.2 exact S7 package acceptance with active U003 v0.10 parser [COMPANY NEXT]
+-> B21A v0.3 exact S7 package acceptance with active U003 v0.10 parser [COMPANY NEXT]
 -> B21B package-aware U002 -> U003 direct launch
 -> U002 GUI MVP freeze and node report.
 
@@ -157,4 +158,4 @@ A first-time user can select an accepted U001 package, understand and configure 
 
 9. Next action
 
-Replace B21A v0.1 with the v0.2 program and guide, then run the three B21A commands from the exact C-CODE root. Acceptance requires N16, B1, E16, D1937, U10, X0 and C0. v0.2 validates the C-CODE/U-UDP002 parent boundary and resolves active U003 only under U-UDP003/01_PROGRAMS. After B21A, implement B21B direct package-aware U003 launch, then freeze the first GUI Golden MVP.
+Replace B21A v0.2 with the v0.3 program and guide, then run the same three B21A commands. Acceptance requires N16, B1, E16, D1937, U10, X0 and C0. v0.3 discovers exactly one U-UDP002, requires sibling U-UDP003, and resolves active U003 only under U-UDP003/01_PROGRAMS without constraining the outer container label. After B21A, implement B21B direct package-aware U003 launch, then freeze the first GUI Golden MVP.

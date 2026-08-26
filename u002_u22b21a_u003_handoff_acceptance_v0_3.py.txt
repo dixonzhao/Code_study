@@ -18,10 +18,10 @@ from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 
 PROGRAM_ID = "CameraRadar.U002.B21A.U003HandoffAcceptance"
-PROGRAM_VERSION = "0.2.0"
-TRANSFER_NAME = "u002_u22b21a_u003_handoff_acceptance_v0_2.py.txt"
-INSTALLED_NAME = "u002_u22b21a_u003_handoff_acceptance_v0_2.py"
-GUIDE_NAME = "UDP002_U22B21A_START_HERE_CN_v0_2_2026-08-26.txt"
+PROGRAM_VERSION = "0.3.0"
+TRANSFER_NAME = "u002_u22b21a_u003_handoff_acceptance_v0_3.py.txt"
+INSTALLED_NAME = "u002_u22b21a_u003_handoff_acceptance_v0_3.py"
+GUIDE_NAME = "UDP002_U22B21A_START_HERE_CN_v0_3_2026-08-26.txt"
 INSTALL_RELATIVE = Path("01_PROGRAMS/gui") / INSTALLED_NAME
 B20D_REPORT_RELATIVE = Path(
     "07_OUTPUT/U22B20D_FORMAL_GOLDEN_REGRESSION/02_DIAGNOSTICS/"
@@ -34,11 +34,14 @@ U003_SOURCE_CANDIDATES_FROM_CCODE = (
 ARTIFACT_INDEX_NAME = "run_artifact_index_v0_1.json"
 ARTIFACT_TYPE = "U003_REVIEW_PACKAGE"
 OUTPUT_ROOT_RELATIVE = Path("07_OUTPUT/U22B21A_U003_HANDOFF_ACCEPTANCE")
-REPORT_RELATIVE = OUTPUT_ROOT_RELATIVE / "02_DIAGNOSTICS/u22b21a_u003_handoff_acceptance_report_v0_2.json"
+REPORT_RELATIVE = OUTPUT_ROOT_RELATIVE / "02_DIAGNOSTICS/u22b21a_u003_handoff_acceptance_report_v0_3.json"
 DESCRIPTOR_RELATIVE = OUTPUT_ROOT_RELATIVE / "01_HANDOFF/u003_handoff_descriptor_v0_1.json"
 PATHS_RELATIVE = OUTPUT_ROOT_RELATIVE / "01_HANDOFF/U003_LOAD_PATHS.txt"
 ERROR_REPORT_RELATIVE = Path("04_TEMP/B21A_LAST_ERROR.txt")
-RETIRED_V01_NAME = "u002_u22b21a_u003_handoff_acceptance_v0_1.py"
+RETIRED_NAMES = (
+    "u002_u22b21a_u003_handoff_acceptance_v0_1.py",
+    "u002_u22b21a_u003_handoff_acceptance_v0_2.py",
+)
 
 
 class B21AError(RuntimeError):
@@ -153,24 +156,58 @@ def resolve_u003_source(root: Path) -> Path:
     return existing[0]
 
 
-def retire_known_bad_v01(root: Path) -> int:
-    """Move the superseded wrong-runtime-path v0.1 installation out of service."""
+def retire_superseded_versions(root: Path) -> int:
+    """Move superseded B21A helpers out of the active GUI program directory."""
 
-    old = root / "01_PROGRAMS/gui" / RETIRED_V01_NAME
-    if not old.exists():
-        return 0
-    if not old.is_file() or old.is_symlink():
-        raise B21AError("V01TYPE", old.name)
-    archive = root / "A-Archive" / "U22B21A_V01_WRONG_RUNTIME_PATH_RETIRED"
-    archive.mkdir(parents=True, exist_ok=True)
-    destination = archive / old.name
-    if destination.exists():
-        if not destination.is_file() or destination.read_bytes() != old.read_bytes():
-            raise B21AError("V01ARCHIVE", destination.name)
-        old.unlink()
-    else:
-        shutil.move(str(old), str(destination))
-    return 1
+    archive = root / "A-Archive" / "U22B21A_SUPERSEDED_VERSIONS_RETIRED"
+    retired = 0
+    for name in RETIRED_NAMES:
+        old = root / "01_PROGRAMS/gui" / name
+        if not old.exists():
+            continue
+        if not old.is_file() or old.is_symlink():
+            raise B21AError("OLDTYPE", old.name)
+        archive.mkdir(parents=True, exist_ok=True)
+        destination = archive / old.name
+        if destination.exists():
+            if not destination.is_file() or destination.read_bytes() != old.read_bytes():
+                raise B21AError("OLDARCHIVE", destination.name)
+            old.unlink()
+        else:
+            shutil.move(str(old), str(destination))
+        retired += 1
+    return retired
+
+
+def resolve_workspace(value: object) -> Path:
+    """Resolve U-UDP002 without treating its container label as a product contract."""
+
+    supplied = Path(str(value))
+    candidates: List[Path] = []
+    if supplied.is_dir():
+        candidates.append(supplied.resolve())
+
+    anchors = [Path.cwd(), Path(__file__).resolve().parent]
+    for start in anchors:
+        for anchor in (start, *start.parents):
+            if anchor.name.upper() == "U-UDP002" and anchor.is_dir():
+                candidates.append(anchor.resolve())
+            child = anchor / "U-UDP002"
+            if child.is_dir():
+                candidates.append(child.resolve())
+
+    unique = {str(path): path for path in candidates}
+    valid = [
+        path
+        for path in unique.values()
+        if path.name.upper() == "U-UDP002"
+        and path.is_dir()
+        and not path.is_symlink()
+        and (path.parent / "U-UDP003").is_dir()
+    ]
+    if len(valid) != 1:
+        raise B21AError("WORKSPACE_ROOT", f"MATCHES_{len(valid)}")
+    return valid[0]
 
 
 def short_reason(reason: object) -> str:
@@ -533,11 +570,11 @@ def prepare(root: Path) -> str:
     u003 = load_module(u003_path, "u003_b21a_prepare")
     if str(getattr(u003, "VERSION", "")) != "0.10":
         raise B21AError("U003_VERSION", getattr(u003, "VERSION", None))
-    retired = retire_known_bad_v01(root)
+    retired = retire_superseded_versions(root)
     moved, locked = archive_obsolete_temp(root, (TRANSFER_NAME, GUIDE_NAME))
     print("PASS | B20D v0.2 is succeeded | WHY: no review handoff may precede formal Golden acceptance")
     print("PASS | Exact S7 Review Package and active U003 v0.10 source exist | WHY: path guessing and historical-version selection are prohibited")
-    print(f"INFO | install={disposition} retired_v01={retired} archived={moved} locked={locked}")
+    print(f"INFO | install={disposition} retired_old={retired} archived={moved} locked={locked}")
     capsule = f"B21AP-I1-U10-R{retired}-A{moved}-L{locked}-X0-C0"
     print(capsule)
     return capsule
@@ -590,14 +627,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     root: Path | None = None
     try:
         arguments = parse_arguments(sys.argv[1:] if argv is None else argv)
-        root = Path(arguments.workspace_root).resolve()
-        if (
-            not root.is_dir()
-            or root.name != "U-UDP002"
-            or root.parent.name != "C-CODE"
-            or root.is_symlink()
-        ):
-            raise B21AError("WORKSPACE_ROOT", root)
+        root = resolve_workspace(arguments.workspace_root)
         if arguments.prepare:
             prepare(root)
         elif arguments.self_test:
