@@ -1,0 +1,96 @@
+UDP002 U22B20B Thin GUI执行指南（中文）
+版本：v0.5（交互式Stage、可视化配置、JA/EN语言锁与真实运行状态版）
+日期：2026-08-26
+
+一、本节点做什么
+
+B20A已经安装GUI Run Profile和Workbench Link契约。B20B在这些契约上安装第一版U002 Thin GUI。
+
+Thin GUI只负责：
+
+1. 选择U001 Accepted Package与运行范围；
+2. 默认载入已经验收的Golden Module链；
+3. 在Custom模式下查看、添加、删除、排序和配置已通过Registry验证的Module；
+4. 生成不可变的正式Run Configuration；
+5. 依次调用现有Validator、Preflight和Executor；
+6. 运行成功后提供U003启动入口。
+7. 启动时选择JA/EN；界面语言同时决定本次Run的Review Memo输出语言。
+
+Thin GUI不会重新实现算法。现有CLI Golden Path保持不变。
+
+“用户没有加载Module”的实际含义是自动使用Default Qualified Profile，不是生成空ModulePlan。
+
+二、下载与解压
+
+从Code_study下载：
+
+1. UDP002_U22B20B_PACKAGE_v0_5.zip
+2. UDP002_U22B20B_START_HERE_CN_v0_5_2026-08-26.txt
+
+把ZIP内三个文件解压到：
+
+C-CODE\U-UDP002\04_TEMP
+
+同时把本START_HERE放入同一目录。
+
+最终应有：
+
+- u002_u22b20b_thin_gui_installer_v0_5.py.txt
+- u002_thin_workbench_model_v0_3.py.txt
+- u002_thin_workbench_gui_v0_3.py.txt
+- UDP002_U22B20B_START_HERE_CN_v0_5_2026-08-26.txt
+
+不要改名，不要再创建B20B子文件夹。
+
+三、CMD执行
+
+当前目录必须为C-CODE，只执行以下三行：
+
+python U-UDP002\04_TEMP\u002_u22b20b_thin_gui_installer_v0_5.py.txt --prepare --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b20b_thin_gui_installer_v0_5.py.txt --self-test --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b20b_thin_gui_installer_v0_5.py.txt --open-gui --workspace-root U-UDP002
+
+Prepare和Self-test会用英文显示：检查了什么，以及为什么检查。两步C0时不用回传。
+
+Prepare会先调用正式Module Registry刷新Snapshot。若Profile、Module版本、Registry、Core路径或其他依赖失败，最后一行会直接保留具体原因。
+
+v0.3不再把本地测试用的FULL_CASE当成固定产品规则。GUI会保留B20A Golden Profile的真实RunScope；FULL_CASE要求起止Frame为空，FRAME_RANGE/FILTERED_RANGE则要求显式合法的FrameStart和FrameEnd。
+
+v0.4同时把U003路径明确作为可选的本机便利设置。以前保存过但现在失效的U003路径不会阻止U002 Self-test或分析；真正点击Open U003时才检查该文件是否存在。
+
+v0.5新增的都是GUI控制与可视化能力，不修改分析逻辑：S0-S7可点击；Algorithm Card默认结构化显示；Module Configuration和Outcome/Output使用可视化表单；U001 INPUT与U003 REVIEWER分开显示；运行颜色读取正式run_status.json，而不是按时间模拟。
+
+启动GUI时必须先选English或日本語。该选择同时写入支持RequestedReviewLanguage的Module配置。点击“检查”或“运行”后，本次Run的语言立即锁定，右上角语言切换按钮禁用；若需要换语言，必须新建Run，不能让一个Run产生混合语言Review证据。
+
+四、界面首次确认
+
+GUI打开后先不要启动完整分析，只检查：
+
+1. 启动时先出现English/日本語选择窗口；
+2. 选择English后标题为U002 Analysis Workbench v0.3，选择日本語后显示日语标题；
+3. Profile显示Default Qualified Profile；若语言选择改变了Golden Profile内的Review语言，则应如实显示Custom Profile；
+4. Module表显示5个Module；
+5. 顶部Stage条中S0、S1、S6、S7为激活状态；
+6. Run Scope与B20A Golden Profile一致；如果是FRAME_RANGE/FILTERED_RANGE，能够看到对应的起止Frame；
+7. 右上角分别显示U001 INPUT和U003 REVIEWER状态，不再出现笼统的Local Links；
+8. 点击任一S0-S7方块会打开该Stage的小窗口；空Stage也可以打开；
+9. 在Stage窗口中，Default模式只读；点击Clone as Custom后Add/Remove/Move/Edit可用；
+10. Edit Configuration默认是字段、下拉框和列表，不直接显示JSON；Raw JSON只作为Advanced入口；
+11. Outcome/Output同样使用表单和列表；Execution Log继续保留文本形式，因为它本身就是诊断证据；
+12. 选择一个Module并打开Algorithm Card，默认显示Overview/Mathematics/Interface/Validation/Limits，Raw JSON只在最后一个Tab；
+13. 顶部另有VALIDATE/PREFLIGHT/EXECUTE状态块；本节点不启动正式分析，因此不要求S0-S7实际跑完变绿；
+14. 正式流程成功后，如果U003已连接且勾选提示选项，GUI询问是否立即打开U003。
+
+本节点只验收GUI控制边界，不运行50,198帧全量分析。
+
+五、回传
+
+三条命令均成功并且GUI正常打开：
+
+B20B5-OPEN-8S-2L-AC6-CFG-LANG-C0
+
+如果Prepare或Self-test失败，只回传最后一行完整B20BE机器码，不让Copilot自行修改。
+
+六、下一节点
+
+B20C会让GUI生成一份Default Run Configuration，并与CLI Golden配置进行语义等价比较。等B20C通过后，才通过GUI触发正式Golden回归。
