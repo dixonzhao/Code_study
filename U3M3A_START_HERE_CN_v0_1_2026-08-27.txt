@@ -1,0 +1,58 @@
+U003 / U3M3A 高代码核心拆分执行指南
+日期：2026-08-27
+
+本步骤做什么
+------------
+U3M3A先把已验收的U003 v0.13作为固定行为基线，再从中拆出：
+
+1. Domain Core：Event读取、Review状态、FrameCount映射、Return Capsule；
+2. Handoff Core：U002交接描述符、SHA-256、候选与Review Data覆盖检查；
+3. Characterization Gate：用51项测试比较拆分前后的行为。
+
+本步骤不改变现有GUI，也不增加业务功能。它先建立可维护边界，防止后续
+Module Manager和GUI重构把已经可用的视频复核行为改坏。
+
+Prepare阶段的TEMP清理
+--------------------
+Prepare会自动把U3M1/U3M2的PREPARED目录、旧ZIP、旧安装器和旧START_HERE
+移动到U-UDP003\A-Archive下的时间戳目录。不会直接删除，也不会移动本次正在
+执行的U3M3A文件。旧的U3M3A_PREPARED也会先归档，再由当前ZIP重新生成。
+
+下载位置
+--------
+把以下两个文件下载到：
+
+  C-CODE\U-UDP003\04_TEMP
+
+  UDP003_U3M3A_CORE_SPLIT_v0_1.zip
+  u003_u3m3a_core_split_installer_v0_1.py.txt
+
+START_HERE可以留在浏览器中查看，无需复制进程序目录。ZIP无需手动解压。
+
+执行
+----
+使用CMD进入C-CODE根目录，只执行以下三行：
+
+  python U-UDP003\04_TEMP\u003_u3m3a_core_split_installer_v0_1.py.txt --prepare
+  python U-UDP003\01_PROGRAMS\u003_characterization_gate_v0_1.py --self-test
+  python U-UDP003\01_PROGRAMS\u003_characterization_gate_v0_1.py --characterize --legacy U-UDP003\01_PROGRAMS\u003_evidence_review_workbench_v0_13.py
+
+三行的意义
+----------
+第1行：清理上一步TEMP、核对ZIP清单与SHA-256、备份被替换程序并安装5个payload。
+第2行：安静执行同一组51项等价性检查；成功无需回传。
+第3行：逐项显示检查内容，证明拆分后的Domain/Handoff Core没有改变v0.13行为。
+
+回传
+----
+只回传第3行最后的机器码：
+
+  U3M3A N-L1-D1-H1-T51-X0 C-0
+
+失败时回传完整U3M3APE或U3M3AE错误行。
+
+现实意义
+--------
+U003以前是一个约2200行的整体GUI。U3M3A先建立“旧程序是行为基线、纯逻辑
+可以独立测试、GUI只是外壳”的结构。以后修改界面、增加Module Manager或
+打包EXE时，可以单独验证核心行为，而不必每次依靠人工看视频发现回归。
