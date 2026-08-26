@@ -1,5 +1,5 @@
 UDP002 U22B20B Thin GUI执行指南（中文）
-版本：v0.5（交互式Stage、可视化配置、JA/EN语言锁与真实运行状态版）
+版本：v0.6（GUI可用性校正版）
 日期：2026-08-26
 
 一、本节点做什么
@@ -15,6 +15,7 @@ Thin GUI只负责：
 5. 依次调用现有Validator、Preflight和Executor；
 6. 运行成功后提供U003启动入口。
 7. 启动时选择JA/EN；界面语言同时决定本次Run的Review Memo输出语言。
+8. 让Stage边界、Module身份与Version选择、U001/U003连接动作在界面中可直接理解。
 
 Thin GUI不会重新实现算法。现有CLI Golden Path保持不变。
 
@@ -24,8 +25,8 @@ Thin GUI不会重新实现算法。现有CLI Golden Path保持不变。
 
 从Code_study下载：
 
-1. UDP002_U22B20B_PACKAGE_v0_5.zip
-2. UDP002_U22B20B_START_HERE_CN_v0_5_2026-08-26.txt
+1. UDP002_U22B20B_PACKAGE_v0_6.zip
+2. UDP002_U22B20B_START_HERE_CN_v0_6_2026-08-26.txt
 
 把ZIP内三个文件解压到：
 
@@ -35,10 +36,10 @@ C-CODE\U-UDP002\04_TEMP
 
 最终应有：
 
-- u002_u22b20b_thin_gui_installer_v0_5.py.txt
+- u002_u22b20b_thin_gui_installer_v0_6.py.txt
 - u002_thin_workbench_model_v0_3.py.txt
-- u002_thin_workbench_gui_v0_3.py.txt
-- UDP002_U22B20B_START_HERE_CN_v0_5_2026-08-26.txt
+- u002_thin_workbench_gui_v0_4.py.txt
+- UDP002_U22B20B_START_HERE_CN_v0_6_2026-08-26.txt
 
 不要改名，不要再创建B20B子文件夹。
 
@@ -46,9 +47,9 @@ C-CODE\U-UDP002\04_TEMP
 
 当前目录必须为C-CODE，只执行以下三行：
 
-python U-UDP002\04_TEMP\u002_u22b20b_thin_gui_installer_v0_5.py.txt --prepare --workspace-root U-UDP002
-python U-UDP002\04_TEMP\u002_u22b20b_thin_gui_installer_v0_5.py.txt --self-test --workspace-root U-UDP002
-python U-UDP002\04_TEMP\u002_u22b20b_thin_gui_installer_v0_5.py.txt --open-gui --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b20b_thin_gui_installer_v0_6.py.txt --prepare --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b20b_thin_gui_installer_v0_6.py.txt --self-test --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_u22b20b_thin_gui_installer_v0_6.py.txt --open-gui --workspace-root U-UDP002
 
 Prepare和Self-test会用英文显示：检查了什么，以及为什么检查。两步C0时不用回传。
 
@@ -58,7 +59,9 @@ v0.3不再把本地测试用的FULL_CASE当成固定产品规则。GUI会保留B
 
 v0.4同时把U003路径明确作为可选的本机便利设置。以前保存过但现在失效的U003路径不会阻止U002 Self-test或分析；真正点击Open U003时才检查该文件是否存在。
 
-v0.5新增的都是GUI控制与可视化能力，不修改分析逻辑：S0-S7可点击；Algorithm Card默认结构化显示；Module Configuration和Outcome/Output使用可视化表单；U001 INPUT与U003 REVIEWER分开显示；运行颜色读取正式run_status.json，而不是按时间模拟。
+v0.6只修正GUI可用性，不修改分析逻辑、Data Contract、Module算法或Golden配置：Edit Configuration支持滚轮；U001/U003彩色状态块本身即可选择路径，旁边Reset清空；Module Plan以粗色Stage行显示不可跨越边界；Add Qualified按Module合并，并在Version下拉框中保留历史版本；正式运行成功后可选择新开一个完全独立的U002窗口。
+
+“新开U002”不会自动继承上一轮结果。本版仍只接受U001 Accepted Package作为根输入，避免把U002派生结果伪装成U001源数据。后续若需要循环分析，将另行增加带ParentRunId和ArtifactRole的派生输入契约。
 
 启动GUI时必须先选English或日本語。该选择同时写入支持RequestedReviewLanguage的Module配置。点击“保存”“检查”或“运行”后，本次Run的语言立即锁定，右上角语言切换按钮禁用；若需要换语言，必须新建Run，不能让一个Run产生混合语言Review证据。
 
@@ -67,7 +70,7 @@ v0.5新增的都是GUI控制与可视化能力，不修改分析逻辑：S0-S7�
 GUI打开后先不要启动完整分析，只检查：
 
 1. 启动时先出现English/日本語选择窗口；
-2. 选择English后标题为U002 Analysis Workbench v0.3，选择日本語后显示日语标题；
+2. 选择English后标题为U002 Analysis Workbench v0.4，选择日本語后显示日语标题；
 3. Profile显示Default Qualified Profile；若语言选择改变了Golden Profile内的Review语言，则应如实显示Custom Profile；
 4. Module表显示5个Module；
 5. 顶部Stage条中S0、S1、S6、S7为激活状态；
@@ -80,6 +83,11 @@ GUI打开后先不要启动完整分析，只检查：
 12. 选择一个Module并打开Algorithm Card，默认显示Overview/Mathematics/Interface/Validation/Limits，Raw JSON只在最后一个Tab；
 13. 顶部另有VALIDATE/PREFLIGHT/EXECUTE状态块；本节点不启动正式分析，因此不要求S0-S7实际跑完变绿；
 14. 正式流程成功后，如果U003已连接且勾选提示选项，GUI询问是否立即打开U003。
+15. Edit Configuration中把鼠标放在字段区，滚轮可以上下移动；
+16. 点击U001/U003彩色状态块即可选择对应路径，Reset可清空；
+17. Module Plan中每个已占用Stage前有粗蓝色分隔行，选择分隔行不能执行Module编辑；
+18. Add Qualified中每个Module只出现一行；选中后可在右侧Version下拉框选择保留版本；
+19. “Ask to start a new U002”默认不勾选；勾选后只在成功运行结束时询问是否打开独立新窗口。
 
 本节点只验收GUI控制边界，不运行50,198帧全量分析。
 
@@ -87,7 +95,7 @@ GUI打开后先不要启动完整分析，只检查：
 
 三条命令均成功并且GUI正常打开：
 
-B20B5-OPEN-8S-2L-AC6-CFG-LANG-C0
+B20B6-OPEN-SCR1-LINK2-SEP4-VSEL1-NEW1-C0
 
 如果Prepare或Self-test失败，只回传最后一行完整B20BE机器码，不让Copilot自行修改。
 
