@@ -1,0 +1,52 @@
+U3M8：Frame Privacy Mask Module
+公司电脑执行指南（CMD）
+
+目标
+----
+在U003当前视频帧上框选多个区域，一次输出：
+1. 未修改的原始截图副本；
+2. 黑色遮罩后的截图；
+3. 本次使用的Mask Profile。
+
+下载后放置
+----------
+把以下3个文件直接放入：
+C-CODE\U-UDP003\04_TEMP
+
+1. UDP003_U3M8_FRAME_MASK_v0_1.zip
+2. u003_u3m8_frame_mask_installer_v0_1.py.txt
+3. U3M8_START_HERE_CN_v0_1_2026-08-27.txt
+
+执行位置
+--------
+打开CMD并进入C-CODE根目录，只执行下面3行。
+
+1. Prepare、清理旧U3M8临时项、校验并安装：
+python U-UDP003\04_TEMP\u003_u3m8_frame_mask_installer_v0_1.py.txt --prepare --root U-UDP003 --package U-UDP003\04_TEMP\UDP003_U3M8_FRAME_MASK_v0_1.zip
+
+2. 无界面验收Module、Profile和像素遮罩：
+python U-UDP003\01_PROGRAMS\u003_u3m8_frame_mask_acceptance_gate_v0_1.py --root U-UDP003
+
+3. 启动U003：
+python U-UDP003\01_PROGRAMS\u003_evidence_review_workbench_v0_19.py
+
+人工界面确认
+------------
+1. 启动U003，打开视频并完成FrameCount Mapping。
+2. Modules中选择Frame Privacy Mask v0.1.0，并Add / Replace。
+3. 点击Module Actions (1)，运行Create Masked Screenshot。
+4. 在弹出的图片上拖出至少2个矩形；列表中应出现2条区域。
+5. 试一次Delete Selected，再重新添加；试一次Save Profile As。
+6. 点击Export Pair；确认原图、遮罩图和Profile三个文件都已生成。
+7. 再次运行Action，前一次导出的Mask应自动恢复；也应能Open Profile。
+8. 打开遮罩图，确认矩形内部全黑、矩形外未改变后，才可用于分享。
+
+回传
+----
+第2步成功时回传：
+U3M8G N-M1-A1-R1-P1-T29-X0 C-0
+
+人工界面也成功时额外回传：
+U3M8V-PAIR1-RELOAD1-C0
+
+若失败，只回传U3M8PE、U3M8GE或U3M8E的完整错误行。
