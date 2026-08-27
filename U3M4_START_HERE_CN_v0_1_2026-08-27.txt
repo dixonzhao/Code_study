@@ -29,7 +29,7 @@ U3M4_PREPARED移动到U-UDP003\A-Archive；然后安装U003 v0.15。
   C-CODE\U-UDP003\04_TEMP
 
   UDP003_U3M4_VISUAL_MODULE_MANAGER_v0_1.zip
-  u003_u3m4_visual_module_manager_installer_v0_1.py.txt
+  u003_u3m4_visual_module_manager_installer_v0_2.py.txt
   U3M4_START_HERE_CN_v0_1_2026-08-27.txt
 
 ZIP无需手动解压。
@@ -38,7 +38,7 @@ ZIP无需手动解压。
 ----
 使用CMD进入C-CODE根目录，只执行以下三行：
 
-  python U-UDP003\04_TEMP\u003_u3m4_visual_module_manager_installer_v0_1.py.txt --prepare
+  python U-UDP003\04_TEMP\u003_u3m4_visual_module_manager_installer_v0_2.py.txt --prepare
   python U-UDP003\01_PROGRAMS\u003_u3m4_acceptance_gate_v0_1.py --self-test
   python U-UDP003\01_PROGRAMS\u003_u3m4_acceptance_gate_v0_1.py --accept --open-gui
 

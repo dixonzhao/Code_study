@@ -14,6 +14,9 @@ from pathlib import Path, PurePosixPath
 
 
 PACKAGE_NAME = "UDP003_U3M4_VISUAL_MODULE_MANAGER_v0_1.zip"
+SAFE_AUXILIARY_DOCUMENTS = {
+    "U3M4_START_HERE_CN_v0_1_2026-08-27.txt",
+}
 REQUIRED_PREDECESSORS = {
     "01_PROGRAMS/u003_module_runtime_v0_1.py": "617b0a756acfbf1ce7db9f40f1e080ac0a2d22d5a35db8228518254f187bd370",
     "01_PROGRAMS/u003_module_executor_v0_1.py": "c374b0cdc0ca56228e0f67bd98ba8bfcfce90ae0fd98629adc45566125efaf27",
@@ -63,7 +66,7 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def safe_members(archive: zipfile.ZipFile) -> list[str]:
+def safe_members(archive: zipfile.ZipFile) -> tuple[list[str], list[str]]:
     members: list[str] = []
     for name in archive.namelist():
         pure = PurePosixPath(name)
@@ -71,11 +74,14 @@ def safe_members(archive: zipfile.ZipFile) -> list[str]:
             raise InstallError(f"Unsafe ZIP member: {name}")
         if not name.endswith("/"):
             members.append(name)
-    if set(members) != REQUIRED_MEMBERS:
-        missing = sorted(REQUIRED_MEMBERS - set(members))
-        extra = sorted(set(members) - REQUIRED_MEMBERS)
+    member_set = set(members)
+    install_members = member_set - SAFE_AUXILIARY_DOCUMENTS
+    ignored_documents = sorted(member_set & SAFE_AUXILIARY_DOCUMENTS)
+    if install_members != REQUIRED_MEMBERS:
+        missing = sorted(REQUIRED_MEMBERS - install_members)
+        extra = sorted(install_members - REQUIRED_MEMBERS)
         raise InstallError(f"Package inventory mismatch. Missing={missing}; Extra={extra}")
-    return members
+    return sorted(install_members), ignored_documents
 
 
 def validate_payloads(package_root: Path) -> list[tuple[str, str, str]]:
@@ -183,7 +189,7 @@ def install(package_path: Path, root: Path) -> int:
     prepared = root / "04_TEMP" / "U3M4_PREPARED"
     prepared.mkdir(parents=True, exist_ok=False)
     with zipfile.ZipFile(package_path, "r") as archive:
-        members = safe_members(archive)
+        members, ignored_documents = safe_members(archive)
         archive.extractall(prepared)
     checked = validate_payloads(prepared)
     relative_paths = [relative for relative, _digest, _purpose in checked]
@@ -202,6 +208,12 @@ def install(package_path: Path, root: Path) -> int:
     for relative, expected in REQUIRED_PREDECESSORS.items():
         print(f"  [OK] Predecessor: {relative} | {expected[:12]} - accepted input is frozen")
     print(f"  [OK] ZIP inventory: {len(members)} files - unknown payloads are rejected")
+    if ignored_documents:
+        print(
+            "  [OK] Auxiliary documentation ignored: "
+            + ", ".join(ignored_documents)
+            + " - documentation is never installed as executable content"
+        )
     for relative, digest, purpose in checked:
         print(f"  [OK] {relative} | {digest[:12]} - {purpose}")
     if temp_archive is None:
