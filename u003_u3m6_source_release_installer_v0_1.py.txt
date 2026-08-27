@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""Install the complete U003 U3M6 source release candidate from one ZIP."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import shutil
+import sys
+import zipfile
+from datetime import datetime
+from pathlib import Path, PurePosixPath
+
+
+PACKAGE_NAME = "UDP003_U3M6_SOURCE_RC_v0_1.zip"
+PROGRAMS = {
+    "01_PROGRAMS/u003_domain_core_v0_2.py",
+    "01_PROGRAMS/u003_evidence_review_workbench_v0_17.py",
+    "01_PROGRAMS/u003_gui_shell_v0_4.py",
+    "01_PROGRAMS/u003_handoff_core_v0_2.py",
+    "01_PROGRAMS/u003_localization_v0_2.py",
+    "01_PROGRAMS/u003_module_execution_coordinator_v0_1.py",
+    "01_PROGRAMS/u003_module_executor_v0_1.py",
+    "01_PROGRAMS/u003_module_manager_gui_v0_3.py",
+    "01_PROGRAMS/u003_module_plan_core_v0_1.py",
+    "01_PROGRAMS/u003_module_runtime_v0_1.py",
+    "01_PROGRAMS/u003_u3m6_source_release_acceptance_gate_v0_1.py",
+}
+CONTRACTS = {
+    "02_CONTROLS/contracts/u003_high_code_composition_contract_v0_1.json",
+    "02_CONTROLS/contracts/u003_module_assistance_runtime_contract_v0_1.json",
+    "02_CONTROLS/contracts/u003_module_contract_v0_1.json",
+    "02_CONTROLS/contracts/u003_module_execution_contract_bundle_v0_1.json",
+    "02_CONTROLS/contracts/u003_module_plan_contract_v0_1.json",
+    "02_CONTROLS/contracts/u003_session_localization_contract_v0_1.json",
+    "02_CONTROLS/contracts/u003_source_release_candidate_contract_v0_1.json",
+}
+MODULE_FILES = {
+    "02_MODULES/REVIEW_ASSIST/CameraRadar.U003.ReviewDispositionLabels/0.1.0/algorithm_card.json",
+    "02_MODULES/REVIEW_ASSIST/CameraRadar.U003.ReviewDispositionLabels/0.1.0/module_manifest.json",
+    "02_MODULES/REVIEW_ASSIST/CameraRadar.U003.SampleMemoDraft/0.1.0/algorithm_card.json",
+    "02_MODULES/REVIEW_ASSIST/CameraRadar.U003.SampleMemoDraft/0.1.0/implementation.py",
+    "02_MODULES/REVIEW_ASSIST/CameraRadar.U003.SampleMemoDraft/0.1.0/module_manifest.json",
+}
+PAYLOADS = PROGRAMS | CONTRACTS | MODULE_FILES
+REQUIRED_MEMBERS = PAYLOADS | {"PACKAGE_SHA256.csv"}
+PROGRAM_PREFIXES = (
+    "u003_evidence_review_workbench_",
+    "u003_gui_shell_",
+    "u003_domain_core_",
+    "u003_handoff_core_",
+    "u003_localization_",
+    "u003_module_",
+    "u003_u3m",
+    "u003_characterization_",
+    "u003_acceptance_",
+    "u003_exact_",
+    "u003_peak_",
+    "u003_freeze_",
+    "u003_onefile_",
+)
+PREVIOUS_TRANSFER_PREFIXES = (
+    "U3M1",
+    "U3M2",
+    "U3M3",
+    "U3M4",
+    "U3M5",
+    "UDP003_U3M1",
+    "UDP003_U3M2",
+    "UDP003_U3M3",
+    "UDP003_U3M4",
+    "UDP003_U3M5",
+    "u003_u3m1",
+    "u003_u3m2",
+    "u003_u3m3",
+    "u003_u3m4",
+    "u003_u3m5",
+)
+
+
+class InstallError(RuntimeError):
+    """Raised when the transfer package or destination is invalid."""
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def next_archive_root(root: Path, label: str) -> Path:
+    stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+    destination = root / "A-Archive" / f"{label}_{stamp}"
+    suffix = 1
+    while destination.exists():
+        destination = root / "A-Archive" / f"{label}_{stamp}_{suffix:02d}"
+        suffix += 1
+    return destination
+
+
+def move_preserving_root(source: Path, root: Path, archive_root: Path) -> None:
+    relative = source.relative_to(root)
+    destination = archive_root / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(source), str(destination))
+
+
+def safe_members(archive: zipfile.ZipFile) -> list[str]:
+    members: list[str] = []
+    for name in archive.namelist():
+        pure = PurePosixPath(name)
+        if pure.is_absolute() or ".." in pure.parts:
+            raise InstallError(f"Unsafe ZIP member: {name}")
+        if not name.endswith("/"):
+            members.append(name)
+    if set(members) != REQUIRED_MEMBERS:
+        missing = sorted(REQUIRED_MEMBERS - set(members))
+        extra = sorted(set(members) - REQUIRED_MEMBERS)
+        raise InstallError(f"Package inventory mismatch. Missing={missing}; Extra={extra}")
+    return sorted(members)
+
+
+def validate_payloads(package_root: Path) -> list[tuple[str, str, str]]:
+    with (package_root / "PACKAGE_SHA256.csv").open(
+        "r", encoding="utf-8-sig", newline=""
+    ) as stream:
+        rows = list(csv.DictReader(stream))
+    if len(rows) != len(PAYLOADS):
+        raise InstallError(
+            f"Manifest row count {len(rows)} does not equal {len(PAYLOADS)}."
+        )
+    checked: list[tuple[str, str, str]] = []
+    for row in rows:
+        relative = row.get("RelativePath", "").strip()
+        expected = row.get("Sha256", "").strip().lower()
+        purpose = row.get("Purpose", "").strip()
+        path = (package_root / relative).resolve()
+        try:
+            path.relative_to(package_root.resolve())
+        except ValueError as error:
+            raise InstallError(f"Manifest path escapes package root: {relative}") from error
+        if not path.is_file() or path.is_symlink():
+            raise InstallError(f"Payload is missing: {relative}")
+        actual = sha256_file(path)
+        if actual != expected:
+            raise InstallError(f"Payload hash mismatch: {relative}")
+        checked.append((relative, actual, purpose))
+    if {item[0] for item in checked} != PAYLOADS:
+        raise InstallError("Manifest payload inventory differs from the release contract.")
+    return checked
+
+
+def archive_previous_temp(root: Path) -> tuple[Path | None, int]:
+    temp_root = root / "04_TEMP"
+    temp_root.mkdir(parents=True, exist_ok=True)
+    selected = [
+        path
+        for path in temp_root.iterdir()
+        if any(path.name.startswith(prefix) for prefix in PREVIOUS_TRANSFER_PREFIXES)
+    ]
+    previous_prepared = temp_root / "U3M6_PREPARED"
+    if previous_prepared.exists() and previous_prepared not in selected:
+        selected.append(previous_prepared)
+    if not selected:
+        return None, 0
+    archive_root = next_archive_root(root, "U3M6_TEMP_CLEANUP")
+    for path in selected:
+        move_preserving_root(path, root, archive_root)
+    return archive_root, len(selected)
+
+
+def archive_owned_programs(root: Path) -> tuple[Path | None, int]:
+    program_root = root / "01_PROGRAMS"
+    program_root.mkdir(parents=True, exist_ok=True)
+    active_names = {Path(relative).name for relative in PROGRAMS}
+    selected = [
+        path
+        for path in program_root.iterdir()
+        if path.is_file()
+        and path.name not in active_names
+        and any(path.name.startswith(prefix) for prefix in PROGRAM_PREFIXES)
+    ]
+    if not selected:
+        return None, 0
+    archive_root = next_archive_root(root, "U3M6_OBSOLETE_PROGRAMS")
+    for path in selected:
+        move_preserving_root(path, root, archive_root)
+    return archive_root, len(selected)
+
+
+def archive_obsolete_contracts(root: Path) -> tuple[Path | None, int]:
+    contract_root = root / "02_CONTROLS" / "contracts"
+    contract_root.mkdir(parents=True, exist_ok=True)
+    active_names = {Path(relative).name for relative in CONTRACTS}
+    selected = [
+        path
+        for path in contract_root.iterdir()
+        if path.is_file()
+        and path.name.startswith("u003_")
+        and path.name not in active_names
+    ]
+    if not selected:
+        return None, 0
+    archive_root = next_archive_root(root, "U3M6_OBSOLETE_CONTRACTS")
+    for path in selected:
+        move_preserving_root(path, root, archive_root)
+    return archive_root, len(selected)
+
+
+def backup_replaced_payloads(root: Path) -> tuple[Path | None, int]:
+    existing = [root / relative for relative in PAYLOADS if (root / relative).is_file()]
+    if not existing:
+        return None, 0
+    archive_root = next_archive_root(root, "U3M6_REPLACED_ACTIVE")
+    for source in existing:
+        destination = archive_root / source.relative_to(root)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+    return archive_root, len(existing)
+
+
+def install(package_path: Path, root: Path) -> int:
+    package_path = package_path.resolve()
+    root = root.resolve()
+    if root.name.upper() != "U-UDP003":
+        raise InstallError(f"Expected U-UDP003 root, got: {root}")
+    if not package_path.is_file():
+        raise InstallError(f"Transfer ZIP is missing: {package_path}")
+
+    temp_archive, temp_count = archive_previous_temp(root)
+    prepared = root / "04_TEMP" / "U3M6_PREPARED"
+    prepared.mkdir(parents=True, exist_ok=False)
+    with zipfile.ZipFile(package_path, "r") as archive:
+        members = safe_members(archive)
+        archive.extractall(prepared)
+    checked = validate_payloads(prepared)
+    backup_root, backup_count = backup_replaced_payloads(root)
+    obsolete_program_root, obsolete_program_count = archive_owned_programs(root)
+    obsolete_contract_root, obsolete_contract_count = archive_obsolete_contracts(root)
+
+    for relative, _digest, _purpose in checked:
+        source = prepared / relative
+        destination = root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        writing = destination.with_name(destination.name + ".writing")
+        shutil.copy2(source, writing)
+        writing.replace(destination)
+
+    print("U3M6 prepare checks:")
+    print(f"  [OK] U003 root: {root} - company topology is explicit")
+    print(f"  [OK] Complete ZIP inventory: {len(members)} files - incremental history is not required")
+    print(f"  [OK] Active programs: {len(PROGRAMS)} - exact source composition is installed")
+    print(f"  [OK] Active contracts: {len(CONTRACTS)} - runtime authority is explicit")
+    print(f"  [OK] Sample Module files: {len(MODULE_FILES)} - discovery and PROCESS execution are testable")
+    for relative, digest, purpose in checked:
+        print(f"  [OK] {relative} | {digest[:12]} - {purpose}")
+    print(f"  [OK] Previous TEMP items archived: {temp_count} | {temp_archive or 'none'}")
+    print(f"  [OK] Replaced active files backed up: {backup_count} | {backup_root or 'none'}")
+    print(f"  [OK] Obsolete U003 programs archived: {obsolete_program_count} | {obsolete_program_root or 'none'}")
+    print(f"  [OK] Obsolete U003 contracts archived: {obsolete_contract_count} | {obsolete_contract_root or 'none'}")
+    print("  [OK] User data, review outputs, videos and unknown files were not modified")
+    print(
+        f"U3M6P N-R1-F{len(PAYLOADS)}-P{len(PROGRAMS)}-C{len(CONTRACTS)}-"
+        f"M2-A{temp_count}-B{backup_count}-O{obsolete_program_count + obsolete_contract_count}-X0 C-0"
+    )
+    return 0
+
+
+def parse_arguments(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--prepare", action="store_true")
+    parser.add_argument("--root", type=Path)
+    parser.add_argument("--package", type=Path)
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    arguments = parse_arguments(sys.argv[1:] if argv is None else argv)
+    try:
+        if not arguments.prepare:
+            raise InstallError("Use --prepare.")
+        script_directory = Path(__file__).resolve().parent
+        root = arguments.root if arguments.root is not None else script_directory.parent
+        package = arguments.package if arguments.package is not None else script_directory / PACKAGE_NAME
+        return install(package, root)
+    except Exception as error:
+        print(f"U3M6PE K-{type(error).__name__.upper()} D-{error} X1 C-7", file=sys.stderr)
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,77 @@
+U003 / U3M6 完整Source Release Candidate执行指南
+日期：2026-08-27
+
+本步骤做什么
+------------
+U3M1至U3M5已经分别完成Module契约、隔离执行、高代码拆分、可视Module管理、
+EN/JA会话语言和Review Memo写回。此前安装依赖五次增量节点；U3M6把当前全部
+活动源码、契约与两个示例Module收拢为一个可重建Source Release Candidate。
+
+这一步不改变Review算法、Event、FrameCount映射或U002 Handoff语义。
+它只关闭安装、版本混杂和04_TEMP历史债务，并为今天的最终打包提供唯一源码基线。
+
+下载位置
+--------
+把以下三个文件下载到 C-CODE\U-UDP003\04_TEMP，ZIP不要解压：
+
+  UDP003_U3M6_SOURCE_RC_v0_1.zip
+  u003_u3m6_source_release_installer_v0_1.py.txt
+  U3M6_START_HERE_CN_v0_1_2026-08-27.txt
+
+执行
+----
+使用CMD进入C-CODE根目录，只执行以下三行：
+
+  python U-UDP003\04_TEMP\u003_u3m6_source_release_installer_v0_1.py.txt --prepare
+  python U-UDP003\01_PROGRAMS\u003_u3m6_source_release_acceptance_gate_v0_1.py --self-test
+  python U-UDP003\01_PROGRAMS\u003_u3m6_source_release_acceptance_gate_v0_1.py --accept
+
+Prepare会显示什么
+-----------------
+1. 完整ZIP、23个payload、11个活动程序、7个契约与2个Module家族是否齐全；
+2. U3M1至U3M5旧TEMP是否归档；
+3. 被替换的活动文件是否备份；
+4. 01_PROGRAMS和contracts中的过期U003版本是否移入A-Archive；
+5. 用户数据、视频、Review输出与未知文件是否保持不动。
+
+U3M6自动验收什么
+----------------
+- 全部活动Python可解析、全部JSON契约可读取；
+- U002 Handoff launcher接口与0.1契约保持一致；
+- Module Runtime、Executor、Coordinator和U003入口在新进程中通过自测；
+- 默认无Module，不发生隐式执行；
+- Sample Memo Module只执行一次，再次进入Event时命中缓存；
+- Review Memo可以追加辅助文字，但Review Result、Peak和来源证据不被修改；
+- request/result/stdout/stderr/trace留痕边界可用；
+- Module不能声明Root Cause。
+
+今天后续步骤
+------------
+U3M6返回C-0后立即进入U3M7：构建最终可携带版本、执行打包验收并记录冻结边界。
+今天完成U3M7后，U003本体开发结束；不再新增功能。
+
+明天的真实联动使用
+------------------
+明天使用真实U002 Handoff进行以下人工联动检查：
+
+1. 启动时选择EN或JA；
+2. 自动加载真实Event Queue和Review Data；
+3. 打开视频并确认FrameCount映射；
+4. 打开Modules，选择Sample Review Memo Draft；
+5. 进入一个Event，确认Review Memo只追加一次且语言正确；
+6. 检查CAN表高亮、Peak Pin、Event导航与视频画面；
+7. 修改Review Memo和Review Result并导出；
+8. 重新打开导出结果，确认修改得到保存；
+9. 检查U003_MODULE_RUNS中的执行证据；
+10. 正常关闭GUI。
+
+U3M7今天完成代码与发布冻结。明天若发现阻断真实使用的缺陷，只按缺陷编号解冻修复；
+非阻断改进进入后续Backlog，不重新展开U003开发。
+
+回传
+----
+成功只回传最后一行U3M6，例如：
+
+  U3M6 N-P5-C18-M8-H3-A4-T51-X0 C-0
+
+失败回传完整U3M6PE或U3M6E错误行。
