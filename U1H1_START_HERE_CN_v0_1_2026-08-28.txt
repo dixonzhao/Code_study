@@ -1,0 +1,50 @@
+U1H1 Input Adapter Foundation 执行指南
+版本：v0.1
+
+目标：
+在不覆盖旧 U001 引擎的前提下，安装高代码版 Input Adapter 契约、注册器、
+独立资格门和合成测试 Adapter。该步骤不会读取真实 CAN/DBC，也不会改变已有案例。
+
+TEMP 清理：
+
+- 不需要手动创建 U001H 文件夹。
+- 第一次 prepare 会把原 04_TEMP 内容迁入 A-Archive 的时间戳目录，不删除。
+- prepare 自动创建并管理 04_TEMP\U001H_ACTIVE。
+- 后续 H 节点继续自动归档被替代的 High-Code 临时文件。
+
+放置位置：
+请把以下两个文件放入：
+
+  C-CODE\U-UDP001\04_TEMP
+
+文件：
+
+  u001_u1h1_input_adapter_foundation_installer_v0_1.py.txt
+  UDP001_U1H1_INPUT_ADAPTER_FOUNDATION_v0_1.zip
+
+在 CMD 中进入 C-CODE 根目录，仅执行以下三行：
+
+python U-UDP001\04_TEMP\u001_u1h1_input_adapter_foundation_installer_v0_1.py.txt --prepare
+python U-UDP001\04_TEMP\u001_u1h1_input_adapter_foundation_installer_v0_1.py.txt --self-test
+python U-UDP001\04_TEMP\u001_u1h1_input_adapter_foundation_installer_v0_1.py.txt --execute
+
+成功时最后一行：
+
+  U1H1-N1-F1-Q1-A7-X0-C0
+
+字段：
+
+  N = 已发现 Adapter 版本数
+  F = Adapter Family 数
+  Q = 合成 Adapter 独立资格验收
+  A = 安装文件数
+  X = blocking error 数
+  C = completion code
+
+只需回传最后一行。Self-test 明细无需手工输入。
+
+当前范围：
+
+- 这是新 U001 高代码重构的 H1 基础，不是完整 CAN 解码器。
+- 旧 U001 保留不动，继续作为 Legacy Reference 和差分验收 Oracle。
+- 下一节点 H2 将实现 MATLAB CAN CSV + CH1/CH2 DBC Input Adapter。
