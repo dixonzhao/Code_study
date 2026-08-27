@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""Read-only diagnostic for one U3M9D prepared-core self-test failure."""
+
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+
+CORE_NAME = "u003_editable_xlsx_export_core_v0_2.py"
+PREPARED_NAME = "U3M9D_PREPARED"
+
+
+class DiagnosticError(RuntimeError):
+    """Raised when the diagnostic cannot locate the prepared release."""
+
+
+def compact(value: object, limit: int = 140) -> str:
+    text = re.sub(r"\s+", "_", str(value).strip())
+    text = re.sub(r"[^A-Za-z0-9_.-]+", "", text)
+    return text[:limit] or "NONE"
+
+
+def discover_root(explicit: Path | None) -> Path:
+    candidates: list[Path] = []
+    if explicit is not None:
+        candidates.append(explicit)
+    current = Path.cwd().resolve()
+    candidates.extend((current, current / "U-UDP003"))
+    for parent in (current, *current.parents[:3]):
+        candidates.append(parent / "U-UDP003")
+    for candidate in candidates:
+        if candidate.name == "U-UDP003" and candidate.is_dir():
+            return candidate.resolve()
+    raise DiagnosticError("U-UDP003 root was not found")
+
+
+def package_version(name: str) -> str:
+    try:
+        from importlib.metadata import version
+
+        return version(name)
+    except Exception:
+        return "MISSING"
+
+
+def compatibility_probe() -> dict[str, int]:
+    result = {"Import": 0, "Scatter": 0, "Table": 0, "Marker": 0, "Axis": 0}
+    try:
+        from openpyxl import Workbook
+        from openpyxl.chart import Reference, ScatterChart, Series
+        from openpyxl.worksheet.table import Table, TableStyleInfo
+
+        result["Import"] = 1
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["FrameCount", "Value"])
+        sheet.append([1, 2.0])
+        sheet.append([2, 3.0])
+        chart = ScatterChart()
+        chart.scatterStyle = "line"
+        chart.x_axis.numFmt = "0"
+        chart.x_axis.majorUnit = 1
+        result["Axis"] = 1
+        x_values = Reference(sheet, min_col=1, min_row=2, max_row=3)
+        y_values = Reference(sheet, min_col=2, min_row=2, max_row=3)
+        series = Series(y_values, x_values, title="Value")
+        chart.series.append(series)
+        result["Scatter"] = 1
+        series.marker.symbol = "none"
+        result["Marker"] = 1
+        table = Table(displayName="ProbeTable", ref="A1:B3")
+        table.tableStyleInfo = TableStyleInfo(
+            name="TableStyleMedium2",
+            showRowStripes=True,
+        )
+        sheet.add_table(table)
+        result["Table"] = 1
+    except Exception:
+        pass
+    return result
+
+
+def traceback_summary(stderr: str) -> tuple[str, str, str, str]:
+    line_number = "0"
+    function = "NONE"
+    exception_type = "NONE"
+    message = "NONE"
+    locations = re.findall(r'File "[^"]+", line (\d+), in ([^\r\n]+)', stderr)
+    if locations:
+        line_number, function = locations[-1]
+    final_lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    if final_lines:
+        match = re.match(r"([A-Za-z_][A-Za-z0-9_.]*):?\s*(.*)", final_lines[-1])
+        if match:
+            exception_type = match.group(1).split(".")[-1]
+            message = match.group(2) or "NONE"
+    return (
+        line_number,
+        compact(function, 40),
+        compact(exception_type, 50),
+        compact(message, 160),
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path)
+    arguments = parser.parse_args()
+    root = discover_root(arguments.root)
+    core = root / "04_TEMP" / PREPARED_NAME / "01_PROGRAMS" / CORE_NAME
+    if not core.is_file():
+        raise DiagnosticError(f"prepared core missing: {core}")
+
+    probe = compatibility_probe()
+    completed = subprocess.run(
+        [sys.executable, str(core), "--self-test"],
+        text=True,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=240,
+        check=False,
+    )
+    line, function, error_type, message = traceback_summary(completed.stderr)
+    stdout_tail = compact("|".join(completed.stdout.splitlines()[-2:]), 120)
+    print(
+        "U3M9DD1 "
+        f"PY-{sys.version_info.major}{sys.version_info.minor}{sys.version_info.micro} "
+        f"OP-{compact(package_version('openpyxl'), 30)} "
+        f"RC-{completed.returncode} "
+        f"I{probe['Import']}-S{probe['Scatter']}-T{probe['Table']}-"
+        f"M{probe['Marker']}-A{probe['Axis']} "
+        f"L-{line}-F-{function}-E-{error_type}-D-{message} "
+        f"O-{stdout_tail} X0 C-0"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as error:
+        print(
+            f"U3M9DD1E K-{type(error).__name__.upper()} "
+            f"D-{compact(error, 180)} X1 C-7"
+        )
+        raise SystemExit(7)
