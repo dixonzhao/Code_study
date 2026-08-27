@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare and install the governed U3M4 visual Module Manager."""
+"""Prepare and install U3M4A session localization and structured cards."""
 
 from __future__ import annotations
 
@@ -13,49 +13,35 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 
-PACKAGE_NAME = "UDP003_U3M4_VISUAL_MODULE_MANAGER_v0_1.zip"
+PACKAGE_NAME = "UDP003_U3M4A_SESSION_LOCALIZATION_v0_1.zip"
 SAFE_AUXILIARY_DOCUMENTS = {
-    "U3M4_START_HERE_CN_v0_1_2026-08-27.txt",
+    "U3M4A_START_HERE_CN_v0_1_2026-08-27.txt",
 }
 REQUIRED_PREDECESSORS = {
-    "01_PROGRAMS/u003_module_runtime_v0_1.py": "617b0a756acfbf1ce7db9f40f1e080ac0a2d22d5a35db8228518254f187bd370",
-    "01_PROGRAMS/u003_module_executor_v0_1.py": "c374b0cdc0ca56228e0f67bd98ba8bfcfce90ae0fd98629adc45566125efaf27",
-    "01_PROGRAMS/u003_gui_shell_v0_1.py": "73d3dc4bbc4f8e57f7d4b6d85b4752b39b8da0dce5d32cd837a21cd7f34ca739",
-    "01_PROGRAMS/u003_evidence_review_workbench_v0_14.py": "829efc6054c68e5a51f95ce90f9802acdf7111e06cf1809b82b54670367b8d7a",
+    "01_PROGRAMS/u003_module_plan_core_v0_1.py": "8faa92354eb5f9de3e83bbe082b6d360971da40a9ebcc8a3a89b34e0f0c2ebe4",
+    "01_PROGRAMS/u003_module_manager_gui_v0_1.py": "b0d6a1c31f353316d81b1f02a355ddbb2337826d5566eeb96bbcd4866b943d23",
+    "01_PROGRAMS/u003_gui_shell_v0_2.py": "61052e5005758a0b68a23fd0438aa15fe9d2007cf918cc0595adc54bebb0b065",
+    "01_PROGRAMS/u003_evidence_review_workbench_v0_15.py": "10548bc861f9aa066128c13ef7d148ce394f84c797643f484025ac21662d9ef2",
 }
 REQUIRED_MEMBERS = {
-    "01_PROGRAMS/u003_module_plan_core_v0_1.py",
-    "01_PROGRAMS/u003_module_manager_gui_v0_1.py",
-    "01_PROGRAMS/u003_gui_shell_v0_2.py",
-    "01_PROGRAMS/u003_evidence_review_workbench_v0_15.py",
-    "01_PROGRAMS/u003_u3m4_acceptance_gate_v0_1.py",
-    "02_CONTROLS/contracts/u003_module_plan_contract_v0_1.json",
+    "01_PROGRAMS/u003_localization_v0_1.py",
+    "01_PROGRAMS/u003_module_manager_gui_v0_2.py",
+    "01_PROGRAMS/u003_gui_shell_v0_3.py",
+    "01_PROGRAMS/u003_evidence_review_workbench_v0_16.py",
+    "01_PROGRAMS/u003_u3m4a_localization_acceptance_gate_v0_1.py",
+    "02_CONTROLS/contracts/u003_session_localization_contract_v0_1.json",
     "PACKAGE_SHA256.csv",
 }
-PREVIOUS_PREPARED_NAMES = (
-    "U3M1_PREPARED",
-    "U3M2_PREPARED",
-    "U3M3A_PREPARED",
-    "U3M3B_PREPARED",
-)
+PREVIOUS_PREPARED_NAMES = ("U3M4_PREPARED",)
 PREVIOUS_TRANSFER_PREFIXES = (
-    "U3M1_START_HERE",
-    "UDP003_U3M1",
-    "u003_u3m1",
-    "U3M2_START_HERE",
-    "UDP003_U3M2",
-    "u003_u3m2",
-    "U3M3A_START_HERE",
-    "UDP003_U3M3A",
-    "u003_u3m3a",
-    "U3M3B_START_HERE",
-    "UDP003_U3M3B",
-    "u003_u3m3b",
+    "U3M4_START_HERE",
+    "UDP003_U3M4_",
+    "u003_u3m4_",
 )
 
 
 class InstallError(RuntimeError):
-    """Raised when transfer evidence or the company directory is invalid."""
+    """Raised when transfer evidence or company topology is invalid."""
 
 
 def sha256_file(path: Path) -> str:
@@ -90,7 +76,6 @@ def validate_payloads(package_root: Path) -> list[tuple[str, str, str]]:
         rows = list(csv.DictReader(stream))
     if len(rows) != 6:
         raise InstallError("PACKAGE_SHA256.csv must contain exactly six payload rows.")
-
     checked: list[tuple[str, str, str]] = []
     for row in rows:
         relative = row.get("RelativePath", "").strip()
@@ -107,7 +92,7 @@ def validate_payloads(package_root: Path) -> list[tuple[str, str, str]]:
         if actual != expected:
             raise InstallError(f"Payload hash mismatch: {relative}")
         checked.append((relative, actual, purpose))
-    if {relative for relative, _digest, _purpose in checked} != REQUIRED_MEMBERS - {"PACKAGE_SHA256.csv"}:
+    if {row[0] for row in checked} != REQUIRED_MEMBERS - {"PACKAGE_SHA256.csv"}:
         raise InstallError("Manifest payload inventory does not match the approved package.")
     return checked
 
@@ -132,7 +117,6 @@ def archive_previous_temp(root: Path) -> tuple[Path | None, int]:
     temp_root = root / "04_TEMP"
     temp_root.mkdir(parents=True, exist_ok=True)
     selected: list[tuple[Path, Path]] = []
-
     for name in PREVIOUS_PREPARED_NAMES:
         candidate = temp_root / name
         if candidate.exists():
@@ -142,14 +126,12 @@ def archive_previous_temp(root: Path) -> tuple[Path | None, int]:
             continue
         if any(candidate.name.startswith(prefix) for prefix in PREVIOUS_TRANSFER_PREFIXES):
             selected.append((candidate, Path(candidate.name)))
-
-    current_prepared = temp_root / "U3M4_PREPARED"
+    current_prepared = temp_root / "U3M4A_PREPARED"
     if current_prepared.exists():
-        selected.append((current_prepared, Path("U3M4_PREPARED_PREVIOUS")))
+        selected.append((current_prepared, Path("U3M4A_PREPARED_PREVIOUS")))
     if not selected:
         return None, 0
-
-    archive_root = next_archive_root(root, "U3M4_TEMP_CLEANUP")
+    archive_root = next_archive_root(root, "U3M4A_TEMP_CLEANUP")
     for source, relative in selected:
         move_to_archive(source, archive_root, Path("04_TEMP") / relative)
     return archive_root, len(selected)
@@ -159,7 +141,7 @@ def archive_replaced_payloads(root: Path, relative_paths: list[str]) -> tuple[Pa
     existing = [relative for relative in relative_paths if (root / relative).is_file()]
     if not existing:
         return None, 0
-    archive_root = next_archive_root(root, "U3M4_REPLACED")
+    archive_root = next_archive_root(root, "U3M4A_REPLACED")
     for relative in existing:
         destination = archive_root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -183,10 +165,9 @@ def install(package_path: Path, root: Path) -> int:
         raise InstallError(f"Expected U-UDP003 root, got: {root}")
     if not package_path.is_file():
         raise InstallError(f"Transfer ZIP is missing: {package_path}")
-
     validate_predecessors(root)
     temp_archive, temp_count = archive_previous_temp(root)
-    prepared = root / "04_TEMP" / "U3M4_PREPARED"
+    prepared = root / "04_TEMP" / "U3M4A_PREPARED"
     prepared.mkdir(parents=True, exist_ok=False)
     with zipfile.ZipFile(package_path, "r") as archive:
         members, ignored_documents = safe_members(archive)
@@ -194,7 +175,6 @@ def install(package_path: Path, root: Path) -> int:
     checked = validate_payloads(prepared)
     relative_paths = [relative for relative, _digest, _purpose in checked]
     replaced_archive, replaced_count = archive_replaced_payloads(root, relative_paths)
-
     for relative in relative_paths:
         source = prepared / relative
         destination = root / relative
@@ -203,17 +183,13 @@ def install(package_path: Path, root: Path) -> int:
         shutil.copy2(source, writing)
         writing.replace(destination)
 
-    print("U3M4 prepare checks:")
+    print("U3M4A prepare checks:")
     print(f"  [OK] U003 root: {root} - company directory topology is explicit")
     for relative, expected in REQUIRED_PREDECESSORS.items():
         print(f"  [OK] Predecessor: {relative} | {expected[:12]} - accepted input is frozen")
     print(f"  [OK] ZIP inventory: {len(members)} files - unknown payloads are rejected")
     if ignored_documents:
-        print(
-            "  [OK] Auxiliary documentation ignored: "
-            + ", ".join(ignored_documents)
-            + " - documentation is never installed as executable content"
-        )
+        print("  [OK] Auxiliary documentation ignored: " + ", ".join(ignored_documents))
     for relative, digest, purpose in checked:
         print(f"  [OK] {relative} | {digest[:12]} - {purpose}")
     if temp_archive is None:
@@ -221,11 +197,11 @@ def install(package_path: Path, root: Path) -> int:
     else:
         print(f"  [OK] TEMP hygiene: {temp_count} previous-node items archived to {temp_archive}")
     if replaced_archive is None:
-        print("  [OK] Program preservation: no installed U3M4 payload required backup")
+        print("  [OK] Program preservation: no installed U3M4A payload required backup")
     else:
         print(f"  [OK] Program preservation: {replaced_count} payloads backed up to {replaced_archive}")
-    print("  [OK] U3M4_PREPARED recreated from the verified ZIP")
-    print(f"U3M4P N-R1-F6-I4-L1-A{temp_count}-B{replaced_count}-X0 C-0")
+    print("  [OK] U3M4A_PREPARED recreated from the verified ZIP")
+    print(f"U3M4AP N-R1-F6-I4-L2-A{temp_count}-B{replaced_count}-X0 C-0")
     return 0
 
 
@@ -247,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
         package = arguments.package if arguments.package is not None else script_directory / PACKAGE_NAME
         return install(package, root)
     except Exception as error:
-        print(f"U3M4PE K-{type(error).__name__.upper()} D-{error} X1 C-7", file=sys.stderr)
+        print(f"U3M4APE K-{type(error).__name__.upper()} D-{error} X1 C-7", file=sys.stderr)
         return 7
 
 
