@@ -13,15 +13,18 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 
-PACKAGE_NAME = "UDP003_U3M8_FRAME_MASK_v0_1.zip"
+PACKAGE_NAME = "UDP003_U3M8_FRAME_MASK_v0_2.zip"
 PAYLOADS = {
-    "01_PROGRAMS/u003_u3m8_frame_mask_acceptance_gate_v0_1.py",
-    "02_MODULES/EVIDENCE_VIEW/CameraRadar.U003.FrameMask/0.1.0/algorithm_card.json",
-    "02_MODULES/EVIDENCE_VIEW/CameraRadar.U003.FrameMask/0.1.0/implementation.py",
-    "02_MODULES/EVIDENCE_VIEW/CameraRadar.U003.FrameMask/0.1.0/module_manifest.json",
-    "03_DOCUMENTS/U3M8_node_report_frame_privacy_mask_v0_1_2026-08-27.txt",
+    "01_PROGRAMS/u003_u3m8_frame_mask_acceptance_gate_v0_2.py",
+    "02_MODULES/EVIDENCE_VIEW/CameraRadar.U003.FrameMask/0.2.0/algorithm_card.json",
+    "02_MODULES/EVIDENCE_VIEW/CameraRadar.U003.FrameMask/0.2.0/implementation.py",
+    "02_MODULES/EVIDENCE_VIEW/CameraRadar.U003.FrameMask/0.2.0/module_manifest.json",
+    "03_DOCUMENTS/U3M8_node_report_frame_privacy_mask_v0_2_2026-08-27.txt",
 }
 REQUIRED_MEMBERS = PAYLOADS | {"PACKAGE_SHA256.csv"}
+SUPERSEDED_MODULE_RELATIVE = Path(
+    "02_MODULES/EVIDENCE_VIEW/CameraRadar.U003.FrameMask/0.1.0"
+)
 
 
 class InstallError(RuntimeError):
@@ -146,6 +149,15 @@ def backup_replaced(root: Path) -> tuple[Path | None, int]:
     return archive_root, len(existing)
 
 
+def archive_superseded_module(root: Path) -> tuple[Path | None, int]:
+    source = root / SUPERSEDED_MODULE_RELATIVE
+    if not source.is_dir():
+        return None, 0
+    archive_root = next_archive_root(root, "U3M8_SUPERSEDED_MODULE")
+    move_preserving_root(source, root, archive_root)
+    return archive_root, 1
+
+
 def install(package_path: Path, root: Path, installer_path: Path) -> int:
     package_path = package_path.resolve()
     root = root.resolve()
@@ -162,6 +174,7 @@ def install(package_path: Path, root: Path, installer_path: Path) -> int:
         archive.extractall(prepared)
     verified = validate_payloads(prepared)
     backup_root, backup_count = backup_replaced(root)
+    superseded_root, superseded_count = archive_superseded_module(root)
     for relative, _digest, _purpose in verified:
         source = prepared / relative
         destination = root / relative
@@ -178,8 +191,9 @@ def install(package_path: Path, root: Path, installer_path: Path) -> int:
         print(f"  [OK] {relative} | {digest[:12]} - {purpose}")
     print(f"  [OK] Previous U3M8 TEMP items archived: {temp_count} | {temp_archive or 'none'}")
     print(f"  [OK] Replaced payloads backed up: {backup_count} | {backup_root or 'none'}")
+    print(f"  [OK] Superseded Module versions archived: {superseded_count} | {superseded_root or 'none'}")
     print("  [OK] Review data, videos, outputs, Profiles, and unknown files were not modified")
-    print(f"U3M8P N-F{len(PAYLOADS)}-M1-A{temp_count}-B{backup_count}-X0 C-0")
+    print(f"U3M8P N-F{len(PAYLOADS)}-M1-A{temp_count}-B{backup_count}-O{superseded_count}-X0 C-0")
     return 0
 
 
