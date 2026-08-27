@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+"""Prepare, self-test and promote the U3M9D XLSX visual repair release."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+import zipfile
+from datetime import datetime
+from pathlib import Path
+
+
+PACKAGE_NAME = "UDP003_U3M9D_XLSX_VISUAL_REPAIR_v0_2.zip"
+GUIDE_NAME = "U3M9D_START_HERE_CN_v0_2_2026-08-27.txt"
+PREPARED_NAME = "U3M9D_PREPARED"
+MODULE_ID = "CameraRadar.U003.EditableXlsxCharts"
+MODULE_VERSION = "0.2.0"
+CORE_NAME = "u003_editable_xlsx_export_core_v0_2.py"
+GATE_NAME = "u003_u3m9d_xlsx_visual_repair_acceptance_gate_v0_2.py"
+REPORT_NAME = "U3M9D_node_report_xlsx_visual_repair_v0_2_2026-08-27.txt"
+CORE_SELFTEST_CAPSULE = "U3M9D-CORE-SELFTEST-PASS-35 C-0"
+MODULE_SELFTEST_CAPSULE = "U3M9D-SELFTEST-PASS-26 C-0"
+
+
+class InstallError(RuntimeError):
+    """Raised when transfer, cleanup, testing or promotion is incomplete."""
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise InstallError(message)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def discover_udp003_root(explicit: Path | None) -> Path:
+    candidates: list[Path] = []
+    if explicit is not None:
+        candidates.append(explicit)
+    current = Path.cwd().resolve()
+    candidates.extend((current, current / "U-UDP003"))
+    for parent in (current, *current.parents[:3]):
+        candidates.append(parent / "U-UDP003")
+    for candidate in candidates:
+        if candidate.name == "U-UDP003" and candidate.is_dir():
+            return candidate.resolve()
+    raise InstallError("U-UDP003 root was not found. Run from C-CODE.")
+
+
+def unique_archive_directory(archive_root: Path, label: str) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+    candidate = archive_root / f"{label}_{timestamp}"
+    counter = 2
+    while candidate.exists():
+        candidate = archive_root / f"{label}_{timestamp}_{counter:02d}"
+        counter += 1
+    return candidate
+
+
+def archive_existing(path: Path, archive_root: Path, label: str) -> None:
+    if not path.exists():
+        return
+    destination_root = unique_archive_directory(archive_root, label)
+    destination = destination_root / path.name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(path), str(destination))
+
+
+def converge_temp(root: Path, installer_path: Path) -> dict[str, int]:
+    """Archive every non-current TEMP artifact before unpacking this release."""
+
+    temporary_root = root / "04_TEMP"
+    archive_root = root / "A-Archive"
+    temporary_root.mkdir(parents=True, exist_ok=True)
+    archive_root.mkdir(parents=True, exist_ok=True)
+    retained_names = {PACKAGE_NAME, GUIDE_NAME, installer_path.name}
+    before = list(temporary_root.iterdir())
+    package_path = installer_path.parent / PACKAGE_NAME
+    guide_path = installer_path.parent / GUIDE_NAME
+    require(package_path.is_file(), f"Transfer ZIP is missing beside the installer: {PACKAGE_NAME}")
+    require(guide_path.is_file(), f"Current START_HERE is missing beside the installer: {GUIDE_NAME}")
+    require(installer_path.parent.resolve() == temporary_root.resolve(), "Installer must run from U-UDP003/04_TEMP.")
+
+    archive_destination = unique_archive_directory(archive_root, "U3M9D_PREPARE") / "04_TEMP_PREVIOUS"
+    archived = 0
+    old_guides = 0
+    old_zips = 0
+    old_prepared = 0
+    for path in before:
+        if path.name in retained_names:
+            continue
+        name_upper = path.name.upper()
+        old_guides += int("START_HERE" in name_upper)
+        old_zips += int(path.suffix.lower() == ".zip")
+        old_prepared += int(path.is_dir() and "PREPARED" in name_upper)
+        destination = archive_destination / path.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(path), str(destination))
+        archived += 1
+
+    retained = [path for path in temporary_root.iterdir() if path.name in retained_names]
+    unexpected = [path for path in temporary_root.iterdir() if path.name not in retained_names]
+    require(not unexpected, "Unexpected artifact remains after TEMP convergence.")
+    return {
+        "Before": len(before),
+        "Archived": archived,
+        "Retained": len(retained),
+        "OldGuides": old_guides,
+        "OldZips": old_zips,
+        "OldPrepared": old_prepared,
+        "Unexpected": len(unexpected),
+    }
+
+
+def verify_manifest(package_root: Path) -> int:
+    manifest_path = package_root / "PACKAGE_SHA256.csv"
+    require(manifest_path.is_file(), "PACKAGE_SHA256.csv is missing.")
+    with manifest_path.open("r", encoding="utf-8", newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    require(bool(rows), "PACKAGE_SHA256.csv is empty.")
+    expected: set[str] = set()
+    for row in rows:
+        relative = str(row.get("RelativePath", "")).replace("\\", "/")
+        digest = str(row.get("SHA256", ""))
+        require(relative and digest, "PACKAGE_SHA256.csv contains an incomplete row.")
+        artifact = package_root / relative
+        require(artifact.is_file(), f"Package artifact is missing: {relative}")
+        require(sha256_file(artifact) == digest, f"Package hash differs: {relative}")
+        expected.add(relative)
+    actual = {
+        path.relative_to(package_root).as_posix()
+        for path in package_root.rglob("*")
+        if path.is_file() and path.name != "PACKAGE_SHA256.csv"
+    }
+    require(actual == expected, "Package inventory differs from PACKAGE_SHA256.csv.")
+    return len(rows)
+
+
+def installed_foundation(root: Path) -> tuple[Path, ...]:
+    return (
+        root / "01_PROGRAMS" / "u003_module_runtime_v0_2.py",
+        root / "01_PROGRAMS" / "u003_module_executor_v0_3.py",
+        root / "01_PROGRAMS" / "u003_module_action_gui_v0_2.py",
+        root / "01_PROGRAMS" / "u003_live_review_context_v0_1.py",
+    )
+
+
+def prepare(root: Path, installer_path: Path) -> int:
+    temporary_root = root / "04_TEMP"
+    archive_root = root / "A-Archive"
+    print(f"[CHECK] U003 root: {root}")
+    print("[WHY] All installation and cleanup decisions must use the company U-UDP003 topology.")
+    print(f"[CHECK] Current installer: {installer_path.name} SHA256={sha256_file(installer_path)}")
+    print("[WHY] The active installer identity is printed before any TEMP movement.")
+    package_path = installer_path.parent / PACKAGE_NAME
+    guide_path = installer_path.parent / GUIDE_NAME
+    print(f"[CHECK] Transfer ZIP: {package_path.name} SHA256={sha256_file(package_path) if package_path.is_file() else 'MISSING'}")
+    print(f"[CHECK] START_HERE: {guide_path.name} SHA256={sha256_file(guide_path) if guide_path.is_file() else 'MISSING'}")
+    print("[WHY] ZIP, installer and guide are the only active transfer files retained in 04_TEMP.")
+
+    cleanup = converge_temp(root, installer_path)
+    print(
+        "[TEMP] "
+        f"before={cleanup['Before']} archived={cleanup['Archived']} retained={cleanup['Retained']} "
+        f"old_guides={cleanup['OldGuides']} old_zips={cleanup['OldZips']} "
+        f"old_prepared={cleanup['OldPrepared']} unexpected={cleanup['Unexpected']}"
+    )
+    print("[WHY] Old START_HERE, ZIP, installer, PREPARED and loose TEMP evidence are archived, never deleted.")
+
+    prepared = temporary_root / PREPARED_NAME
+    require(not prepared.exists(), "Prepared directory unexpectedly exists after convergence.")
+    prepared.mkdir(parents=True)
+    with zipfile.ZipFile(package_path, "r") as archive:
+        archive.extractall(prepared)
+    manifest_count = verify_manifest(prepared)
+
+    module = prepared / "02_MODULES" / "EXPORT" / MODULE_ID / MODULE_VERSION
+    required_package = (
+        prepared / "01_PROGRAMS" / CORE_NAME,
+        prepared / "01_PROGRAMS" / GATE_NAME,
+        module / "implementation.py",
+        module / "module_manifest.json",
+        module / "algorithm_card.json",
+        prepared / "03_DOCUMENTS" / REPORT_NAME,
+    )
+    for path in required_package:
+        print(f"[CHECK] Prepared artifact: {path.relative_to(prepared)}")
+        require(path.is_file(), f"Prepared artifact is missing: {path.name}")
+    print("[WHY] Core, Module, manifest, Algorithm Card, gate and report form one governed repair release.")
+
+    foundation = installed_foundation(root)
+    for path in foundation:
+        print(f"[CHECK] Installed dependency: {path.relative_to(root)}")
+        require(path.is_file(), f"Installed U003 dependency is missing: {path.name}")
+    print("[WHY] The repair extends the accepted U003 runtime; it does not create a parallel workbench.")
+    print(
+        f"U3M9DP N-B{cleanup['Before']}-A{cleanup['Archived']}-K{cleanup['Retained']}-"
+        f"F{manifest_count}-D{len(foundation)}-X0 C-0"
+    )
+    return 0
+
+
+def run_child(command: list[str], environment: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        text=True,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=240,
+        check=False,
+        env=environment,
+    )
+
+
+def prepared_root(root: Path) -> Path:
+    return root / "04_TEMP" / PREPARED_NAME
+
+
+def prepared_module(root: Path) -> Path:
+    return prepared_root(root) / "02_MODULES" / "EXPORT" / MODULE_ID / MODULE_VERSION
+
+
+def self_test(root: Path) -> int:
+    prepared = prepared_root(root)
+    core = prepared / "01_PROGRAMS" / CORE_NAME
+    implementation = prepared_module(root) / "implementation.py"
+    require(core.is_file() and implementation.is_file(), "Prepared release is missing. Run --prepare first.")
+
+    core_result = run_child([sys.executable, str(core), "--self-test"])
+    if core_result.stdout:
+        print(core_result.stdout.strip())
+    if core_result.stderr:
+        print(core_result.stderr.strip())
+    require(core_result.returncode == 0, "U3M9D core self-test failed.")
+    require(CORE_SELFTEST_CAPSULE in core_result.stdout, "Expected core self-test capsule is missing.")
+
+    environment = dict(os.environ)
+    environment["U003_EDITABLE_XLSX_CORE_PATH"] = str(core)
+    module_result = run_child([sys.executable, str(implementation), "--self-test"], environment)
+    if module_result.stdout:
+        print(module_result.stdout.strip())
+    if module_result.stderr:
+        print(module_result.stderr.strip())
+    require(module_result.returncode == 0, "U3M9D Module self-test failed.")
+    require(MODULE_SELFTEST_CAPSULE in module_result.stdout, "Expected Module self-test capsule is missing.")
+    return 0
+
+
+def promote_file(source: Path, destination: Path, archive_root: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        archive_existing(destination, archive_root, "U3M9D_REPLACED_PAYLOAD")
+    shutil.copy2(source, destination)
+    require(sha256_file(source) == sha256_file(destination), f"Promoted file hash differs: {destination.name}")
+
+
+def execute(root: Path) -> int:
+    prepared = prepared_root(root)
+    module = prepared_module(root)
+    core = prepared / "01_PROGRAMS" / CORE_NAME
+    gate = prepared / "01_PROGRAMS" / GATE_NAME
+    report = prepared / "03_DOCUMENTS" / REPORT_NAME
+    for path in (core, gate, report, module / "implementation.py", module / "module_manifest.json", module / "algorithm_card.json"):
+        require(path.is_file(), f"Prepared artifact is missing: {path.name}")
+
+    gate_result = run_child(
+        [
+            sys.executable,
+            str(gate),
+            "--root",
+            str(root),
+            "--module-dir",
+            str(module),
+            "--core",
+            str(core),
+        ]
+    )
+    if gate_result.stdout:
+        print(gate_result.stdout.strip())
+    if gate_result.stderr:
+        print(gate_result.stderr.strip())
+    require(gate_result.returncode == 0, "U3M9D independent acceptance gate failed.")
+    require("U3M9DG1 " in gate_result.stdout and " C-0" in gate_result.stdout, "Gate pass capsule is missing.")
+
+    archive_root = root / "A-Archive"
+    destination_module = root / "02_MODULES" / "EXPORT" / MODULE_ID / MODULE_VERSION
+    archive_existing(destination_module, archive_root, "U3M9D_REPLACED_MODULE")
+    destination_module.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(module, destination_module)
+    for name in ("implementation.py", "module_manifest.json", "algorithm_card.json"):
+        require(sha256_file(module / name) == sha256_file(destination_module / name), f"Promoted Module hash differs: {name}")
+    promote_file(core, root / "01_PROGRAMS" / CORE_NAME, archive_root)
+    promote_file(gate, root / "01_PROGRAMS" / GATE_NAME, archive_root)
+    promote_file(report, root / "03_DOCUMENTS" / REPORT_NAME, archive_root)
+    print("U3M9DI N-P6-S2-G1-R1-X0 C-0")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--prepare", action="store_true")
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--execute", action="store_true")
+    parser.add_argument("--root", type=Path)
+    arguments = parser.parse_args()
+    root = discover_udp003_root(arguments.root)
+    if arguments.prepare:
+        return prepare(root, Path(__file__).resolve())
+    if arguments.self_test:
+        return self_test(root)
+    return execute(root)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as error:
+        print(f"U3M9DIE K-{type(error).__name__.upper()} D-{error} X1 C-7")
+        raise SystemExit(7)
