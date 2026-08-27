@@ -13,18 +13,19 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 
-PACKAGE_NAME = "UDP003_U3M8_FRAME_MASK_v0_2_1.zip"
+PACKAGE_NAME = "UDP003_U3M8_FRAME_MASK_v0_3.zip"
 PAYLOADS = {
     "01_PROGRAMS/u003_module_action_gui_v0_1.py",
-    "01_PROGRAMS/u003_u3m8_frame_mask_acceptance_gate_v0_2.py",
-    "02_MODULES/EVIDENCE_VIEW/CameraRadar.U003.FrameMask/0.2.0/algorithm_card.json",
-    "02_MODULES/EVIDENCE_VIEW/CameraRadar.U003.FrameMask/0.2.0/implementation.py",
-    "02_MODULES/EVIDENCE_VIEW/CameraRadar.U003.FrameMask/0.2.0/module_manifest.json",
-    "03_DOCUMENTS/U3M8_node_report_frame_privacy_mask_v0_2_2026-08-27.txt",
+    "01_PROGRAMS/u003_u3m8_frame_mask_acceptance_gate_v0_3.py",
+    "02_MODULES/EVIDENCE_VIEW/CameraRadar.U003.FrameMask/0.3.0/algorithm_card.json",
+    "02_MODULES/EVIDENCE_VIEW/CameraRadar.U003.FrameMask/0.3.0/implementation.py",
+    "02_MODULES/EVIDENCE_VIEW/CameraRadar.U003.FrameMask/0.3.0/module_manifest.json",
+    "03_DOCUMENTS/U3M8_node_report_frame_privacy_mask_v0_3_2026-08-27.txt",
 }
 REQUIRED_MEMBERS = PAYLOADS | {"PACKAGE_SHA256.csv"}
-SUPERSEDED_MODULE_RELATIVE = Path(
-    "02_MODULES/EVIDENCE_VIEW/CameraRadar.U003.FrameMask/0.1.0"
+SUPERSEDED_MODULE_RELATIVES = (
+    Path("02_MODULES/EVIDENCE_VIEW/CameraRadar.U003.FrameMask/0.1.0"),
+    Path("02_MODULES/EVIDENCE_VIEW/CameraRadar.U003.FrameMask/0.2.0"),
 )
 
 
@@ -151,12 +152,14 @@ def backup_replaced(root: Path) -> tuple[Path | None, int]:
 
 
 def archive_superseded_module(root: Path) -> tuple[Path | None, int]:
-    source = root / SUPERSEDED_MODULE_RELATIVE
-    if not source.is_dir():
+    sources = [root / relative for relative in SUPERSEDED_MODULE_RELATIVES]
+    sources = [source for source in sources if source.is_dir()]
+    if not sources:
         return None, 0
     archive_root = next_archive_root(root, "U3M8_SUPERSEDED_MODULE")
-    move_preserving_root(source, root, archive_root)
-    return archive_root, 1
+    for source in sources:
+        move_preserving_root(source, root, archive_root)
+    return archive_root, len(sources)
 
 
 def install(package_path: Path, root: Path, installer_path: Path) -> int:
