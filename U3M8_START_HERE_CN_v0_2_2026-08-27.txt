@@ -13,7 +13,7 @@ U3M8：Frame Privacy Mask Module
 把以下3个文件直接放入：
 C-CODE\U-UDP003\04_TEMP
 
-1. UDP003_U3M8_FRAME_MASK_v0_2.zip
+1. UDP003_U3M8_FRAME_MASK_v0_2_1.zip
 2. u003_u3m8_frame_mask_installer_v0_2.py.txt
 3. U3M8_START_HERE_CN_v0_2_2026-08-27.txt
 
@@ -22,7 +22,7 @@ C-CODE\U-UDP003\04_TEMP
 打开CMD并进入C-CODE根目录，只执行下面3行。
 
 1. Prepare、清理旧U3M8临时项、校验并安装：
-python U-UDP003\04_TEMP\u003_u3m8_frame_mask_installer_v0_2.py.txt --prepare --root U-UDP003 --package U-UDP003\04_TEMP\UDP003_U3M8_FRAME_MASK_v0_2.zip
+python U-UDP003\04_TEMP\u003_u3m8_frame_mask_installer_v0_2.py.txt --prepare --root U-UDP003 --package U-UDP003\04_TEMP\UDP003_U3M8_FRAME_MASK_v0_2_1.zip
 
 2. 无界面验收Module、Profile和像素遮罩：
 python U-UDP003\01_PROGRAMS\u003_u3m8_frame_mask_acceptance_gate_v0_2.py --root U-UDP003
@@ -47,7 +47,7 @@ python U-UDP003\01_PROGRAMS\u003_evidence_review_workbench_v0_19.py
 回传
 ----
 第2步成功时回传：
-U3M8G N-M1-A1-R1-P1-T37-X0 C-0
+U3M8G N-M1-A1-R1-P1-T38-X0 C-0
 
 人工界面也成功时额外回传：
 U3M8V2-ZOOM1-PREVIEW1-OUT1-PAIR1-RELOAD1-C0

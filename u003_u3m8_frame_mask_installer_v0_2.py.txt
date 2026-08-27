@@ -13,8 +13,9 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 
-PACKAGE_NAME = "UDP003_U3M8_FRAME_MASK_v0_2.zip"
+PACKAGE_NAME = "UDP003_U3M8_FRAME_MASK_v0_2_1.zip"
 PAYLOADS = {
+    "01_PROGRAMS/u003_module_action_gui_v0_1.py",
     "01_PROGRAMS/u003_u3m8_frame_mask_acceptance_gate_v0_2.py",
     "02_MODULES/EVIDENCE_VIEW/CameraRadar.U003.FrameMask/0.2.0/algorithm_card.json",
     "02_MODULES/EVIDENCE_VIEW/CameraRadar.U003.FrameMask/0.2.0/implementation.py",
