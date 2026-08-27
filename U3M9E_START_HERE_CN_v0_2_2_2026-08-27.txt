@@ -1,0 +1,36 @@
+U3M9E XLSX Action GUI修复 v0.2.2
+公司电脑执行指南
+
+目的
+
+修复启动Editable XLSX Chart Export时，Output区域在创建前被引用，导致
+UnboundLocalError: output_box的问题。
+
+本次同时增加两层回归保护：
+- Module自测检查Output容器定义和首次引用的源码顺序；
+- 独立Gate再次检查同一顺序，防止错误版本被安装。
+
+把本次3个文件直接放入：
+C-CODE\U-UDP003\04_TEMP
+
+从C-CODE目录使用CMD运行以下三行；不要自行解压ZIP：
+
+python U-UDP003\04_TEMP\u003_u3m9e_xlsx_action_gui_repair_installer_v0_2_2.py.txt --prepare
+python U-UDP003\04_TEMP\u003_u3m9e_xlsx_action_gui_repair_installer_v0_2_2.py.txt --self-test
+python U-UDP003\04_TEMP\u003_u3m9e_xlsx_action_gui_repair_installer_v0_2_2.py.txt --execute
+
+成功后
+
+1. 正常启动U003。
+2. 在Module Manager选择Editable XLSX Chart Export v0.2.2。
+3. 打开Module Actions并启动Export Editable XLSX Charts。
+4. 确认Action窗口正常出现，Output区域内可见：
+   - 输出目录
+   - Optional filename
+   - Open folder after export
+   - Excel table style
+5. 继续按U3M9D视觉验收项目导出XLSX。
+
+若窗口成功启动，不需要回传Self-test；继续回传最终视觉验收码即可：
+
+U3M9EV-P1-T1-G1-X1-K1-Y1-D1-C0
