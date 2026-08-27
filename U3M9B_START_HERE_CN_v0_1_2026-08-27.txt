@@ -1,0 +1,90 @@
+U3M9B 可编辑 XLSX 导出核心——公司环境执行指南
+
+目标
+
+本节点只验证非 GUI 导出核心：
+Review Data + Live Review Context + Chart Profile
+-> 复制指定区间数据
+-> 生成原生、可编辑的 Excel 图表
+-> 保存范围、Peak、Profile 和输入 Hash 追溯信息。
+
+本节点不使用公司真实数据，不修改 U003 GUI，也不进入 U3M9C。
+
+
+一、放置文件
+
+请把以下两个下载文件放到：
+
+C-CODE\U-UDP003\04_TEMP
+
+1. UDP003_U3M9B_EDITABLE_XLSX_EXPORT_CORE_v0_1.zip
+2. u003_u3m9b_export_core_installer_v0_1.py.txt
+
+执行指南可放在任意位置阅读。
+
+
+二、执行位置
+
+打开 CMD，进入 C-CODE 根目录。不要在 ZIP 内、04_TEMP 子目录或
+PowerShell 中执行。
+
+
+三、只执行以下三条命令
+
+1. Prepare
+
+python U-UDP003\04_TEMP\u003_u3m9b_export_core_installer_v0_1.py.txt --prepare
+
+Prepare 会自动归档旧 U3M9B_PREPARED、展开新包、核对清单和 SHA256，
+并逐项显示“检查什么、为什么检查”。成功结尾：
+
+U3M9BP ... C-0
+
+
+2. Self-test
+
+python U-UDP003\04_TEMP\u003_u3m9b_export_core_installer_v0_1.py.txt --self-test
+
+成功结尾：
+
+U3M9B-SELFTEST-PASS-26 C-0
+
+
+3. Execute + independent gate + promotion
+
+python U-UDP003\04_TEMP\u003_u3m9b_export_core_installer_v0_1.py.txt --execute
+
+这一步使用合成 Review Data 生成一份真实 XLSX，重新打开并检查：
+
+- Event 区间为 41480–41490；
+- 11 行数据；
+- 2 个 Radar 空白值没有变成 0；
+- Peak 为 41485；
+- 存在 1 个原生 Excel 图表对象；
+- 不存在外部链接；
+- Trace 中范围和 Peak 正确。
+
+通过后，精确 Core、Profile Contract、Sample Profile 和 Node Report 会被
+提升到 U-UDP003 正式目录。成功最后两行类似：
+
+U3M9BG1 ... C-0
+U3M9BI1 ... C-0
+
+
+四、需要回传
+
+成功时只回传 Execute 的最后两行：
+
+U3M9BG1 ... C-0
+U3M9BI1 ... C-0
+
+Self-test 已通过时不用另行手敲。
+
+如果出现 C-7，只回传完整错误行，不要让其他工具自行修改 Core、Gate、
+Profile 或 Installer。
+
+
+五、环境说明
+
+U3M9B 使用 openpyxl 创建原生 Excel 图表。如果报错明确指出 openpyxl
+不可用，请原样回传；这属于打包运行库问题，不是算法或 Profile 问题。
