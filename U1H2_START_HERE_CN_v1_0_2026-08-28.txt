@@ -1,0 +1,73 @@
+U1H2 MATLAB CAN CSV + DBC Input Adapter 执行指南
+版本：v1.0
+
+目标：
+在已经通过验收的 U1H1 Adapter 基础层上，安装第一个真实输入适配器：
+
+  MATLAB-format Raw CAN CSV + Channel DBC
+  -> Canonical Real Source Update Stream
+
+本节点仍不会替换旧 U001，也不会读取公司的真实 CAN 数据。安装器只运行
+自带的合成数据与独立验收夹具。
+
+H2 做什么：
+
+- 自动识别 CSV 编码、分隔符和 CAN byte header；
+- 识别 ID221_2_8_0 形式的 CAN ID、Channel、DLC 和 byte index；
+- 根据对应 Channel 的 DBC 解码 raw code 和 physical value；
+- 保持原始 SourceRowIndex 顺序，仅输出真实 message update；
+- 区分空白无更新、残缺 message、非法 byte 和 signal decode failure；
+- 输出 H1 规定的五个 canonical source artifacts。
+
+H2 明确不做什么：
+
+- 不排序；
+- 不 forward fill；
+- 不把空值填 0；
+- 不把 FrameCount 传播给其他信号；
+- 不处理 327.66 等业务无效值；
+- 不做 Camera 目标融合或异常分析。
+
+TEMP 管理：
+
+- prepare 会把上一个 H1 prepared 目录、H1 中转文件和旧 H2 prepared
+  自动迁入 A-Archive，不删除；
+- 当前准备区固定为 04_TEMP\U001H_ACTIVE\U1H2_PREPARED；
+- 不需要人工寻找依赖文件；缺少 H1 基础层时会 fail closed。
+
+放置位置：
+
+请把以下两个文件放入：
+
+  C-CODE\U-UDP001\04_TEMP
+
+文件：
+
+  u001_u1h2_matlab_can_dbc_adapter_installer_v1_0.py.txt
+  UDP001_U1H2_MATLAB_CAN_DBC_ADAPTER_v1_0.zip
+
+在 CMD 中进入 C-CODE 根目录，仅执行以下三行：
+
+python U-UDP001\04_TEMP\u001_u1h2_matlab_can_dbc_adapter_installer_v1_0.py.txt --prepare
+python U-UDP001\04_TEMP\u001_u1h2_matlab_can_dbc_adapter_installer_v1_0.py.txt --self-test
+python U-UDP001\04_TEMP\u001_u1h2_matlab_can_dbc_adapter_installer_v1_0.py.txt --execute
+
+成功时最后一行：
+
+  U1H2-N2-F2-Q2-A6-X0-C0
+
+字段：
+
+  N = Registry 中 Adapter version 数（Foundation fixture + H2）
+  F = Adapter family 数
+  Q = 两层验收（H1 generic conformance + H2 independent acceptance）
+  A = 本节点安装文件数
+  X = blocking error 数
+  C = completion code
+
+只需回传最后一行。Self-test 明细无需手工输入。
+
+安装通过后的下一步：
+
+进入 U1H3，建立 FrameCount assignment 与 signal semantic policy。此时才会
+开始定义 FrameCount 如何传播，以及 327.66、0、状态 flag 等怎样按信号处理。
