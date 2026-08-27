@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 
-PACKAGE_NAME = "UDP003_U3M7_ACTION_INTERFACE_v0_1.zip"
+PACKAGE_NAME = "UDP003_U3M7_ACTION_INTERFACE_v0_1_1.zip"
 PROGRAMS = {
     "01_PROGRAMS/u003_evidence_review_workbench_v0_19.py",
     "01_PROGRAMS/u003_gui_shell_v0_6.py",

@@ -11,7 +11,7 @@ U3M7：Interactive Module Action Interface
 请把以下3个文件直接放入：
 C-CODE\U-UDP003\04_TEMP
 
-1. UDP003_U3M7_ACTION_INTERFACE_v0_1.zip
+1. UDP003_U3M7_ACTION_INTERFACE_v0_1_1.zip
 2. u003_u3m7_action_interface_installer_v0_1.py.txt
 3. U3M7_START_HERE_CN_v0_1_2026-08-27.txt
 
@@ -20,7 +20,7 @@ C-CODE\U-UDP003\04_TEMP
 打开CMD，进入C-CODE根目录。仅执行下面3行。
 
 1. Prepare、清理旧U3M7临时项、校验哈希并安装：
-python U-UDP003\04_TEMP\u003_u3m7_action_interface_installer_v0_1.py.txt --prepare --root U-UDP003 --package U-UDP003\04_TEMP\UDP003_U3M7_ACTION_INTERFACE_v0_1.zip
+python U-UDP003\04_TEMP\u003_u3m7_action_interface_installer_v0_1.py.txt --prepare --root U-UDP003 --package U-UDP003\04_TEMP\UDP003_U3M7_ACTION_INTERFACE_v0_1_1.zip
 
 2. 独立验收已安装的接口、参考Action及真实artifact：
 python U-UDP003\01_PROGRAMS\u003_u3m7_action_interface_acceptance_gate_v0_1.py --package-root U-UDP003
@@ -39,7 +39,7 @@ python U-UDP003\01_PROGRAMS\u003_evidence_review_workbench_v0_19.py
 需要回传
 --------
 只需回传第2步最后一行，例如：
-U3M7G N-R0.2-E0.3-P0.2-C0.3-G0.6-W0.19-T42-X0 C-0
+U3M7G N-R0.2-E0.3-P0.2-C0.3-G0.6-W0.19-T44-X0 C-0
 
 如果第1步失败，回传U3M7PE整行；如果第2步失败，回传U3M7GE整行。
 
