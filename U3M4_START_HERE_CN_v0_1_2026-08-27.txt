@@ -1,0 +1,75 @@
+U003 / U3M4 可视化 Module Manager 执行指南
+日期：2026-08-27
+
+本步骤做什么
+------------
+U3M4为U003加入独立的可视化Module Manager，用于：
+
+  按ModuleId折叠显示可用Module；
+  选择某个Module的明确版本；
+  把Module加入或替换进当前Plan；
+  只在同一Slot内调整运行顺序，禁止跨Slot移动；
+  以可读界面查看Algorithm Card，而不是直接打开JSON；
+  保存、打开、清空Module Plan；
+  显示英文或日文Module说明，日文缺失时自动回退英文。
+
+U3M4只负责“制定Plan”，不执行Module。默认Plan为空，因此不会静默改变现有U003
+复核行为。实际Module执行将在U3M5接入。
+
+Prepare阶段
+-----------
+Prepare会验证U3M1、U3M2和U3M3B的4个关键前置程序SHA-256；验证ZIP中6个
+payload；自动把U3M1-U3M3B的旧中转文件、旧PREPARED目录及上一次
+U3M4_PREPARED移动到U-UDP003\A-Archive；然后安装U003 v0.15。
+
+下载位置
+--------
+把以下三个文件下载到：
+
+  C-CODE\U-UDP003\04_TEMP
+
+  UDP003_U3M4_VISUAL_MODULE_MANAGER_v0_1.zip
+  u003_u3m4_visual_module_manager_installer_v0_1.py.txt
+  U3M4_START_HERE_CN_v0_1_2026-08-27.txt
+
+ZIP无需手动解压。
+
+执行
+----
+使用CMD进入C-CODE根目录，只执行以下三行：
+
+  python U-UDP003\04_TEMP\u003_u3m4_visual_module_manager_installer_v0_1.py.txt --prepare
+  python U-UDP003\01_PROGRAMS\u003_u3m4_acceptance_gate_v0_1.py --self-test
+  python U-UDP003\01_PROGRAMS\u003_u3m4_acceptance_gate_v0_1.py --accept --open-gui
+
+三行的意义
+----------
+第1行：清理旧TEMP、校验前置版本与6个payload，并安装U003 v0.15。
+第2行：无界面执行112项回归和Module Plan检查；成功无需回传。
+第3行：显示检查结果，打开U003 v0.15，并自动打开Module Manager子窗口。
+
+人工确认
+--------
+确认以下项目后，正常关闭主U003窗口：
+
+  1. 主窗口标题包含“U003 Evidence Review Workbench v0.15”；
+  2. Module Manager自动打开；
+  3. Available Modules中显示2个Module family；
+  4. 选择Module后可以查看Version和Algorithm Card；
+  5. Add / Replace后，主窗口按钮显示Modules (1)；
+  6. Load Recommended需要人工点击，程序启动时Plan保持为空；
+  7. Module Manager中没有Run或Execute Module按钮。
+
+回传
+----
+关闭GUI后，只回传最后一行，并把G0人工改为G1：
+
+  U3M4 N-L1-G1-P1-M2-V2-R1-S1-T112-X0 C-0
+
+失败时回传完整U3M4PE或U3M4错误行。
+
+现实意义
+--------
+U3M4把“安装了哪些分析/复核能力、使用哪个版本、按照什么顺序”从隐藏配置变成
+工程师可见且可保存的Plan。它为U3M5接入真实Module执行建立了可追溯入口，同时
+保持现有U003视频与CAN复核功能不受影响。
