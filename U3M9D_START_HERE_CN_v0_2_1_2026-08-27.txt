@@ -1,10 +1,13 @@
-U3M9D XLSX视觉修补 v0.2
+U3M9D XLSX视觉修补 v0.2.1
 公司电脑执行指南
 
 目的
 
 本节点修复：Windows路径超过259字符、默认误选机器字段、图例位置、
 FrameCount轴标签、Peak横线、Y轴名称/单位及Source Data表格样式。
+
+v0.2.1同时修复v0.2第34项自测依赖操作系统临时目录长度的问题。
+该修复不改变XLSX算法，只让路径压缩边界测试在Windows和macOS保持一致。
 
 重要说明
 
@@ -17,15 +20,15 @@ FrameCount轴标签、Peak横线、Y轴名称/单位及Source Data表格样式�
 
 3. 请从C-CODE目录使用CMD运行以下三行；不要自行解压ZIP。
 
-python U-UDP003\04_TEMP\u003_u3m9d_xlsx_visual_repair_installer_v0_2.py.txt --prepare
-python U-UDP003\04_TEMP\u003_u3m9d_xlsx_visual_repair_installer_v0_2.py.txt --self-test
-python U-UDP003\04_TEMP\u003_u3m9d_xlsx_visual_repair_installer_v0_2.py.txt --execute
+python U-UDP003\04_TEMP\u003_u3m9d_xlsx_visual_repair_installer_v0_2_1.py.txt --prepare
+python U-UDP003\04_TEMP\u003_u3m9d_xlsx_visual_repair_installer_v0_2_1.py.txt --self-test
+python U-UDP003\04_TEMP\u003_u3m9d_xlsx_visual_repair_installer_v0_2_1.py.txt --execute
 
 成功后
 
 1. 正常启动U003。
 2. 在Module Manager中选择：
-   Editable XLSX Chart Export v0.2.0
+   Editable XLSX Chart Export v0.2.1
 3. 进入Module Actions并打开该Action。
 4. 不主动添加字段，确认默认Series不含：
    ActiveCandidateIds

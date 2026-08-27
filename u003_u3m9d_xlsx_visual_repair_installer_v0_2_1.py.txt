@@ -15,14 +15,14 @@ from datetime import datetime
 from pathlib import Path
 
 
-PACKAGE_NAME = "UDP003_U3M9D_XLSX_VISUAL_REPAIR_v0_2.zip"
-GUIDE_NAME = "U3M9D_START_HERE_CN_v0_2_2026-08-27.txt"
+PACKAGE_NAME = "UDP003_U3M9D_XLSX_VISUAL_REPAIR_v0_2_1.zip"
+GUIDE_NAME = "U3M9D_START_HERE_CN_v0_2_1_2026-08-27.txt"
 PREPARED_NAME = "U3M9D_PREPARED"
 MODULE_ID = "CameraRadar.U003.EditableXlsxCharts"
-MODULE_VERSION = "0.2.0"
-CORE_NAME = "u003_editable_xlsx_export_core_v0_2.py"
-GATE_NAME = "u003_u3m9d_xlsx_visual_repair_acceptance_gate_v0_2.py"
-REPORT_NAME = "U3M9D_node_report_xlsx_visual_repair_v0_2_2026-08-27.txt"
+MODULE_VERSION = "0.2.1"
+CORE_NAME = "u003_editable_xlsx_export_core_v0_2_1.py"
+GATE_NAME = "u003_u3m9d_xlsx_visual_repair_acceptance_gate_v0_2_1.py"
+REPORT_NAME = "U3M9D_node_report_xlsx_visual_repair_v0_2_1_2026-08-27.txt"
 CORE_SELFTEST_CAPSULE = "U3M9D-CORE-SELFTEST-PASS-35 C-0"
 MODULE_SELFTEST_CAPSULE = "U3M9D-SELFTEST-PASS-26 C-0"
 
@@ -243,7 +243,8 @@ def self_test(root: Path) -> int:
         print(core_result.stdout.strip())
     if core_result.stderr:
         print(core_result.stderr.strip())
-    require(core_result.returncode == 0, "U3M9D core self-test failed.")
+    core_failure = (core_result.stderr or core_result.stdout or "NO_CHILD_OUTPUT").strip().splitlines()[-1]
+    require(core_result.returncode == 0, f"U3M9D core self-test failed: {core_failure}")
     require(CORE_SELFTEST_CAPSULE in core_result.stdout, "Expected core self-test capsule is missing.")
 
     environment = dict(os.environ)
@@ -253,7 +254,8 @@ def self_test(root: Path) -> int:
         print(module_result.stdout.strip())
     if module_result.stderr:
         print(module_result.stderr.strip())
-    require(module_result.returncode == 0, "U3M9D Module self-test failed.")
+    module_failure = (module_result.stderr or module_result.stdout or "NO_CHILD_OUTPUT").strip().splitlines()[-1]
+    require(module_result.returncode == 0, f"U3M9D Module self-test failed: {module_failure}")
     require(MODULE_SELFTEST_CAPSULE in module_result.stdout, "Expected Module self-test capsule is missing.")
     return 0
 
