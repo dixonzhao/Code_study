@@ -1,0 +1,61 @@
+U003 / U3M5 受控Module执行桥执行指南
+日期：2026-08-27
+
+本步骤做什么
+------------
+U3M4A已经能够选择Module、固定版本、保存Plan并阅读Algorithm Card，但Module
+尚未参与Review。U3M5把这条边界接通：工程师明确选中的PROCESS Module，会在
+Event被选中时读取受控候选字段，生成可编辑的ReviewMemo辅助文字。
+
+安全边界
+--------
+1. 初始仍然不选择任何Module；未选择Module时，U003原有行为保持不变。
+2. Module只能读取Event来源字段及EventID、Start、Peak、End、ReviewCode和Memo。
+3. Module不得修改EventID、Frame范围、ReviewResult或U002来源证据。
+4. Module不得宣称Root Cause；输出只能作为工程师可编辑、可删除的Review辅助。
+5. 同一Run、Event、Module版本、语言与输入条件只执行一次，返回Event时使用缓存，
+   不会反复启动子进程或重复追加Memo。
+6. 每次真实执行保存request、result、stdout、stderr和module_trace.json。
+
+本次自动Golden验证
+------------------
+Acceptance Gate会使用已安装的Sample Review Memo Draft Module，自动验证：
+
+  无Module路径不执行任何子程序；
+  选中PROCESS Module后产生一条Memo；
+  第二次访问同一Event命中缓存且不重复Memo；
+  EN和JA文字随Session语言输出；
+  Event、Peak、ReviewResult和来源证据保持不变；
+  U002到U003的启动接口保持兼容。
+
+下载位置
+--------
+把以下三个文件下载到 C-CODE\U-UDP003\04_TEMP，ZIP无需解压：
+
+  UDP003_U3M5_MODULE_EXECUTION_v0_1.zip
+  u003_u3m5_module_execution_installer_v0_1.py.txt
+  U3M5_START_HERE_CN_v0_1_2026-08-27.txt
+
+执行
+----
+使用CMD进入C-CODE根目录，只执行以下三行：
+
+  python U-UDP003\04_TEMP\u003_u3m5_module_execution_installer_v0_1.py.txt --prepare
+  python U-UDP003\01_PROGRAMS\u003_u3m5_module_execution_acceptance_gate_v0_1.py --self-test
+  python U-UDP003\01_PROGRAMS\u003_u3m5_module_execution_acceptance_gate_v0_1.py --accept
+
+说明
+----
+Prepare会明确打印前置文件、ZIP内容、SHA-256和TEMP清理结果。Self-test与Accept
+都会在本机真实启动隔离Module子进程；不是只检查源代码字符串。
+
+本节点通过后，下一步再用真实U002 Handoff打开U003，选择Sample Review Memo Draft，
+完成一次可见的U002→U003 Module Golden Run。现在不要提前打包U003。
+
+回传
+----
+只回传最后一行：
+
+  U3M5 N-I30-R90-E16-A5-T141-X0 C-0
+
+失败时回传完整U3M5PE或U3M5E错误行。
