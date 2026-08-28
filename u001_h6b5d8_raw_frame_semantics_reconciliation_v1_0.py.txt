@@ -1,0 +1,489 @@
+#!/usr/bin/env python3
+"""Reconcile raw 0x620 byte-state semantics with the accepted legacy frame domain.
+
+This program is read-only with respect to case inputs and active U001 programs.
+It audits positional CSV cells directly so dictionary/header normalization cannot
+hide duplicate columns or invalid retained-buffer tokens.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import importlib.util
+import json
+import math
+import re
+import shutil
+import sys
+from collections import Counter
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+
+
+PROGRAM_ID = "U001_H6B5D8_RAW_FRAME_SEMANTICS_RECONCILIATION"
+PROGRAM_VERSION = "1.0"
+PREPARED_FOLDER = "U1H6B5D8_PREPARED"
+OUTPUT_FOLDER = "U1H6B5D8_OUTPUT"
+HISTORICAL_SOURCE_ROWS = 274_522
+HISTORICAL_FRAME_ROWS = 56_596
+HISTORICAL_APPROX_MIN = 3_000
+HISTORICAL_APPROX_MAX = 59_982
+
+
+class ReconciliationError(RuntimeError):
+    """Fail-closed diagnostic error."""
+
+
+@dataclass(frozen=True)
+class FrameDefinition:
+    channel: int
+    can_id: int
+    signal_name: str
+    signal: Any
+    byte_names: Tuple[str, ...]
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def write_json(path: Path, value: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def read_json(path: Path, label: str) -> Dict[str, Any]:
+    if not path.is_file():
+        raise ReconciliationError(label + "_NOT_FOUND")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        raise ReconciliationError(label + "_INVALID_JSON") from exc
+    if not isinstance(value, dict):
+        raise ReconciliationError(label + "_ROOT_NOT_OBJECT")
+    return value
+
+
+def resolve_root(argument: Optional[str]) -> Path:
+    if argument:
+        root = Path(argument).expanduser().resolve()
+    else:
+        cwd = Path.cwd().resolve()
+        root = cwd if cwd.name.casefold() == "u-udp001" else cwd / "U-UDP001"
+    if not root.is_dir():
+        raise ReconciliationError("U_UDP001_ROOT_NOT_FOUND")
+    return root
+
+
+def version_key(path: Path) -> Tuple[int, ...]:
+    values = re.findall(r"\d+", path.parent.name)
+    return tuple(int(value) for value in values) if values else (0,)
+
+
+def locate_adapter_core(root: Path) -> Path:
+    base = root / "01_PROGRAMS" / "adapters" / "CameraRadar.U001.MatlabCanCsvDbc"
+    candidates = list(base.glob("*/u001_matlab_can_csv_dbc_core_v1_0.py"))
+    if not candidates:
+        raise ReconciliationError("ADAPTER_CORE_NOT_FOUND")
+    return max(candidates, key=version_key)
+
+
+def load_module(path: Path) -> Any:
+    name = "u001_h6b5d8_adapter_core"
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ReconciliationError("ADAPTER_CORE_SPEC")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def required_paths(root: Path) -> Dict[str, Path]:
+    return {
+        "AdapterCore": locate_adapter_core(root),
+        "ControlledRequest": root / "04_TEMP" / "U1H6B3_OUTPUT" / "compiled_profile" / "u001_h2_controlled_request.json",
+        "D3Diagnostic": root / "04_TEMP" / "U1H6B5D3_OUTPUT" / "u001_h6b5d3_frame_key_path_diagnostic.json",
+        "D7Diagnostic": root / "04_TEMP" / "U1H6B5D7_OUTPUT" / "u001_h6b5d7_all_dbc_frame_candidates.json",
+    }
+
+
+def configured_inputs(request: Dict[str, Any]) -> Tuple[Path, Dict[int, Path]]:
+    source: Optional[Path] = None
+    dbcs: Dict[int, Path] = {}
+    inputs = request.get("Inputs")
+    if not isinstance(inputs, list):
+        raise ReconciliationError("REQUEST_INPUTS")
+    for item in inputs:
+        if not isinstance(item, dict):
+            continue
+        raw = item.get("Path", item.get("FilePath"))
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        path = Path(raw)
+        kind = str(item.get("Kind", "")).upper()
+        if kind == "MATLAB_CAN_CSV":
+            if source is not None:
+                raise ReconciliationError("MULTIPLE_RAW_SOURCES")
+            source = path
+        elif kind == "DBC_CHANNEL":
+            channel = int(item["Channel"])
+            if channel in dbcs:
+                raise ReconciliationError("DUPLICATE_DBC_CHANNEL")
+            dbcs[channel] = path
+    if source is None or not source.is_file():
+        raise ReconciliationError("RAW_SOURCE_NOT_FOUND")
+    if len(dbcs) < 2 or any(not path.is_file() for path in dbcs.values()):
+        raise ReconciliationError("DBC_INPUTS")
+    return source, dbcs
+
+
+def normalized_frame_name(value: str) -> bool:
+    token = re.sub(r"[^a-z0-9]", "", value.casefold())
+    return "frame" in token and ("count" in token or "counter" in token)
+
+
+def frame_definition(core: Any, source: Path, dbcs: Dict[int, Path]) -> Tuple[Any, FrameDefinition]:
+    text_format = core.detect_text_format(source)
+    groups = {(group.channel, group.can_id): group for group in core.discover_source_message_groups(text_format.columns)}
+    matches: List[FrameDefinition] = []
+    for channel, dbc_path in sorted(dbcs.items()):
+        parsed = core.parse_dbc(dbc_path, channel)
+        for message in parsed.messages:
+            group = groups.get((channel, message.can_id))
+            if group is None or not group.complete:
+                continue
+            for signal in message.signals:
+                if normalized_frame_name(signal.signal_name):
+                    matches.append(FrameDefinition(
+                        channel=channel,
+                        can_id=message.can_id,
+                        signal_name=signal.signal_name,
+                        signal=signal,
+                        byte_names=tuple(group.byte_columns_by_index[index] for index in range(group.dlc)),
+                    ))
+    if len(matches) != 1:
+        raise ReconciliationError(f"FRAME_DEFINITION_COUNT_{len(matches)}")
+    return text_format, matches[0]
+
+
+def header_and_positions(source: Path, text_format: Any, names: Sequence[str]) -> Tuple[List[str], List[int], Dict[str, List[int]]]:
+    with source.open("r", encoding=text_format.encoding, errors="replace", newline="") as stream:
+        for _ in range(text_format.header_row_index):
+            next(stream, None)
+        reader = csv.reader(stream, delimiter=text_format.delimiter)
+        header = next(reader, None)
+    if header is None:
+        raise ReconciliationError("SOURCE_HEADER")
+    header = [str(value).strip() for value in header]
+    occurrences: Dict[str, List[int]] = {}
+    for name in names:
+        positions = [index for index, candidate in enumerate(header) if candidate == name]
+        if not positions:
+            raise ReconciliationError("BYTE_COLUMN_NOT_FOUND_" + name)
+        occurrences[name] = positions
+    # DictReader keeps the last duplicate; audit that exact interpretation while exposing duplicates.
+    selected = [occurrences[name][-1] for name in names]
+    return header, selected, occurrences
+
+
+def source_rows(source: Path, text_format: Any, header: Sequence[str]) -> Iterator[List[str]]:
+    with source.open("r", encoding=text_format.encoding, errors="replace", newline="") as stream:
+        for _ in range(text_format.header_row_index):
+            next(stream, None)
+        reader = csv.reader(stream, delimiter=text_format.delimiter)
+        observed = next(reader, None)
+        if observed is None or [str(value).strip() for value in observed] != list(header):
+            raise ReconciliationError("SOURCE_HEADER_CHANGED")
+        for cells in reader:
+            if len(cells) < len(header):
+                cells.extend([""] * (len(header) - len(cells)))
+            yield cells
+
+
+def quantile(values: Sequence[int], fraction: float) -> int:
+    if not values:
+        return 0
+    ordered = sorted(values)
+    return ordered[int(round((len(ordered) - 1) * fraction))]
+
+
+def safe_token(value: str) -> str:
+    token = str(value).strip()
+    if len(token) > 32:
+        token = token[:29] + "..."
+    return token.replace("\r", "\\r").replace("\n", "\\n")
+
+
+def audit_source(core: Any, source: Path, text_format: Any, definition: FrameDefinition) -> Dict[str, Any]:
+    header, positions, occurrences = header_and_positions(source, text_format, definition.byte_names)
+    row_states: Counter[str] = Counter()
+    invalid_tokens: List[Counter[str]] = [Counter() for _ in positions]
+    valid_by_byte = [0 for _ in positions]
+    blank_by_byte = [0 for _ in positions]
+    invalid_by_byte = [0 for _ in positions]
+    decoded_values: set[int] = set()
+    valid_positions: List[int] = []
+    previous_frame: Optional[int] = None
+    previous_payload: Optional[Tuple[int, ...]] = None
+    decreases = 0
+    payload_changes = 0
+    total_rows = 0
+
+    for source_row, cells in enumerate(source_rows(source, text_format, header)):
+        total_rows += 1
+        raw_cells = [str(cells[position]).strip() for position in positions]
+        present = [value != "" for value in raw_cells]
+        if not any(present):
+            row_states["ALL_BLANK"] += 1
+            continue
+        if not all(present):
+            row_states["PARTIAL_NONBLANK"] += 1
+        else:
+            row_states["COMPLETE_NONBLANK"] += 1
+
+        payload: List[int] = []
+        row_valid = True
+        for byte_index, value in enumerate(raw_cells):
+            if not value:
+                blank_by_byte[byte_index] += 1
+                row_valid = False
+                continue
+            try:
+                byte = core.parse_byte_cell(value)
+            except Exception:
+                invalid_by_byte[byte_index] += 1
+                invalid_tokens[byte_index][safe_token(value)] += 1
+                row_valid = False
+                continue
+            valid_by_byte[byte_index] += 1
+            payload.append(byte)
+        if not row_valid or len(payload) != len(positions):
+            row_states["BYTE_INVALID_OR_MISSING"] += 1
+            continue
+
+        row_states["COMPLETE_BYTE_VALID"] += 1
+        payload_tuple = tuple(payload)
+        if previous_payload is None or payload_tuple != previous_payload:
+            payload_changes += 1
+        previous_payload = payload_tuple
+        try:
+            _, physical = core.decode_physical_value(payload, definition.signal)
+            if not math.isfinite(physical) or not float(physical).is_integer():
+                raise ValueError("FRAME_NOT_EXACT_INTEGER")
+            frame = int(physical)
+        except Exception:
+            row_states["FRAME_DECODE_INVALID"] += 1
+            continue
+        decoded_values.add(frame)
+        valid_positions.append(source_row)
+        if previous_frame is not None and frame < previous_frame:
+            decreases += 1
+        previous_frame = frame
+
+        if total_rows % 50_000 == 0:
+            print(f"[PROGRESS] raw_rows={total_rows}", flush=True)
+
+    gaps = [later - earlier for earlier, later in zip(valid_positions, valid_positions[1:])]
+    per_byte = []
+    for index, name in enumerate(definition.byte_names):
+        per_byte.append({
+            "ByteIndex": index,
+            "ColumnName": name,
+            "HeaderOccurrences": occurrences[name],
+            "BlankCellCount": blank_by_byte[index],
+            "ValidByteCellCount": valid_by_byte[index],
+            "InvalidByteCellCount": invalid_by_byte[index],
+            "TopInvalidTokens": [
+                {"Token": token, "Count": count}
+                for token, count in invalid_tokens[index].most_common(8)
+            ],
+        })
+    return {
+        "SourceRowCount": total_rows,
+        "HeaderColumnCount": len(header),
+        "DuplicateFrameByteColumnCount": sum(max(0, len(value) - 1) for value in occurrences.values()),
+        "RowStates": dict(row_states),
+        "PerByte": per_byte,
+        "ValidPayloadRows": row_states["COMPLETE_BYTE_VALID"],
+        "InvalidOrMissingPayloadRows": row_states["BYTE_INVALID_OR_MISSING"],
+        "PayloadStateChangeCount": payload_changes,
+        "DecodedUniqueFrameCount": len(decoded_values),
+        "DecodedMinimumFrameCount": min(decoded_values) if decoded_values else None,
+        "DecodedMaximumFrameCount": max(decoded_values) if decoded_values else None,
+        "DecodedDecreaseCount": decreases,
+        "ValidPayloadRowGapQ50": quantile(gaps, 0.50),
+        "ValidPayloadRowGapQ95": quantile(gaps, 0.95),
+        "ValidPayloadRowGapMaximum": max(gaps) if gaps else 0,
+    }
+
+
+def prepare(root_argument: Optional[str]) -> int:
+    try:
+        root = resolve_root(root_argument)
+        temp = root / "04_TEMP"
+        prepared = temp / PREPARED_FOLDER
+        output = temp / OUTPUT_FOLDER
+        archive = root / "A-Archive" / ("U1H6B5D8_HYGIENE_" + datetime.now().strftime("%Y%m%dT%H%M%S_%f"))
+        print("[PREPARE] H6B5D8 raw FrameCount semantics reconciliation")
+        print("[PREPARE] Why: reconcile 274,520 nonblank raw rows, 4,346 accepted payload rows and 56,596 historical frames.")
+        if prepared.exists():
+            shutil.rmtree(prepared)
+            print(f"[CLEAN] 04_TEMP/{PREPARED_FOLDER} | REMOVED | Why: invalidate stale receipt.")
+        if output.exists():
+            archive.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(output), str(archive / output.name))
+            print(f"[CLEAN] 04_TEMP/{OUTPUT_FOLDER} | ARCHIVED | Why: preserve prior evidence without stale reuse.")
+        paths = required_paths(root)
+        for label, path in paths.items():
+            print(f"[CHECK] {label} | {'FOUND' if path.is_file() else 'MISSING'} | Why: required reconciliation evidence.")
+        missing = [label for label, path in paths.items() if not path.is_file()]
+        if missing:
+            raise ReconciliationError("PREPARE_MISSING_" + ".".join(missing))
+        request = read_json(paths["ControlledRequest"], "CONTROLLED_REQUEST")
+        source, dbcs = configured_inputs(request)
+        print(f"[CHECK] RawSource | FOUND | {source.name} | Why: positional byte audit must use the controlled H2 input.")
+        for channel, path in sorted(dbcs.items()):
+            print(f"[CHECK] DBC_CH{channel} | FOUND | {path.name} | Why: decode identity remains DBC-derived.")
+        print("[KEEP] D3 and D7 evidence | Why: contradiction itself is required evidence; do not clean it yet.")
+        prepared.mkdir(parents=True)
+        write_json(prepared / "u001_h6b5d8_prepare_receipt.json", {
+            "ProgramId": PROGRAM_ID,
+            "ProgramVersion": PROGRAM_VERSION,
+            "RawSource": str(source),
+            "PreparedUtc": utc_now(),
+            "Status": "READY",
+            "CompletionCode": 0,
+        })
+        print("H6B5D8P-N4-D2-X0-C0")
+        return 0
+    except Exception as exc:
+        print(f"H6B5D8P-X1-C7-K{type(exc).__name__.upper()}-D{str(exc)[:300]}")
+        return 7
+
+
+def require_prepare(root: Path) -> Dict[str, Any]:
+    receipt = read_json(root / "04_TEMP" / PREPARED_FOLDER / "u001_h6b5d8_prepare_receipt.json", "PREPARE_RECEIPT")
+    if receipt.get("Status") != "READY" or receipt.get("CompletionCode") != 0:
+        raise ReconciliationError("PREPARE_NOT_READY")
+    return receipt
+
+
+def self_test(root_argument: Optional[str]) -> int:
+    try:
+        root = resolve_root(root_argument)
+        require_prepare(root)
+        paths = required_paths(root)
+        core = load_module(paths["AdapterCore"])
+        request = read_json(paths["ControlledRequest"], "CONTROLLED_REQUEST")
+        source, dbcs = configured_inputs(request)
+        text_format, definition = frame_definition(core, source, dbcs)
+        if (definition.channel, definition.can_id) != (2, 0x620):
+            raise ReconciliationError("FRAME_IDENTITY_NOT_CH2_0X620")
+        if len(definition.byte_names) != 8:
+            raise ReconciliationError("FRAME_MESSAGE_DLC_NOT_8")
+        if not callable(getattr(core, "parse_byte_cell", None)):
+            raise ReconciliationError("BYTE_PARSER_MISSING")
+        if not callable(getattr(core, "decode_physical_value", None)):
+            raise ReconciliationError("DBC_DECODER_MISSING")
+        print("[SELFTEST] Positional header audit | Why: expose duplicate columns hidden by DictReader.")
+        print("[SELFTEST] Byte parser audit | Why: separate nonblank retained state from valid byte payload.")
+        print("[SELFTEST] Exact DBC frame identity | Why: prohibit guessing another 0x620 signal.")
+        print(f"H6B5D8ST-N8-K{definition.channel}.{definition.can_id:X}-X0-C0")
+        return 0
+    except Exception as exc:
+        print(f"H6B5D8ST-X1-C7-K{type(exc).__name__.upper()}-D{str(exc)[:300]}")
+        return 7
+
+
+def execute(root_argument: Optional[str]) -> int:
+    output: Optional[Path] = None
+    try:
+        root = resolve_root(root_argument)
+        receipt = require_prepare(root)
+        paths = required_paths(root)
+        request = read_json(paths["ControlledRequest"], "CONTROLLED_REQUEST")
+        source, dbcs = configured_inputs(request)
+        if str(source) != str(receipt.get("RawSource")):
+            raise ReconciliationError("PREPARED_SOURCE_CHANGED")
+        core = load_module(paths["AdapterCore"])
+        text_format, definition = frame_definition(core, source, dbcs)
+        output = root / "04_TEMP" / OUTPUT_FOLDER
+        if output.exists():
+            raise ReconciliationError("OUTPUT_EXISTS_RUN_PREPARE")
+        output.mkdir(parents=True)
+        audit = audit_source(core, source, text_format, definition)
+        historical_mismatch = (
+            audit["SourceRowCount"] == HISTORICAL_SOURCE_ROWS
+            and audit["DecodedUniqueFrameCount"] != HISTORICAL_FRAME_ROWS
+        )
+        result = {
+            "DiagnosticSchema": "U001_H6B5D8_RAW_FRAME_SEMANTICS_RECONCILIATION_V1_0",
+            "GeneratedUtc": utc_now(),
+            "FrameDefinition": {
+                "Channel": definition.channel,
+                "CAN_ID": f"0x{definition.can_id:X}",
+                "SignalName": definition.signal_name,
+                "ByteColumns": list(definition.byte_names),
+            },
+            "CurrentRawAudit": audit,
+            "HistoricalAcceptedEvidence": {
+                "SourceRowCount": HISTORICAL_SOURCE_ROWS,
+                "FrameRowCount": HISTORICAL_FRAME_ROWS,
+                "ApproximateViewerMinimum": HISTORICAL_APPROX_MIN,
+                "ApproximateViewerMaximum": HISTORICAL_APPROX_MAX,
+                "EvidenceClass": "CASE_SPECIFIC_HISTORICAL_ACCEPTANCE_NOT_UNIVERSAL_CONTRACT",
+            },
+            "HistoricalMismatch": historical_mismatch,
+            "Decision": "H2_FRAME_SEMANTICS_REPAIR_REQUIRED" if historical_mismatch else "REVIEW_DETAILED_AUDIT",
+            "Status": "DIAGNOSTIC_COMPLETE",
+            "CompletionCode": 0,
+        }
+        write_json(output / "u001_h6b5d8_raw_frame_semantics_reconciliation.json", result)
+        states = audit["RowStates"]
+        capsule = (
+            f"H6B5D8-S{audit['SourceRowCount']}-N{states.get('COMPLETE_NONBLANK', 0)}-"
+            f"V{audit['ValidPayloadRows']}-I{audit['InvalidOrMissingPayloadRows']}-"
+            f"U{audit['DecodedUniqueFrameCount']}-R{audit['DecodedMinimumFrameCount']}.{audit['DecodedMaximumFrameCount']}-"
+            f"D{audit['DuplicateFrameByteColumnCount']}-M{int(historical_mismatch)}-X0-C0"
+        )
+        (output / "u001_h6b5d8_capsule.txt").write_text(capsule + "\n", encoding="utf-8")
+        print(capsule)
+        return 0
+    except Exception as exc:
+        if output is None:
+            output = Path.cwd() / OUTPUT_FOLDER
+        output.mkdir(parents=True, exist_ok=True)
+        write_json(output / "u001_h6b5d8_error.json", {
+            "Type": type(exc).__name__,
+            "Detail": str(exc)[:3000],
+            "CompletionCode": 7,
+        })
+        print(f"H6B5D8-X1-C7-K{type(exc).__name__.upper()}-D{str(exc)[:300]}")
+        return 7
+
+
+def parser() -> argparse.ArgumentParser:
+    value = argparse.ArgumentParser(description="U001 H6B5D8 raw FrameCount semantics reconciliation")
+    value.add_argument("--root")
+    mode = value.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--prepare", action="store_true")
+    mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--execute", action="store_true")
+    return value
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    arguments = parser().parse_args(argv)
+    if arguments.prepare:
+        return prepare(arguments.root)
+    if arguments.self_test:
+        return self_test(arguments.root)
+    return execute(arguments.root)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

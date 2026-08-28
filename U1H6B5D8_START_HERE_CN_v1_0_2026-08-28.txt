@@ -1,0 +1,59 @@
+U001 H6B5D8 执行指南
+=====================
+
+目的
+----
+这一步不修改 U001，也不重跑 H2/H3。
+
+它只读检查同一份 CANDump.csv 中 CH2 / 0x620 / FrameCount 的八个原始 byte：
+
+1. 为什么约 274,520 行 byte 都非空；
+2. 为什么高代码 Adapter 只接受约 4,346 行有效 payload；
+3. 是否存在重复 header、非法 byte token 或位置读取差异；
+4. 为什么当前只得到 895 个唯一 FrameCount，而旧 U001 全量验收是 56,596 帧。
+
+请先把下面两个下载文件直接放入：
+
+  U-UDP001\04_TEMP
+
+不要放入子文件夹，不要修改现有 D3/D7 输出。
+
+从 C-CODE 目录依次运行三行
+----------------------------
+
+python .\U-UDP001\04_TEMP\u001_h6b5d8_raw_frame_semantics_reconciliation_v1_0.py.txt --prepare
+python .\U-UDP001\04_TEMP\u001_h6b5d8_raw_frame_semantics_reconciliation_v1_0.py.txt --self-test
+python .\U-UDP001\04_TEMP\u001_h6b5d8_raw_frame_semantics_reconciliation_v1_0.py.txt --execute
+
+说明
+----
+
+- prepare 会检查 Controlled Request、D3、D7、两个 DBC 和 Adapter Core；
+- self-test 会显示检查项目及其工程理由；
+- execute 逐行扫描一次原始 CSV，不把全表载入内存；
+- 详细结果保存在 JSON，正常只需回传最后一行短码；
+- 若执行时间较长，可以观察每 50,000 行的进度提示。
+
+需要回传
+--------
+
+只回传 execute 最后一行：
+
+  H6B5D8-S...-N...-V...-I...-U...-R...-D...-M...-X0-C0
+
+字段含义
+--------
+
+S = 原始 source rows
+N = 八个 byte 都非空的行数
+V = 八个 byte 都是合法 0-255 的行数
+I = byte 非法或缺失的行数
+U = 成功解码后的唯一 FrameCount 数
+R = 解码范围 min.max
+D = FrameCount byte header 重复列数
+M = 是否与旧版 56,596 帧验收结果冲突（1=冲突）
+
+停止条件
+--------
+
+任何 C7 都停止，不修改 Adapter。把错误短码原样回传。
