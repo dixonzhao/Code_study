@@ -16,6 +16,7 @@ import math
 import re
 import shutil
 import sys
+import traceback
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -542,8 +543,8 @@ def prepare(root_argument: Optional[str]) -> int:
         prepared = temp / PREPARED_FOLDER
         output = temp / OUTPUT_FOLDER
         archive = root / "A-Archive" / ("U1H6B5D9_HYGIENE_" + datetime.now().strftime("%Y%m%dT%H%M%S_%f"))
-        print("[PREPARE] H6B5D9 byte-sentinel reconstruction hypothesis")
-        print("[PREPARE] Why: test retained-byte semantics without modifying H2 or promoting inferred data.")
+        print("[PREPARE] H6B5D9 comprehensive FrameCount semantics differential")
+        print("[PREPARE] Why: compare all plausible source interpretations before modifying H2.")
         if prepared.exists():
             shutil.rmtree(prepared)
             print(f"[CLEAN] 04_TEMP/{PREPARED_FOLDER} | REMOVED | Why: invalidate stale receipt.")
@@ -617,8 +618,11 @@ def self_test(root_argument: Optional[str]) -> int:
 
 def execute(root_argument: Optional[str]) -> int:
     output: Optional[Path] = None
+    root: Optional[Path] = None
+    phase = "START"
     try:
         root = resolve_root(root_argument)
+        phase = "ROOT_RESOLVED"
         receipt = require_prepare(root)
         paths = required_paths(root)
         request = read_json(paths["ControlledRequest"], "CONTROLLED_REQUEST")
@@ -626,6 +630,7 @@ def execute(root_argument: Optional[str]) -> int:
         if str(source) != str(receipt.get("RawSource")):
             raise ProbeError("PREPARED_SOURCE_CHANGED")
         d8 = read_json(paths["D8Diagnostic"], "D8_DIAGNOSTIC")
+        phase = "D8_EVIDENCE_LOADED"
         sentinels, sentinel_counts, dominance = derive_sentinels(d8)
         evidence_dominance = [
             dominance[index]
@@ -637,6 +642,7 @@ def execute(root_argument: Optional[str]) -> int:
         )
         core = load_module(paths["AdapterCore"])
         text_format, signal, byte_names = frame_definition(core, source, dbcs)
+        phase = "FRAME_DEFINITION_RESOLVED"
         output = root / "04_TEMP" / OUTPUT_FOLDER
         if output.exists():
             raise ProbeError("OUTPUT_EXISTS_RUN_PREPARE")
@@ -650,7 +656,9 @@ def execute(root_argument: Optional[str]) -> int:
             sentinels,
             sentinel_evidence_reliable,
         )
+        phase = "RAW_COMPREHENSIVE_SCAN_COMPLETE"
         h2_summary = inspect_h2_frame_rows(paths["H2Updates"])
+        phase = "H2_COMPARISON_COMPLETE"
         root_cause = comprehensive["RootCauseClassification"]
         result = {
             "DiagnosticSchema": "U001_H6B5D9_COMPREHENSIVE_FRAME_SEMANTICS_DIFFERENTIAL_V1_0",
@@ -673,6 +681,7 @@ def execute(root_argument: Optional[str]) -> int:
             "CompletionCode": 0,
         }
         write_json(output / "u001_h6b5d9_comprehensive_frame_semantics_differential.json", result)
+        phase = "DETAILED_JSON_WRITTEN"
         signature = token_signature(sentinels)
         root_codes = {
             "DOMINANT_SENTINEL_BYTE_CARRY_CONFIRMED": "DSC",
@@ -720,15 +729,25 @@ def execute(root_argument: Optional[str]) -> int:
         print(capsule)
         return 0
     except Exception as exc:
+        trace = traceback.extract_tb(exc.__traceback__)
+        failure_line = trace[-1].lineno if trace else 0
         if output is None:
-            output = Path.cwd() / OUTPUT_FOLDER
+            output = (root / "04_TEMP" / OUTPUT_FOLDER) if root is not None else Path.cwd() / OUTPUT_FOLDER
         output.mkdir(parents=True, exist_ok=True)
         write_json(output / "u001_h6b5d9_error.json", {
+            "Phase": phase,
             "Type": type(exc).__name__,
             "Detail": str(exc)[:3000],
+            "FailureLine": failure_line,
+            "Traceback": traceback.format_exc()[-12000:],
             "CompletionCode": 7,
         })
-        print(f"H6B5D9-X1-C7-K{type(exc).__name__.upper()}-D{str(exc)[:300]}")
+        phase_code = re.sub(r"[^A-Z0-9]", "", phase.upper())[:24]
+        detail_code = re.sub(r"[^A-Za-z0-9.+-]", "_", str(exc))[:120]
+        print(
+            f"H6B5D9E-P{phase_code}-K{type(exc).__name__.upper()}-"
+            f"L{failure_line}-D{detail_code}-X1-C7"
+        )
         return 7
 
 
