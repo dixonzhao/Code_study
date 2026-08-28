@@ -1,0 +1,57 @@
+UDP002 S0 H5 兼容修复 v0.2
+============================
+
+目的
+----
+旧 S0 0.1.1 只能读取旧 U001 D1 契约。新高代码 U001 H5 使用
+U001_HANDOFF_PACKAGE_V1_0，因此旧 S0 会在首个 Module 退出。
+
+本包执行三件事：
+1. 安装并认证 S0 U001ControlledProfileIntake 0.2.0；
+2. 保留旧 S0 0.1.1 和旧 Golden Profile，不覆盖历史证据；
+3. 生成新的 TC001 H5 Profile，并明确固定 S6 为 0.1.2。
+
+放置位置
+--------
+请将以下三个文件放入：
+C-CODE\U-UDP002\04_TEMP
+
+- u002_s0_h5_intake_installer_v0_2.py.txt
+- UDP002_S0_H5_INTAKE_MODULE_V020.zip
+- UDP002_S0_H5_START_HERE_CN_v0_2_2026-08-28.txt
+
+从 C-CODE 根目录运行以下三行 CMD
+-----------------------------------
+python U-UDP002\04_TEMP\u002_s0_h5_intake_installer_v0_2.py.txt --prepare --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_s0_h5_intake_installer_v0_2.py.txt --self-test --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_s0_h5_intake_installer_v0_2.py.txt --execute --workspace-root U-UDP002
+
+成功回传
+--------
+只需回传 execute 最后一行：
+S0H5I-NM1-Q1-P1-S6V012-X0-C0
+
+随后重新启动 U002 GUI
+-----------------------
+1. 点击 Open Profile。
+2. 选择：
+   U-UDP002\02_CONFIG\gui_profiles\user\u002_tc001_h5_radar_loss_candidate_v0_1.json
+3. 确认 Profile 名称为 TC001 H5 Radar-loss Candidate。
+4. 确认 Module Plan：
+   - S0 U001ControlledProfileIntake 0.2.0
+   - S1 CameraTargetContinuityArbitration 0.2.0
+   - S1 RadarMeasurementValidity 0.1.1
+   - S6 RadarMeasurementLossGeometryCandidateSynthesis 0.1.2
+   - S7 CandidateReviewBatchExport 0.1.1
+5. U001 Input Package 继续选择：
+   U-UDP001\04_TEMP\U1H5D_OUTPUT_V12\u001_final_package
+6. 使用新的 Run ID：GR_U001H5_20260828B
+7. Run Purpose：EVALUATION
+8. Frame range：7400–57597
+9. 重新执行 Prepare data 和 Run analysis pipeline。
+
+说明
+----
+Candidate Policy 是候选合成策略标识，不是 Module 版本号。
+Registry 更新只表示新 Module 可供选择；为了可追溯性，已经保存的 Profile
+不会自动升级 Module 版本。本次新 Profile 已显式固定 S6 0.1.2。
