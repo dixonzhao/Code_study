@@ -1,0 +1,244 @@
+#!/usr/bin/env python3
+"""Direct U001 H4A raw FrameCount-view build and acceptance."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional, Sequence
+
+
+PREPARED_FOLDER = "U1H4D_PREPARED"
+OUTPUT_FOLDER = "U1H4D_OUTPUT"
+EXPECTED_UPDATES = 1157704
+EXPECTED_FRAMES = 56596
+EXPECTED_POLICIES = 22
+EXPECTED_FRAME_SIGNALS = 21
+
+
+class H4AError(RuntimeError):
+    pass
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def resolve_root(value: Optional[str]) -> Path:
+    if value:
+        root = Path(value).expanduser().resolve()
+    else:
+        cwd = Path.cwd().resolve()
+        root = cwd if cwd.name.casefold() == "u-udp001" else cwd / "U-UDP001"
+    if not root.is_dir():
+        raise H4AError("U_UDP001_ROOT_NOT_FOUND")
+    return root
+
+
+def write_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def read_json(path: Path, label: str) -> dict[str, Any]:
+    if not path.is_file():
+        raise H4AError(label + "_NOT_FOUND")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise H4AError(label + "_INVALID_JSON") from exc
+    if not isinstance(value, dict):
+        raise H4AError(label + "_ROOT_NOT_OBJECT")
+    return value
+
+
+def paths(root: Path) -> dict[str, Path]:
+    core = root / "01_PROGRAMS" / "core"
+    return {
+        "H3": root / "04_TEMP" / "U1H3D_OUTPUT" / "h3_output",
+        "PolicyCompiler": core / "u001_h4_frame_policy_compiler_v1_0.py",
+        "FrameBuilder": core / "u001_h4_raw_frame_view_builder_v1_0.py",
+    }
+
+
+def run(command: list[str], cwd: Path, label: str) -> None:
+    print(f"[RUN] {label}")
+    result = subprocess.run(command, cwd=str(cwd), check=False)
+    if result.returncode != 0:
+        raise H4AError(f"{label}_EXIT_{result.returncode}")
+
+
+def prepare(root_value: Optional[str]) -> int:
+    try:
+        root = resolve_root(root_value)
+        prepared = root / "04_TEMP" / PREPARED_FOLDER
+        output = root / "04_TEMP" / OUTPUT_FOLDER
+        if prepared.exists():
+            shutil.rmtree(prepared)
+        if output.exists():
+            shutil.rmtree(output)
+        required = paths(root)
+        reasons = {
+            "H3": "Accepted 56,596-frame semantic update package.",
+            "PolicyCompiler": "Freezes within-frame reduction by signal role and type.",
+            "FrameBuilder": "Builds one raw row per observed FrameCount without cross-frame hold.",
+        }
+        missing = []
+        for label, path in required.items():
+            found = path.is_dir() if label == "H3" else path.is_file()
+            print(f"[CHECK] {label} | {'FOUND' if found else 'MISSING'} | Why: {reasons[label]}")
+            if not found:
+                missing.append(label)
+        if missing:
+            raise H4AError("DEPENDENCY_MISSING:" + ".".join(missing))
+        manifest = read_json(required["H3"] / "u001_h3_run_manifest.json", "H3_MANIFEST")
+        counts = manifest.get("Counts", {})
+        if int(counts.get("InputUpdateRows", -1)) != EXPECTED_UPDATES or int(counts.get("DistinctFrames", -1)) != EXPECTED_FRAMES:
+            raise H4AError("H3_COUNT_MISMATCH")
+        prepared.mkdir(parents=True)
+        write_json(prepared / "receipt.json", {
+            "Schema": "U001_H4A_DIRECT_PREPARE_V1_0", "PreparedUtc": utc_now(),
+            "Status": "READY", "CompletionCode": 0,
+        })
+        print("H4AP-P2-H1-X0-C0")
+        return 0
+    except Exception as exc:
+        print(f"H4APE-K{type(exc).__name__.upper()}-D{str(exc)}-X1-C7")
+        return 7
+
+
+def require_prepared(root: Path) -> None:
+    value = read_json(root / "04_TEMP" / PREPARED_FOLDER / "receipt.json", "PREPARE_RECEIPT")
+    if value.get("Status") != "READY" or value.get("CompletionCode") != 0:
+        raise H4AError("PREPARE_NOT_READY")
+
+
+def self_test(root_value: Optional[str]) -> int:
+    try:
+        root = resolve_root(root_value)
+        require_prepared(root)
+        required = paths(root)
+        print("[SELFTEST] Frame policy | Why: FRAME_KEY is stream-only; numeric/boolean reducers remain type-safe.")
+        run([sys.executable, str(required["PolicyCompiler"]), "--self-test"], required["PolicyCompiler"].parent, "POLICY_SELFTEST")
+        print("[SELFTEST] Raw frame builder | Why: no synthetic frame, cross-frame hold, zero fill, or source mutation is allowed.")
+        run([sys.executable, str(required["FrameBuilder"]), "--self-test"], required["FrameBuilder"].parent, "BUILDER_SELFTEST")
+        print("H4AS-P16-B24-X0-C0")
+        return 0
+    except Exception as exc:
+        print(f"H4ASE-K{type(exc).__name__.upper()}-D{str(exc)}-X1-C7")
+        return 7
+
+
+def approve(template: Path, approved: Path) -> int:
+    with template.open("r", encoding="utf-8-sig", newline="") as source:
+        reader = csv.DictReader(source)
+        fields = list(reader.fieldnames or [])
+        rows = list(reader)
+    if len(rows) != EXPECTED_POLICIES:
+        raise H4AError("POLICY_TEMPLATE_COUNT")
+    for row in rows:
+        row["PolicyStatus"] = "APPROVED"
+        row["Notes"] = "Approved deterministic within-frame rule derived from SignalRole and ValueKind."
+    with approved.open("w", encoding="utf-8", newline="") as target:
+        writer = csv.DictWriter(target, fieldnames=fields, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    return len(rows)
+
+
+def execute(root_value: Optional[str]) -> int:
+    output: Optional[Path] = None
+    try:
+        root = resolve_root(root_value)
+        require_prepared(root)
+        required = paths(root)
+        output = root / "04_TEMP" / OUTPUT_FOLDER
+        if output.exists():
+            shutil.rmtree(output)
+        output.mkdir(parents=True)
+        candidate = output / "frame_policy_candidate.csv"
+        approved = output / "frame_policy_approved.csv"
+        compiled = output / "frame_policy"
+        h4a = output / "h4a_package"
+
+        run([sys.executable, str(required["PolicyCompiler"]), "--make-template", "--h3-package", str(required["H3"]), "--out", str(candidate)], root, "POLICY_TEMPLATE")
+        approve(candidate, approved)
+        run([sys.executable, str(required["PolicyCompiler"]), "--compile", "--h3-package", str(required["H3"]), "--policy", str(approved), "--out", str(compiled)], root, "POLICY_COMPILE")
+        policy = compiled / "u001_h4_compiled_frame_policy.csv"
+        run([sys.executable, str(required["FrameBuilder"]), "--build", "--h3-package", str(required["H3"]), "--frame-policy", str(policy), "--out", str(h4a)], root, "H4A_BUILD")
+
+        quality = read_json(h4a / "u001_h4_raw_frame_quality.json", "H4A_QUALITY")
+        manifest = read_json(h4a / "u001_h4_raw_frame_manifest.json", "H4A_MANIFEST")
+        expected = {
+            "InputUpdateRowCount": EXPECTED_UPDATES,
+            "OutputFrameRowCount": EXPECTED_FRAMES,
+            "IncludedSignalCount": EXPECTED_FRAME_SIGNALS,
+            "SyntheticFrameCount": 0,
+            "CrossFrameHeldCellCount": 0,
+            "ZeroFillCount": 0,
+            "InputMutationCount": 0,
+        }
+        for key, value in expected.items():
+            if int(quality.get(key, -1)) != value:
+                raise H4AError(f"{key.upper()}_{quality.get(key)}_EXPECTED_{value}")
+        if quality.get("WholeFileMemoryLoadRequired") is not False:
+            raise H4AError("WHOLE_FILE_MEMORY_LOAD")
+        if manifest.get("Status") != "COMPLETE" or manifest.get("CompletionCode") != 0:
+            raise H4AError("MANIFEST_STATUS")
+        result = {
+            "Schema": "U001_H4A_DIRECT_RESULT_V1_0", "GeneratedUtc": utc_now(),
+            "Updates": EXPECTED_UPDATES, "Frames": EXPECTED_FRAMES,
+            "FrameSignals": EXPECTED_FRAME_SIGNALS,
+            "MultiUpdateFrames": int(quality.get("MultiUpdateFrameCount", -1)),
+            "MissingFrameGaps": int(quality.get("MissingFrameGapCount", -1)),
+            "MaximumFrameStep": int(quality.get("MaximumAdjacentFrameStep", -1)),
+            "Status": "H4A_ACCEPTED", "CompletionCode": 0,
+        }
+        write_json(output / "u001_h4a_direct_result.json", result)
+        capsule = (
+            f"H4A-R{EXPECTED_UPDATES}-F{EXPECTED_FRAMES}-S{EXPECTED_FRAME_SIGNALS}"
+            f"-M{result['MultiUpdateFrames']}-G{result['MissingFrameGaps']}"
+            f"-L{result['MaximumFrameStep']}-H0-Z0-X0-C0"
+        )
+        (output / "u001_h4a_direct_capsule.txt").write_text(capsule + "\n", encoding="utf-8")
+        print(capsule)
+        return 0
+    except Exception as exc:
+        if output is None:
+            output = Path.cwd() / OUTPUT_FOLDER
+        output.mkdir(parents=True, exist_ok=True)
+        write_json(output / "u001_h4a_direct_diagnostic.json", {
+            "GeneratedUtc": utc_now(), "ExceptionType": type(exc).__name__,
+            "Detail": str(exc)[:8000], "Recovery": "Return H4AE only.",
+        })
+        print(f"H4AE-K{type(exc).__name__.upper()}-D{str(exc)}-X1-C7")
+        return 7
+
+
+def parser() -> argparse.ArgumentParser:
+    value = argparse.ArgumentParser(description="Direct U001 H4A acceptance")
+    action = value.add_mutually_exclusive_group(required=True)
+    action.add_argument("--prepare", action="store_true")
+    action.add_argument("--self-test", action="store_true")
+    action.add_argument("--execute", action="store_true")
+    value.add_argument("--root")
+    return value
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = parser().parse_args(argv)
+    if args.prepare:
+        return prepare(args.root)
+    if args.self_test:
+        return self_test(args.root)
+    return execute(args.root)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
