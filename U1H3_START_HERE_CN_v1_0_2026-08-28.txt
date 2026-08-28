@@ -1,0 +1,77 @@
+U1H3 同步域与语义策略高代码核心执行指南
+版本：v1.0
+
+目标：
+
+在已验收的 H1/H2 Source Driver 基础上安装 H3。H3 将：
+
+- 按 SourceRowIndex 保持原始更新顺序；
+- 将指定 FrameCount 信号传播为有界同步元数据；
+- 显式记录 exact / assigned / unassigned 与 age；
+- 编译 Source candidate -> CanonicalName 的批准映射；
+- 按每个信号的显式规则处理 FLOAT / INTEGER / BOOLEAN / ENUM / BITFIELD；
+- 保留 0 与 Boolean false，不做全局填 0；
+- 保留 RawCode 与 PhysicalValue，不做测量 forward fill；
+- 输出可追溯的 H3 canonical update package。
+
+本节点仍不做：
+
+- Frame 级宽表；
+- within-frame aggregation；
+- bounded signal hold；
+- Camera 目标融合；
+- Radar/CAM discrepancy、baseline、anomaly 或 event。
+
+新的 Source Driver 权限边界：
+
+- Driver 只翻译 source evidence；
+- Mapping Profile 批准正式含义；
+- Validator 决定能否信任；
+- 新数据源只需要重写 Driver，不允许 Driver 自行决定有效性、同步或分析。
+
+放置位置：
+
+请把以下两个文件放入：
+
+  C-CODE\U-UDP001\04_TEMP
+
+文件：
+
+  u001_u1h3_sync_semantic_installer_v1_0.py.txt
+  UDP001_U1H3_SYNC_SEMANTIC_HIGH_CODE_v1_0.zip
+
+在 CMD 中进入 C-CODE 根目录，仅执行以下三行：
+
+python U-UDP001\04_TEMP\u001_u1h3_sync_semantic_installer_v1_0.py.txt --prepare
+python U-UDP001\04_TEMP\u001_u1h3_sync_semantic_installer_v1_0.py.txt --self-test
+python U-UDP001\04_TEMP\u001_u1h3_sync_semantic_installer_v1_0.py.txt --execute
+
+prepare 会：
+
+- 检查 H1/H2 必需文件；
+- 检查 ZIP 精确 inventory 与 CRC；
+- 将旧 H2/H3 中转与 prepared 内容迁入 A-Archive；
+- 只保留一个 U1H3_PREPARED 当前来源。
+
+self-test 会在屏幕上用英文说明每类检查的内容和原因。无需回传明细。
+
+成功时最后一行：
+
+  U1H3-N4-P3-Q1-A10-X0-C0
+
+字段：
+
+  N = H3 核心程序数
+  P = 独立处理组件数（Frame / Policy / Projector）
+  Q = 独立端到端验收数
+  A = 安装文件数
+  X = blocking error 数
+  C = completion code
+
+只需回传最后一行。
+
+安装通过后的下一步：
+
+进入 H4，建立 observed FrameCount view、within-frame policy 与 explicit
+bounded hold。变量 Inventory / 搜索 / 选择会作为 U001 通用 Selection
+Profile 与后续 GUI 能力加入，不会要求先全量解码 700 多个变量。
