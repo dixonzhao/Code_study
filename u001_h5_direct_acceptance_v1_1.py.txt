@@ -16,7 +16,7 @@ from typing import Any, Optional, Sequence
 
 
 PREPARED_FOLDER = "U1H5D_PREPARED"
-OUTPUT_FOLDER = "U1H5D_OUTPUT"
+OUTPUT_FOLDER = "U1H5D_OUTPUT_V11"
 EXPECTED_UPDATES = 1157704
 EXPECTED_FRAMES = 56596
 EXPECTED_FRAME_SIGNALS = 21
@@ -73,12 +73,13 @@ def dependency_paths(root: Path) -> dict[str, Path]:
     h4a_root = root / "04_TEMP" / "U1H4D_OUTPUT"
     h4b_root = root / "04_TEMP" / "U1H4BD_OUTPUT"
     return {
+        "AssemblerPayload": root / "04_TEMP" / "u001_h5_package_assembler_v1_1.py.txt",
         "H3": root / "04_TEMP" / "U1H3D_OUTPUT" / "h3_output",
         "H4A": h4a_root / "h4a_package",
         "FramePolicy": h4a_root / "frame_policy" / "u001_h4_compiled_frame_policy.csv",
         "H4B": h4b_root / "h4b_package",
         "HoldPolicy": h4b_root / "hold_policy_package",
-        "Assembler": core / "u001_h5_package_assembler_v1_0.py",
+        "Assembler": core / "u001_h5_package_assembler_v1_1.py",
         "Validator": core / "u001_h5_package_validator_v1_0.py",
     }
 
@@ -175,14 +176,22 @@ def prepare(root_value: Optional[str]) -> int:
             shutil.rmtree(output)
 
         required = dependency_paths(root)
+        payload = required["AssemblerPayload"]
+        if not payload.is_file():
+            raise H5Error("ASSEMBLER_V1_1_PAYLOAD_MISSING")
+        required["Assembler"].parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(payload, required["Assembler"])
+        if required["Assembler"].read_bytes() != payload.read_bytes():
+            raise H5Error("ASSEMBLER_V1_1_INSTALL_IDENTITY")
         folder_labels = {"H3", "H4A", "H4B", "HoldPolicy"}
         reasons = {
+            "AssemblerPayload": "Approved v1.1 source that tolerates delayed Windows staging-directory cleanup.",
             "H3": "Provides canonical update stream and complete semantic policy.",
             "H4A": "Provides the immutable raw one-row-per-observed-frame view.",
             "FramePolicy": "Proves the exact 21 signals included in the frame domain.",
             "H4B": "Provides the accepted no-cross-frame-hold view.",
             "HoldPolicy": "Preserves the explicit NONE decision for every frame signal.",
-            "Assembler": "Atomically creates D1-D6 without changing upstream values.",
+            "Assembler": "Installed v1.1 atomically creates D1-D6 without treating delayed temp cleanup as data failure.",
             "Validator": "Independently checks inventory, hashes, counts, identity and subsets.",
         }
         missing: list[str] = []
@@ -315,7 +324,7 @@ def execute(root_value: Optional[str]) -> int:
             "FrameSignals": EXPECTED_FRAME_SIGNALS,
             "ReviewSignals": EXPECTED_REVIEW_SIGNALS,
             "ReviewCanonicalNames": selected,
-            "FinalPackageRelativePath": "04_TEMP/U1H5D_OUTPUT/u001_final_package",
+            "FinalPackageRelativePath": "04_TEMP/U1H5D_OUTPUT_V11/u001_final_package",
             "Status": "H5_ACCEPTED",
             "CompletionCode": 0,
         }
@@ -365,4 +374,3 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
