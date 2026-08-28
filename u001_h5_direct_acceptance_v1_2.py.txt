@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import Any, Optional, Sequence
 
 
-PREPARED_FOLDER = "U1H5D_PREPARED"
-OUTPUT_FOLDER = "U1H5D_OUTPUT_V11"
+PREPARED_FOLDER = "U1H5D_PREPARED_V12"
+OUTPUT_FOLDER = "U1H5D_OUTPUT_V12"
 EXPECTED_UPDATES = 1157704
 EXPECTED_FRAMES = 56596
 EXPECTED_FRAME_SIGNALS = 21
@@ -324,7 +324,7 @@ def execute(root_value: Optional[str]) -> int:
             "FrameSignals": EXPECTED_FRAME_SIGNALS,
             "ReviewSignals": EXPECTED_REVIEW_SIGNALS,
             "ReviewCanonicalNames": selected,
-            "FinalPackageRelativePath": "04_TEMP/U1H5D_OUTPUT_V11/u001_final_package",
+            "FinalPackageRelativePath": "04_TEMP/U1H5D_OUTPUT_V12/u001_final_package",
             "Status": "H5_ACCEPTED",
             "CompletionCode": 0,
         }
