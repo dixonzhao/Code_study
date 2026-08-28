@@ -1,0 +1,29 @@
+U001 H2 直接运行与验收
+
+本轮只完成 H2，不调用 H3/H4/H5，也不使用发生权限冲突的 U1H6B4_PREPARED。
+
+下载文件
+========
+u001_h2_direct_acceptance_v1_0.py.txt
+
+原来的 UDP001_H2_HEX_SNAPSHOT_SPRINT_v1_0.zip 请继续保留在：
+C-CODE\U-UDP001\04_TEMP
+
+把新下载的程序也放入同一目录。
+
+CMD（从 C-CODE 目录执行）
+=========================
+python U-UDP001\04_TEMP\u001_h2_direct_acceptance_v1_0.py.txt --prepare
+python U-UDP001\04_TEMP\u001_h2_direct_acceptance_v1_0.py.txt --self-test
+python U-UDP001\04_TEMP\u001_h2_direct_acceptance_v1_0.py.txt --execute
+
+说明
+====
+- 使用全新的 U1H2D_PREPARED / U1H2D_OUTPUT，不接触旧的锁定目录。
+- 直接调用 H2 Adapter v1.2.0。
+- 全量运行期间每30秒显示一次已运行时间和输出字节数。
+- 最终验证十六进制解析、Snapshot State Change、274522源行、22信号、56596个FrameCount及零解码失败。
+
+只需回传最后一行：
+成功：H2D-...-C0
+失败：H2DE-...-C7
