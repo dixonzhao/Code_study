@@ -1,0 +1,59 @@
+U001 H4B Cadence 与有界保持安装验收
+版本：v1.0
+日期：2026-08-28
+
+目标
+----
+在已验收的 H4A Raw Frame View 之上增加：
+- 逐信号真实更新节奏（Cadence）统计；
+- 工程师显式批准的逐信号 Hold Policy；
+- 有最大帧龄限制的 bounded hold；
+- 可追溯的 age、stale、无效更新屏障和 missing reason。
+
+H4B 不会修改 H4A，也不会做无限 forward fill 或空值补 0。
+统计结果只提供决策证据，不会自动批准信号的物理保持行为。
+
+放置位置
+--------
+将以下三个文件直接放入：
+C-CODE\U-UDP001\04_TEMP
+
+- UDP001_U1H4B_CADENCE_BOUNDED_HOLD_HIGH_CODE_v1_0.zip
+- u001_u1h4b_cadence_bounded_hold_installer_v1_0.py.txt
+- 本说明文件
+
+执行环境
+--------
+打开 Windows CMD，当前位置必须是 C-CODE。
+
+只执行以下三条命令
+------------------
+python U-UDP001\04_TEMP\u001_u1h4b_cadence_bounded_hold_installer_v1_0.py.txt --prepare
+python U-UDP001\04_TEMP\u001_u1h4b_cadence_bounded_hold_installer_v1_0.py.txt --self-test
+python U-UDP001\04_TEMP\u001_u1h4b_cadence_bounded_hold_installer_v1_0.py.txt --execute
+
+成功标志
+--------
+最终只需回传第三条命令最后一行：
+
+U1H4B-N4-P1-Q1-H1-A9-X0-C0
+
+字段含义
+--------
+N4 = 安装4个H4B核心程序
+P1 = Cadence与Hold Policy链通过
+Q1 = 独立H4B验收通过
+H1 = H4A兼容性保持
+A9 = 安装9个受控payload文件
+X0 = 无失败项
+C0 = 完成
+
+本次安装仅使用合成数据验证程序与契约，不会读取公司原始CAN、DBC或视频。
+真实信号的MaxAgeFrames仍需后续由工程师审核后明确批准。
+
+若失败
+------
+完整诊断会自动写入：
+C-CODE\U-UDP001\04_TEMP\U1H4B_FAILURE_DIAGNOSTIC.json
+
+只需回传终端最后一行；不要手抄长错误或Traceback。
