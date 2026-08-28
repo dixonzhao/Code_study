@@ -1,0 +1,64 @@
+U001 H6B2｜真实源 Capability Catalog 与 Legacy Profile 对照
+版本：v1.0｜日期：2026-08-28
+
+本步骤做什么
+------------
+1. 使用已经通过验收的 H2 Adapter，对唯一真实源执行 inventory；
+2. 只读取 CSV header 和 DBC 定义，不解码 800 MB payload 数据行；
+3. 计算 CANDump/DBC 输入指纹；
+4. 将 6 个 Legacy D3 Signal Catalog 与真实 Capability Catalog 对照；
+5. 自动生成暂定 H2 Selection Request，供下一步编译和正式解码。
+
+为什么还不直接跑全量解码
+--------------------
+目前 6 个 Legacy 候选分属 4 组。先用真实源中实际存在的 Channel、CAN ID、SignalName 和输入指纹消除歧义，可以避免花很长时间解码后才发现 Profile 选错。
+
+安全边界
+--------
+- 不修改已有 Legacy 包；
+- 不修改真实源文件；
+- 不读取或解码 CAN payload 数据行；
+- 输出只写入 U-UDP001\04_TEMP\U1H6B2_OUTPUT；
+- Selection Profile 仍标记为 PROVISIONAL；
+- 本步骤不批准正式 H6 差分。
+
+文件放置
+--------
+把下面文件下载到：
+C-CODE\U-UDP001\04_TEMP
+
+u001_h6b2_source_catalog_reconciliation_v1_0.py.txt
+
+执行前必须保留
+------------
+- U-UDP001\04_TEMP\U1H6B0_OUTPUT
+- U-UDP001\04_TEMP\U1H6B1_OUTPUT
+- U-UDP001\01_PROGRAMS\adapters\CameraRadar.U001.MatlabCanCsvDbc
+
+CMD（从 C-CODE 根目录运行）
+-----------------------------
+python U-UDP001\04_TEMP\u001_h6b2_source_catalog_reconciliation_v1_0.py.txt --self-test
+python U-UDP001\04_TEMP\u001_h6b2_source_catalog_reconciliation_v1_0.py.txt --reconcile
+
+注意
+----
+第二条命令会计算约 800 MB CANDump 的 SHA-256，因此可能需要一些时间；这不是全量解码，内存占用应保持有界。
+
+回传
+----
+只回传最后一行机器码，例如：
+U1H6B2-V706-L6-R003-M22-U0-F3-P23-A0-X0-C0
+
+字段：
+V = 真实源可技术解码变量数
+L = 参加对照的 Legacy 候选数
+R = 对照后推荐 Candidate 数字编号
+M = 其可映射 Legacy 信号数
+U = 其不可映射信号数
+F = 与真实源一致的输入文件指纹数
+P = 暂定 Profile 有效信号总数（包含 FrameCount）
+A = 是否仍有并列或未映射歧义
+
+下一步
+------
+若 C0，下一节点将编译 Selection Profile、运行 H2 Preflight，并在开始耗时解码前给出最终受控运行摘要。
