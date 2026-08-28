@@ -1,0 +1,377 @@
+#!/usr/bin/env python3
+"""Compare every FrameCount candidate from every configured DBC channel."""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import re
+import shutil
+import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+
+PROGRAM_ID = "U001_H6B5D7_ALL_DBC_FRAME_CANDIDATE_DIAGNOSTIC"
+PROGRAM_VERSION = "1.0"
+PREPARED_FOLDER = "U1H6B5D7_PREPARED"
+OUTPUT_FOLDER = "U1H6B5D7_OUTPUT"
+SUPERSEDED_TRANSFER_NAMES = (
+    "u001_h6b5d6_row_frame_context_diagnostic_v1_0.py.txt",
+    "U1H6B5D6_START_HERE_CN_v1_0_2026-08-28.txt",
+)
+
+
+class CandidateError(RuntimeError):
+    """Fail-closed candidate diagnostic error."""
+
+
+@dataclass
+class Candidate:
+    channel: int
+    can_id: int
+    message_name: str
+    signal_name: str
+    signal: Any
+    group: Any
+    valid_rows: int = 0
+    invalid_rows: int = 0
+    unique_values: Optional[set[int]] = None
+    minimum: Optional[int] = None
+    maximum: Optional[int] = None
+    decreases: int = 0
+    previous: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        self.unique_values = set()
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def write_json(path: Path, value: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def read_json(path: Path, label: str) -> Dict[str, Any]:
+    if not path.is_file():
+        raise CandidateError(label + "_NOT_FOUND")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        raise CandidateError(label + "_INVALID_JSON") from exc
+    if not isinstance(value, dict):
+        raise CandidateError(label + "_ROOT_NOT_OBJECT")
+    return value
+
+
+def resolve_root(argument: Optional[str]) -> Path:
+    if argument:
+        root = Path(argument).expanduser().resolve()
+    else:
+        cwd = Path.cwd().resolve()
+        root = cwd if cwd.name.casefold() == "u-udp001" else cwd / "U-UDP001"
+    if not root.is_dir():
+        raise CandidateError("U_UDP001_ROOT_NOT_FOUND")
+    return root
+
+
+def version_key(path: Path) -> Tuple[int, ...]:
+    numbers = re.findall(r"\d+", path.parent.name)
+    return tuple(int(value) for value in numbers) if numbers else (0,)
+
+
+def locate_adapter_core(root: Path) -> Path:
+    parent = root / "01_PROGRAMS" / "adapters" / "CameraRadar.U001.MatlabCanCsvDbc"
+    candidates = list(parent.glob("*/u001_matlab_can_csv_dbc_core_v1_0.py"))
+    if not candidates:
+        raise CandidateError("ADAPTER_CORE_NOT_FOUND")
+    return max(candidates, key=version_key)
+
+
+def load_adapter_core(path: Path) -> Any:
+    name = "u001_h6b5d7_adapter_core"
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise CandidateError("ADAPTER_CORE_SPEC")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def required_paths(root: Path) -> Dict[str, Path]:
+    b3 = root / "04_TEMP" / "U1H6B3_OUTPUT" / "compiled_profile"
+    d6 = root / "04_TEMP" / "U1H6B5D6_OUTPUT"
+    return {
+        "AdapterCore": locate_adapter_core(root),
+        "ControlledRequest": b3 / "u001_h2_controlled_request.json",
+        "D6Diagnostic": d6 / "u001_h6b5d6_row_frame_context_diagnostic.json",
+        "D6Capsule": d6 / "u001_h6b5d6_capsule.txt",
+    }
+
+
+def configured_inputs(request: Dict[str, Any]) -> Tuple[Path, Dict[int, Path]]:
+    source: Optional[Path] = None
+    dbc_paths: Dict[int, Path] = {}
+    inputs = request.get("Inputs")
+    if not isinstance(inputs, list):
+        raise CandidateError("REQUEST_INPUTS")
+    for item in inputs:
+        if not isinstance(item, dict):
+            continue
+        raw = item.get("Path", item.get("FilePath"))
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        path = Path(raw)
+        if item.get("Kind") == "MATLAB_CAN_CSV":
+            if source is not None:
+                raise CandidateError("MULTIPLE_RAW_SOURCES")
+            source = path
+        elif item.get("Kind") == "DBC_CHANNEL":
+            channel = int(item["Channel"])
+            if channel in dbc_paths:
+                raise CandidateError("DUPLICATE_DBC_CHANNEL")
+            dbc_paths[channel] = path
+    if source is None or not source.is_file():
+        raise CandidateError("RAW_SOURCE")
+    if len(dbc_paths) < 2 or any(not path.is_file() for path in dbc_paths.values()):
+        raise CandidateError("DBC_INPUTS")
+    return source, dbc_paths
+
+
+def is_frame_candidate(name: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", name.casefold())
+    return "frame" in normalized and ("count" in normalized or "counter" in normalized)
+
+
+def discover_candidates(core: Any, source: Path, dbc_paths: Dict[int, Path]) -> Tuple[Any, List[Candidate]]:
+    text_format = core.detect_text_format(source)
+    source_groups = core.discover_source_message_groups(text_format.columns)
+    groups = {(group.channel, group.can_id): group for group in source_groups}
+    candidates: List[Candidate] = []
+    for channel, dbc_path in sorted(dbc_paths.items()):
+        parsed = core.parse_dbc(dbc_path, channel)
+        for message in parsed.messages:
+            group = groups.get((channel, message.can_id))
+            if group is None or not group.complete:
+                continue
+            for signal in message.signals:
+                if is_frame_candidate(signal.signal_name):
+                    candidates.append(Candidate(
+                        channel=channel,
+                        can_id=message.can_id,
+                        message_name=message.message_name,
+                        signal_name=signal.signal_name,
+                        signal=signal,
+                        group=group,
+                    ))
+    if not candidates:
+        raise CandidateError("NO_COMPATIBLE_FRAME_CANDIDATE")
+    return text_format, candidates
+
+
+def exact_frame(value: float) -> int:
+    if not float(value).is_integer():
+        raise CandidateError("FRAME_FRACTIONAL")
+    return int(value)
+
+
+def scan(core: Any, source: Path, text_format: Any, candidates: List[Candidate]) -> None:
+    for source_row, row in core.iter_source_rows(source, text_format):
+        payload_by_group: Dict[Tuple[int, int], Tuple[str, Any]] = {}
+        for candidate in candidates:
+            key = (candidate.channel, candidate.can_id)
+            if key not in payload_by_group:
+                payload_by_group[key] = core.classify_message_cells(row, candidate.group)
+            status, payload = payload_by_group[key]
+            if status != "DECODED_UPDATE" or payload is None:
+                if status != "NO_UPDATE":
+                    candidate.invalid_rows += 1
+                continue
+            try:
+                _, physical = core.decode_physical_value(payload, candidate.signal)
+                frame = exact_frame(physical)
+            except Exception:
+                candidate.invalid_rows += 1
+                continue
+            candidate.valid_rows += 1
+            assert candidate.unique_values is not None
+            candidate.unique_values.add(frame)
+            candidate.minimum = frame if candidate.minimum is None else min(candidate.minimum, frame)
+            candidate.maximum = frame if candidate.maximum is None else max(candidate.maximum, frame)
+            if candidate.previous is not None and frame < candidate.previous:
+                candidate.decreases += 1
+            candidate.previous = frame
+        if (source_row + 1) % 50000 == 0:
+            print(f"[PROGRESS] raw_rows={source_row + 1}", flush=True)
+
+
+def prepare(root_argument: Optional[str]) -> int:
+    try:
+        root = resolve_root(root_argument)
+        temp = root / "04_TEMP"
+        prepared = temp / PREPARED_FOLDER
+        output = temp / OUTPUT_FOLDER
+        archive = root / "A-Archive" / ("U1H6B5D7_HYGIENE_" + datetime.now().strftime("%Y%m%dT%H%M%S_%f"))
+        print("[PREPARE] U001 H6B5D7 all-DBC FrameCount candidate audit")
+        print("[PREPARE] Why: remove Channel/DBC guesswork before redesigning H2-to-H3 synchronization.")
+        if prepared.exists():
+            shutil.rmtree(prepared)
+            print(f"[CLEAN] 04_TEMP/{PREPARED_FOLDER} | REMOVED | Why: invalidate stale receipt.")
+        if output.exists():
+            archive.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(output), str(archive / output.name))
+            print(f"[CLEAN] 04_TEMP/{OUTPUT_FOLDER} | ARCHIVED | Why: prevent stale evidence reuse.")
+        for name in SUPERSEDED_TRANSFER_NAMES:
+            path = temp / name
+            if path.exists():
+                archive.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(path), str(archive / name))
+                print(f"[CLEAN] 04_TEMP/{name} | ARCHIVED | Why: superseded transfer file.")
+        paths = required_paths(root)
+        request = read_json(paths["ControlledRequest"], "CONTROLLED_REQUEST")
+        source, dbc_paths = configured_inputs(request)
+        missing = [label for label, path in paths.items() if not path.is_file()]
+        for label, path in paths.items():
+            print(f"[CHECK] {label} | {'FOUND' if path.is_file() else 'MISSING'} | Why: required accepted evidence.")
+        print(f"[CHECK] RawSource | FOUND | basename={source.name} | Why: test every DBC-derived candidate against the same source.")
+        for channel, path in sorted(dbc_paths.items()):
+            print(f"[CHECK] DBC_CH{channel} | FOUND | basename={path.name} | Why: eliminate Channel-specific candidate omission.")
+        print("[KEEP] H6B3-H6B5 and D1/D3/D6 outputs | Why: active traceability chain.")
+        if missing:
+            raise CandidateError("PREPARE_MISSING:" + ".".join(missing))
+        prepared.mkdir(parents=True)
+        write_json(prepared / "u001_h6b5d7_prepare_receipt.json", {
+            "ProgramId": PROGRAM_ID,
+            "ProgramVersion": PROGRAM_VERSION,
+            "RawSource": str(source),
+            "DBCChannels": sorted(dbc_paths),
+            "PreparedUtc": utc_now(),
+            "Status": "READY",
+            "CompletionCode": 0,
+        })
+        print(f"U1H6B5D7P-C{len(paths) + len(dbc_paths) + 1}-X0-C0")
+        return 0
+    except Exception as exc:
+        print(f"U1H6B5D7P-X1-C7-K{type(exc).__name__.upper()}-D{str(exc)}")
+        return 7
+
+
+def require_prepare(root: Path) -> Dict[str, Any]:
+    value = read_json(root / "04_TEMP" / PREPARED_FOLDER / "u001_h6b5d7_prepare_receipt.json", "PREPARE_RECEIPT")
+    if value.get("ProgramId") != PROGRAM_ID or value.get("ProgramVersion") != PROGRAM_VERSION:
+        raise CandidateError("PREPARE_IDENTITY")
+    if value.get("Status") != "READY" or value.get("CompletionCode") != 0:
+        raise CandidateError("PREPARE_STATUS")
+    return value
+
+
+def self_test(root_argument: Optional[str]) -> int:
+    try:
+        root = resolve_root(root_argument)
+        require_prepare(root)
+        print("[SELFTEST] Accepted adapter core | Why: reuse the same DBC parser and bit decoder as H2.")
+        core = load_adapter_core(required_paths(root)["AdapterCore"])
+        core.self_test()
+        print("[PASS] Adapter DBC parsing, byte order, signedness, scale, and offset tests passed.")
+        print("[SELFTEST] Both configured DBC channels | Why: prohibit a hard-coded CH2-only FrameCount assumption.")
+        request = read_json(required_paths(root)["ControlledRequest"], "CONTROLLED_REQUEST")
+        source, dbc_paths = configured_inputs(request)
+        _, candidates = discover_candidates(core, source, dbc_paths)
+        if len(dbc_paths) < 2 or not candidates:
+            raise AssertionError("DBC_OR_CANDIDATES")
+        print(f"[PASS] Parsed {len(dbc_paths)} DBC channels; discovered {len(candidates)} source-compatible FrameCount candidates.")
+        print(f"U1H6B5D7-ST-D{len(dbc_paths)}-K{len(candidates)}-X0-C0")
+        return 0
+    except Exception as exc:
+        print(f"U1H6B5D7-ST-X1-C7-K{type(exc).__name__.upper()}-D{str(exc)}")
+        return 7
+
+
+def execute(root_argument: Optional[str]) -> int:
+    output: Optional[Path] = None
+    try:
+        root = resolve_root(root_argument)
+        receipt = require_prepare(root)
+        paths = required_paths(root)
+        request = read_json(paths["ControlledRequest"], "CONTROLLED_REQUEST")
+        source, dbc_paths = configured_inputs(request)
+        if str(source) != str(receipt.get("RawSource")):
+            raise CandidateError("PREPARED_SOURCE_CHANGED")
+        core = load_adapter_core(paths["AdapterCore"])
+        text_format, candidates = discover_candidates(core, source, dbc_paths)
+        output = root / "04_TEMP" / OUTPUT_FOLDER
+        if output.exists():
+            raise CandidateError("OUTPUT_EXISTS_RUN_PREPARE")
+        output.mkdir(parents=True)
+        scan(core, source, text_format, candidates)
+
+        records: List[Dict[str, Any]] = []
+        tokens: List[str] = []
+        for candidate in candidates:
+            unique_count = len(candidate.unique_values or set())
+            record = {
+                "Channel": candidate.channel,
+                "CAN_ID": f"0x{candidate.can_id:X}",
+                "MessageName": candidate.message_name,
+                "SignalName": candidate.signal_name,
+                "ValidRows": candidate.valid_rows,
+                "InvalidRows": candidate.invalid_rows,
+                "UniqueValues": unique_count,
+                "Minimum": candidate.minimum,
+                "Maximum": candidate.maximum,
+                "DecreaseCount": candidate.decreases,
+            }
+            records.append(record)
+            tokens.append(
+                f"K{candidate.channel}.{candidate.can_id:X}.{candidate.valid_rows}."
+                f"{unique_count}.{candidate.minimum}.{candidate.maximum}.{candidate.decreases}"
+            )
+        write_json(output / "u001_h6b5d7_all_dbc_frame_candidates.json", {
+            "DiagnosticSchema": "U001_H6B5D7_ALL_DBC_FRAME_CANDIDATES_V1_0",
+            "GeneratedUtc": utc_now(),
+            "DBCChannelCount": len(dbc_paths),
+            "Candidates": records,
+            "Status": "DIAGNOSTIC_COMPLETE",
+            "CompletionCode": 0,
+        })
+        capsule = f"H6B5D7-D{len(dbc_paths)}-N{len(records)}-" + "-".join(tokens) + "-X0-C0"
+        (output / "u001_h6b5d7_capsule.txt").write_text(capsule + "\n", encoding="utf-8")
+        print(capsule)
+        return 0
+    except Exception as exc:
+        if output is None:
+            output = Path.cwd() / OUTPUT_FOLDER
+        output.mkdir(parents=True, exist_ok=True)
+        write_json(output / "u001_h6b5d7_error.json", {"Type": type(exc).__name__, "Detail": str(exc)[:3000]})
+        print(f"H6B5D7-X1-C7-K{type(exc).__name__.upper()}-D{str(exc)}")
+        return 7
+
+
+def parser() -> argparse.ArgumentParser:
+    value = argparse.ArgumentParser(description="U001 H6B5D7 all-DBC FrameCount candidate diagnostic")
+    action = value.add_mutually_exclusive_group(required=True)
+    action.add_argument("--prepare", action="store_true")
+    action.add_argument("--self-test", action="store_true")
+    action.add_argument("--execute", action="store_true")
+    value.add_argument("--root")
+    return value
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = parser().parse_args(argv)
+    if args.prepare:
+        return prepare(args.root)
+    if args.self_test:
+        return self_test(args.root)
+    return execute(args.root)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
