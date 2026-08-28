@@ -1,9 +1,9 @@
-U001 High-Code Workbench GUI U1G1 v0.2
+U001 High-Code Workbench GUI U1G1 v0.3
 =================================
 
 目的
 ----
-本次是启动可见性修正版。Windows语言选择窗口改为独立可见主窗口，安装器会确认GUI进程启动后至少持续存活2秒；若提前退出，会把原因写入04_TEMP的U1G1_GUI_LAUNCH_v0_2.log。
+本次是Pipeline Card交互修正版。I0-I5均改为明确的Button；点击任一Stage都会打开独立Stage Workspace。I0可以查看和选择Adapter及Version，I1可以选择Catalog和Selection Profile并启动Catalog / Mapping子窗口。I2-I5在U1G2接入前显示职责与Fail-close状态。
 
 界面参考U002流水线设计，将U001显示为固定的I0-I5流程：
 
@@ -36,17 +36,17 @@ U1G1的定位
 
 C-CODE\U-UDP001\04_TEMP
 
-- UDP001_U1G1_HIGH_CODE_WORKBENCH_GUI_v0_2.zip
-- u001_u1g1_workbench_gui_installer_v0_2.py.txt
-- U1G1_START_HERE_CN_v0_2_2026-08-28.txt
+- UDP001_U1G1_HIGH_CODE_WORKBENCH_GUI_v0_3.zip
+- u001_u1g1_workbench_gui_installer_v0_3.py.txt
+- U1G1_START_HERE_CN_v0_3_2026-08-28.txt
 
 执行位置
 --------
 使用CMD，先进入C-CODE目录。只执行下面三行：
 
-python U-UDP001\04_TEMP\u001_u1g1_workbench_gui_installer_v0_2.py.txt --prepare
-python U-UDP001\04_TEMP\u001_u1g1_workbench_gui_installer_v0_2.py.txt --self-test
-python U-UDP001\04_TEMP\u001_u1g1_workbench_gui_installer_v0_2.py.txt --execute
+python U-UDP001\04_TEMP\u001_u1g1_workbench_gui_installer_v0_3.py.txt --prepare
+python U-UDP001\04_TEMP\u001_u1g1_workbench_gui_installer_v0_3.py.txt --self-test
+python U-UDP001\04_TEMP\u001_u1g1_workbench_gui_installer_v0_3.py.txt --execute
 
 三步含义
 --------
