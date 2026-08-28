@@ -1,0 +1,58 @@
+U002 H5 全链重绑定与一次性验收（v0.1）
+=========================================
+
+目的
+----
+不要再让 Golden Run 每次只暴露一个问题。本工具会先一次性完成：
+
+1. 自动找到最近一次因 PROFILE_INVENTORY_HASH 失败的 H5 Run；
+2. 读取该 Run 已被 S0 接受的真实 H5 signal inventory；
+3. 将 Camera 6 个角色和 Radar 2 个角色重新绑定到该 inventory；
+4. 审查 S0、两个 S1、S6、S7 共 5 个 Module 的版本、依赖、资格证据、配置和 self-test；
+5. 创建一个新的不可变 Run，而不修改失败 Run；
+6. 一次跑完整链，并在失败时直接输出 Module、Stage 和底层原因。
+
+放置位置
+--------
+把下面两个下载文件直接放进：
+
+C-CODE\U-UDP002\04_TEMP
+
+- u002_h5_full_chain_rebind_run_v0_1.py.txt
+- U002_H5_FULL_CHAIN_START_HERE_CN_v0_1_2026-08-28.txt
+
+运行位置
+--------
+公司电脑 CMD，当前目录必须是 C-CODE。
+
+只运行以下三行
+--------------
+
+python U-UDP002\04_TEMP\u002_h5_full_chain_rebind_run_v0_1.py.txt --prepare --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_h5_full_chain_rebind_run_v0_1.py.txt --self-test --workspace-root U-UDP002
+python U-UDP002\04_TEMP\u002_h5_full_chain_rebind_run_v0_1.py.txt --execute --workspace-root U-UDP002
+
+说明
+----
+- prepare 会清理/归档 U-UDP002\04_TEMP 内旧的临时材料，并自动识别刚才的 H5 失败 Run。
+- self-test 会显示五个 Module 分别检查了什么，并且全部通过后才允许继续。
+- execute 会新建 Run。失败 Run不会被修改，也不会 Resume。
+- 如果实际公司环境里存在多个 PROFILE_INVENTORY_HASH 失败 Run，prepare 会选择最近的一次。
+- 如需强制指定来源，可在第一行末尾追加：--source-run-id 具体RunId
+- 输出 C-0 后，不需要再回传 self-test 的长内容，只回传 execute 的 H5GR 一行。
+- 如果输出 C-7，回传 H5E 一行即可；它已经包含失败 Stage、Module 和底层原因，不需要另跑诊断器。
+
+成功标准
+--------
+最终输出形如：
+
+H5GR-M5-A5-C16-R1937-P3-U1-X0-C0
+
+其中：
+- M5：5 个正式 Module 全部执行；
+- A5：5 种正式 Artifact 全部存在；
+- C：候选行数；
+- R：U003 review data 行数；
+- C0：全链验收通过。
+
+本轮只完成 H5 兼容性修复和 Golden Run，不改变 Camera arbitration、Radar validity、候选生成或 U003 导出的算法定义。
