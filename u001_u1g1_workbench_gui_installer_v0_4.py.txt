@@ -15,7 +15,7 @@ import time
 import zipfile
 
 
-INSTALLER_VERSION = "0.3.0"
+INSTALLER_VERSION = "0.4.0"
 ZIP_NAME = "UDP001_U1G1_HIGH_CODE_WORKBENCH_GUI_v0_3.zip"
 EXPECTED_FILES = {
     "01_PROGRAMS/gui/u001_workbench_model_v0_1.py": "92e7bcfa9ec59318626a093996695a9d26e404c815149291a77a281cd2cc5967",
@@ -108,11 +108,12 @@ def prepare() -> None:
         raise InstallError("ADAPTER_ROOT_MISSING")
     if not (workspace / "01_PROGRAMS" / "core" / "u001_catalog_mapping_gui_v1_0.py").is_file():
         raise InstallError("CATALOG_GUI_MISSING")
-    prepared = temp_root / "U1G1_PREPARED"
-    if prepared.exists():
-        shutil.rmtree(prepared)
-    prepared.mkdir(parents=True)
-    verify_zip(zip_path, prepared)
+    # Preparation must not depend on deleting a persistent extraction folder.
+    # Windows security tools may retain a handle below U1G1_PREPARED and make
+    # the next preparation fail with WinError 5.  Verify in an OS-owned unique
+    # temporary directory and let TemporaryDirectory clean it independently.
+    with tempfile.TemporaryDirectory(prefix="u1g1_prepare_") as temp_name:
+        verify_zip(zip_path, Path(temp_name))
     print("U1G1-PREP-N2-A1-I2-X0-C0")
 
 
@@ -147,8 +148,11 @@ def execute(no_launch: bool) -> None:
         archived = 0
         for name in ("u001_workbench_model_v0_1.py", "u001_workbench_gui_v0_3.py"):
             target = target_root / name
+            source = source_root / name
+            if target.is_file() and sha256_file(target) == sha256_file(source):
+                continue
             archived += archive_existing(workspace, target)
-            shutil.copy2(source_root / name, target)
+            shutil.copy2(source, target)
         model = target_root / "u001_workbench_model_v0_1.py"
         gui = target_root / "u001_workbench_gui_v0_3.py"
         run_checked([sys.executable, str(model), "--self-test"], target_root)
