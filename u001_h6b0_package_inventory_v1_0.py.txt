@@ -1,0 +1,535 @@
+#!/usr/bin/env python3
+"""U001 H6B0 read-only package inventory.
+
+This program discovers candidate U001 D1-D6 handoff packages without changing
+the package contents.  It is intentionally standard-library only so it can run
+on the company Windows host without installing dependencies.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import shutil
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+
+PROGRAM_ID = "U001_H6B0_PACKAGE_INVENTORY"
+PROGRAM_VERSION = "1.0"
+
+STANDARD_FILES: Tuple[Tuple[str, str], ...] = (
+    ("D1", "u001_decoded_updates.csv"),
+    ("D2", "u001_frame_values.csv"),
+    ("D3", "u001_signal_catalog.csv"),
+    ("D4", "u001_quality_report.csv"),
+    ("D5", "u001_run_manifest.json"),
+    ("D6", "u001_review_view.csv"),
+)
+
+SYNTHETIC_TOKENS = (
+    "synthetic",
+    "fixture",
+    "selftest",
+    "self_test",
+    "acceptance",
+    "local_test",
+    "test_data",
+)
+
+NON_FORMAL_PATH_TOKENS = (
+    "04_temp",
+    "a-archive",
+    "archive",
+    "05_tests",
+    "evidence",
+    "fixture",
+    "selftest",
+    "acceptance",
+)
+
+CSV_COLUMNS = (
+    "CandidateId",
+    "RelativeFolder",
+    "PackageClass",
+    "FormalReplayEligible",
+    "NonFormalPath",
+    "StandardFileCount",
+    "MissingFiles",
+    "ManifestParseStatus",
+    "ManifestSchema",
+    "OutputBoundary",
+    "ContractVersion",
+    "DatasetId",
+    "RunId",
+    "SegmentId",
+    "SourceIds",
+    "PackageStatus",
+    "CompletionCode",
+    "D1Rows",
+    "D2Rows",
+    "TotalBytes",
+    "NewestModifiedUtc",
+    "HashValidation",
+    "ReasonCodes",
+)
+
+
+class InventoryError(RuntimeError):
+    """Expected fail-closed inventory error."""
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def normalize_key(value: Any) -> str:
+    return "".join(ch.lower() for ch in str(value) if ch.isalnum())
+
+
+def find_key_recursive(value: Any, wanted: Sequence[str]) -> Any:
+    wanted_keys = {normalize_key(item) for item in wanted}
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if normalize_key(key) in wanted_keys:
+                return item
+        for item in value.values():
+            found = find_key_recursive(item, wanted)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = find_key_recursive(item, wanted)
+            if found is not None:
+                return found
+    return None
+
+
+def compact_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple, set)):
+        return "|".join(str(item) for item in value)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return str(value)
+
+
+def completion_is_zero(value: Any) -> bool:
+    if value is None or value == "":
+        return False
+    try:
+        return int(value) == 0
+    except (TypeError, ValueError):
+        return str(value).strip().upper() in {"PASS", "PASSED", "SUCCESS", "OK"}
+
+
+def status_is_complete(value: Any) -> bool:
+    return str(value or "").strip().upper() in {
+        "COMPLETE",
+        "COMPLETED",
+        "PASS",
+        "PASSED",
+        "SUCCESS",
+        "ACCEPTED",
+    }
+
+
+def count_csv_rows_fast(path: Path) -> Optional[int]:
+    """Count data rows with bounded memory; U001 CSV cells must not contain newlines."""
+    try:
+        total_lines = 0
+        last_byte = b""
+        with path.open("rb") as handle:
+            while True:
+                block = handle.read(8 * 1024 * 1024)
+                if not block:
+                    break
+                total_lines += block.count(b"\n")
+                last_byte = block[-1:]
+        if path.stat().st_size == 0:
+            return 0
+        if last_byte not in {b"\n", b"\r"}:
+            total_lines += 1
+        return max(total_lines - 1, 0)
+    except OSError:
+        return None
+
+
+def relative_text(path: Path, root: Path) -> str:
+    try:
+        value = path.resolve().relative_to(root.resolve()).as_posix()
+    except (OSError, ValueError):
+        value = path.name
+    return value or "."
+
+
+def contains_token(text: str, tokens: Iterable[str]) -> bool:
+    lowered = text.lower().replace("-", "_")
+    return any(token in lowered for token in tokens)
+
+
+def load_manifest(path: Path) -> Tuple[str, Dict[str, Any]]:
+    if not path.is_file():
+        return "MISSING", {}
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return "INVALID_JSON", {}
+    if not isinstance(parsed, dict):
+        return "INVALID_ROOT_TYPE", {}
+    return "OK", parsed
+
+
+def classify_candidate(
+    relative_folder: str,
+    file_count: int,
+    manifest_status: str,
+    manifest: Dict[str, Any],
+) -> Tuple[str, bool, bool, List[str]]:
+    reasons: List[str] = []
+    manifest_schema = compact_value(
+        find_key_recursive(manifest, ("ManifestSchema", "ManifestSchemaId"))
+    )
+    output_boundary = compact_value(find_key_recursive(manifest, ("OutputBoundary",)))
+    contract_version = compact_value(find_key_recursive(manifest, ("ContractVersion",)))
+    package_status = compact_value(find_key_recursive(manifest, ("Status", "PackageStatus")))
+    completion_code = find_key_recursive(manifest, ("CompletionCode", "ExitCode"))
+
+    identity_text = "|".join(
+        compact_value(find_key_recursive(manifest, keys))
+        for keys in (
+            ("DatasetId",),
+            ("RunId",),
+            ("SegmentId",),
+            ("SourceId", "SourceIds"),
+            ("ProcessingMode",),
+        )
+    )
+    synthetic = contains_token(relative_folder + "|" + identity_text, SYNTHETIC_TOKENS)
+    non_formal_path = contains_token(relative_folder, NON_FORMAL_PATH_TOKENS)
+
+    if file_count < len(STANDARD_FILES):
+        reasons.append("STANDARD_FILESET_INCOMPLETE")
+        return "INCOMPLETE", False, non_formal_path, reasons
+    if manifest_status != "OK":
+        reasons.append("MANIFEST_" + manifest_status)
+        return "UNKNOWN", False, non_formal_path, reasons
+
+    high_shape = (
+        manifest_schema == "U001_HANDOFF_PACKAGE_V1_0"
+        and output_boundary == "U001_TRUSTED_ANALYSIS_SOURCE_PACKAGE_V1_0"
+    )
+    legacy_shape = bool(contract_version) and not high_shape
+
+    if high_shape:
+        package_class = "HIGH_CODE_H5_SYNTHETIC" if synthetic else "HIGH_CODE_H5_REAL"
+    elif legacy_shape:
+        package_class = "LEGACY_SYNTHETIC" if synthetic else "LEGACY_REAL"
+    else:
+        reasons.append("UNRECOGNIZED_MANIFEST_IDENTITY")
+        package_class = "UNKNOWN"
+
+    if not status_is_complete(package_status):
+        reasons.append("PACKAGE_STATUS_NOT_COMPLETE")
+    if high_shape and not completion_is_zero(completion_code):
+        reasons.append("COMPLETION_CODE_NOT_ZERO")
+    if non_formal_path:
+        reasons.append("NON_FORMAL_PATH")
+    if synthetic:
+        reasons.append("SYNTHETIC_OR_TEST_IDENTITY")
+
+    formally_eligible = (
+        package_class in {"HIGH_CODE_H5_REAL", "LEGACY_REAL"}
+        and status_is_complete(package_status)
+        and not non_formal_path
+        and (not high_shape or completion_is_zero(completion_code))
+    )
+    if formally_eligible:
+        reasons.append("FORMAL_REPLAY_CANDIDATE")
+    return package_class, formally_eligible, non_formal_path, reasons
+
+
+def inspect_candidate(folder: Path, root: Path, candidate_id: str) -> Dict[str, Any]:
+    present = {code: (folder / name).is_file() for code, name in STANDARD_FILES}
+    missing = [name for code, name in STANDARD_FILES if not present[code]]
+    manifest_path = folder / dict(STANDARD_FILES)["D5"]
+    manifest_status, manifest = load_manifest(manifest_path)
+    relative_folder = relative_text(folder, root)
+    package_class, eligible, non_formal, reasons = classify_candidate(
+        relative_folder,
+        sum(present.values()),
+        manifest_status,
+        manifest,
+    )
+
+    total_bytes = 0
+    newest_timestamp = 0.0
+    for _, name in STANDARD_FILES:
+        path = folder / name
+        if path.is_file():
+            try:
+                stat = path.stat()
+                total_bytes += stat.st_size
+                newest_timestamp = max(newest_timestamp, stat.st_mtime)
+            except OSError:
+                reasons.append("FILE_STAT_FAILED")
+
+    newest_utc = ""
+    if newest_timestamp:
+        newest_utc = datetime.fromtimestamp(newest_timestamp, timezone.utc).isoformat(
+            timespec="seconds"
+        )
+
+    return {
+        "CandidateId": candidate_id,
+        "RelativeFolder": relative_folder,
+        "PackageClass": package_class,
+        "FormalReplayEligible": int(eligible),
+        "NonFormalPath": int(non_formal),
+        "StandardFileCount": sum(present.values()),
+        "MissingFiles": "|".join(missing),
+        "ManifestParseStatus": manifest_status,
+        "ManifestSchema": compact_value(
+            find_key_recursive(manifest, ("ManifestSchema", "ManifestSchemaId"))
+        ),
+        "OutputBoundary": compact_value(find_key_recursive(manifest, ("OutputBoundary",))),
+        "ContractVersion": compact_value(find_key_recursive(manifest, ("ContractVersion",))),
+        "DatasetId": compact_value(find_key_recursive(manifest, ("DatasetId",))),
+        "RunId": compact_value(find_key_recursive(manifest, ("RunId",))),
+        "SegmentId": compact_value(find_key_recursive(manifest, ("SegmentId",))),
+        "SourceIds": compact_value(find_key_recursive(manifest, ("SourceIds", "SourceId"))),
+        "PackageStatus": compact_value(find_key_recursive(manifest, ("Status", "PackageStatus"))),
+        "CompletionCode": compact_value(
+            find_key_recursive(manifest, ("CompletionCode", "ExitCode"))
+        ),
+        "D1Rows": count_csv_rows_fast(folder / dict(STANDARD_FILES)["D1"])
+        if present["D1"]
+        else "",
+        "D2Rows": count_csv_rows_fast(folder / dict(STANDARD_FILES)["D2"])
+        if present["D2"]
+        else "",
+        "TotalBytes": total_bytes,
+        "NewestModifiedUtc": newest_utc,
+        "HashValidation": "NOT_RUN_IN_B0",
+        "ReasonCodes": "|".join(dict.fromkeys(reasons)),
+    }
+
+
+def discover_candidate_folders(root: Path, output_root: Path) -> List[Path]:
+    expected_names = {name.casefold() for _, name in STANDARD_FILES}
+    candidates: List[Path] = []
+    root_resolved = root.resolve()
+    output_resolved = output_root.resolve()
+
+    for current, directory_names, file_names in os.walk(root_resolved):
+        current_path = Path(current)
+        directory_names[:] = [
+            name
+            for name in directory_names
+            if (current_path / name).resolve() != output_resolved
+        ]
+        if expected_names.intersection(name.casefold() for name in file_names):
+            candidates.append(current_path)
+    return sorted(candidates, key=lambda path: relative_text(path, root_resolved).lower())
+
+
+def write_outputs(
+    root: Path,
+    output_root: Path,
+    records: List[Dict[str, Any]],
+) -> str:
+    output_root.mkdir(parents=True, exist_ok=True)
+    csv_path = output_root / "u001_h6b0_package_inventory.csv"
+    json_path = output_root / "u001_h6b0_package_inventory.json"
+    capsule_path = output_root / "u001_h6b0_capsule.txt"
+
+    with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(records)
+
+    counts = {
+        "legacy_real": sum(row["PackageClass"] == "LEGACY_REAL" for row in records),
+        "high_real": sum(row["PackageClass"] == "HIGH_CODE_H5_REAL" for row in records),
+        "synthetic": sum("SYNTHETIC" in row["PackageClass"] for row in records),
+        "incomplete": sum(row["PackageClass"] == "INCOMPLETE" for row in records),
+        "unknown": sum(row["PackageClass"] == "UNKNOWN" for row in records),
+        "eligible": sum(bool(row["FormalReplayEligible"]) for row in records),
+    }
+    result = {
+        "ProgramId": PROGRAM_ID,
+        "ProgramVersion": PROGRAM_VERSION,
+        "GeneratedUtc": utc_now(),
+        "ScanRoot": ".",
+        "ReadOnlyScan": True,
+        "HashValidation": "NOT_RUN_IN_B0",
+        "Counts": counts,
+        "Candidates": records,
+    }
+    json_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    capsule = (
+        f"U1H6B0-N{len(records)}-L{counts['legacy_real']}-H{counts['high_real']}"
+        f"-S{counts['synthetic']}-I{counts['incomplete']}-U{counts['unknown']}"
+        f"-E{counts['eligible']}-X0-C0"
+    )
+    capsule_path.write_text(capsule + "\n", encoding="utf-8")
+    return capsule
+
+
+def write_diagnostic(output_root: Path, key: str, detail: str) -> None:
+    try:
+        output_root.mkdir(parents=True, exist_ok=True)
+        diagnostic = {
+            "ProgramId": PROGRAM_ID,
+            "GeneratedUtc": utc_now(),
+            "Status": "FAILED",
+            "Key": key,
+            "Detail": detail[:2000],
+        }
+        (output_root / "u001_h6b0_diagnostic.json").write_text(
+            json.dumps(diagnostic, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def make_csv(path: Path, rows: int) -> None:
+    path.write_text("FrameCount,Value\n" + "".join(f"{index},{index}.0\n" for index in range(rows)), encoding="utf-8")
+
+
+def make_package(folder: Path, manifest: Dict[str, Any], full: bool = True) -> None:
+    folder.mkdir(parents=True, exist_ok=True)
+    for code, name in STANDARD_FILES:
+        if not full and code not in {"D1", "D5"}:
+            continue
+        path = folder / name
+        if code == "D5":
+            path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        else:
+            make_csv(path, 2)
+
+
+def run_self_test() -> int:
+    checks: List[bool] = []
+    temp_root = Path(tempfile.mkdtemp(prefix="u1h6b0_selftest_"))
+    try:
+        high_manifest = {
+            "ManifestSchema": "U001_HANDOFF_PACKAGE_V1_0",
+            "OutputBoundary": "U001_TRUSTED_ANALYSIS_SOURCE_PACKAGE_V1_0",
+            "DatasetId": "REAL_CASE_001",
+            "RunId": "RUN_001",
+            "SegmentId": "FULL",
+            "SourceIds": ["SOURCE_001"],
+            "Status": "COMPLETE",
+            "CompletionCode": 0,
+        }
+        legacy_manifest = {
+            "ContractVersion": "U001_DATA_CONTRACT_V0_1",
+            "DatasetId": "REAL_CASE_001",
+            "RunId": "LEGACY_RUN_001",
+            "SegmentId": "FULL",
+            "SourceId": "SOURCE_001",
+            "Status": "COMPLETE",
+        }
+        make_package(temp_root / "real_high", high_manifest)
+        make_package(
+            temp_root / "05_TESTS" / "LOCAL_SYNTHETIC",
+            {**high_manifest, "DatasetId": "SYNTHETIC_CASE"},
+        )
+        make_package(temp_root / "real_legacy", legacy_manifest)
+        make_package(temp_root / "partial", legacy_manifest, full=False)
+
+        output_root = temp_root / "04_TEMP" / "U1H6B0_OUTPUT"
+        folders = discover_candidate_folders(temp_root, output_root)
+        checks.append(len(folders) == 4)
+        records = [
+            inspect_candidate(folder, temp_root, f"PKG{index:03d}")
+            for index, folder in enumerate(folders, start=1)
+        ]
+        classes = {row["PackageClass"] for row in records}
+        checks.append("HIGH_CODE_H5_REAL" in classes)
+        checks.append("HIGH_CODE_H5_SYNTHETIC" in classes)
+        checks.append("LEGACY_REAL" in classes)
+        checks.append("INCOMPLETE" in classes)
+        checks.append(sum(row["FormalReplayEligible"] for row in records) == 2)
+        checks.append(all(row["HashValidation"] == "NOT_RUN_IN_B0" for row in records))
+        checks.append(all(not Path(row["RelativeFolder"]).is_absolute() for row in records))
+        capsule = write_outputs(temp_root, output_root, records)
+        checks.append(capsule.startswith("U1H6B0-N4-L1-H1-S1-I1-U0-E2"))
+        checks.append((output_root / "u001_h6b0_package_inventory.csv").is_file())
+        checks.append((output_root / "u001_h6b0_package_inventory.json").is_file())
+        checks.append((output_root / "u001_h6b0_capsule.txt").is_file())
+        if not all(checks):
+            raise InventoryError("SELFTEST_ASSERTION_FAILED")
+        print(f"U1H6B0-ST-PASS-T{len(checks)}-X0-C0")
+        return 0
+    except Exception as exc:  # self-test must emit a stable capsule
+        print(f"U1H6B0-ST-FAIL-T{sum(checks)}-X1-C7-K{type(exc).__name__.upper()}")
+        return 7
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def resolve_root(argument: Optional[str]) -> Path:
+    if argument:
+        return Path(argument).expanduser().resolve()
+    cwd = Path.cwd().resolve()
+    if cwd.name.casefold() == "u-udp001":
+        return cwd
+    candidate = cwd / "U-UDP001"
+    if candidate.is_dir():
+        return candidate.resolve()
+    raise InventoryError("U_UDP001_ROOT_NOT_FOUND_FROM_CURRENT_DIRECTORY")
+
+
+def run_inventory(root_argument: Optional[str]) -> int:
+    output_root: Optional[Path] = None
+    try:
+        root = resolve_root(root_argument)
+        if not root.is_dir():
+            raise InventoryError("SCAN_ROOT_NOT_DIRECTORY")
+        output_root = root / "04_TEMP" / "U1H6B0_OUTPUT"
+        folders = discover_candidate_folders(root, output_root)
+        records = [
+            inspect_candidate(folder, root, f"PKG{index:03d}")
+            for index, folder in enumerate(folders, start=1)
+        ]
+        capsule = write_outputs(root, output_root, records)
+        print(capsule)
+        print("OUTPUT-" + relative_text(output_root, root))
+        return 0
+    except Exception as exc:
+        if output_root is None:
+            output_root = Path.cwd() / "U1H6B0_OUTPUT"
+        write_diagnostic(output_root, type(exc).__name__.upper(), str(exc))
+        print(f"U1H6B0-X1-C7-K{type(exc).__name__.upper()}")
+        return 7
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Read-only U001 D1-D6 package inventory")
+    parser.add_argument("--self-test", action="store_true", help="run isolated self-test")
+    parser.add_argument(
+        "--root",
+        help="U-UDP001 root; default is .\\U-UDP001 when launched from C-CODE",
+    )
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.self_test:
+        return run_self_test()
+    return run_inventory(args.root)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
