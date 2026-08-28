@@ -17,13 +17,14 @@ import zipfile
 
 
 PROGRAM_ID = "U002-S0-H5-INSTALLER"
-PROGRAM_VERSION = "0.2.0"
+PROGRAM_VERSION = "0.3.0"
 MODULE_ID = "CameraRadar.S0.U001ControlledProfileIntake"
 MODULE_VERSION = "0.2.0"
 ZIP_NAME = "UDP002_S0_H5_INTAKE_MODULE_V020.zip"
 ZIP_SHA256 = "78fa44bebab42c4c570760e76541cb5c1bf810ccae1360e57bc700059e2252a8"
-PREPARED_NAME = "U2S0H5_V020_PREPARED"
-PROFILE_NAME = "u002_tc001_h5_radar_loss_candidate_v0_1.json"
+PREPARED_NAME = "U2S0H5_V030_PREPARED"
+PROFILE_NAME = "u002_tc001_h5_radar_loss_candidate_v0_2.json"
+SIGNAL_PROFILE_ID = "TC001.CAMERA_RADAR.GEOMETRY.WIDTH_V04@0.4.0"
 EXPECTED_FILES = {
     "algorithm_card.json": "90531d454b1873cd05fbaac33b50842677e5a7cf2e3859a35de1065afdb2efa7",
     "implementation.py": "015d850305a0c3142ffb6bcd7788ab6ee3aae5b6de7d6cb9111ab155fe91af3f",
@@ -180,14 +181,15 @@ def build_saved_profile(workspace: Path) -> dict:
         or s6[0].get("ModuleVersion") != "0.1.2"
     ):
         raise InstallError("DEFAULT_PROFILE_S6_IDENTITY")
-    if profile.get("SignalProfile") != "TC001.CAMERA_RADAR.GEOMETRY.WIDTH_V04@0.4.0":
-        raise InstallError("DEFAULT_PROFILE_SIGNAL_PROFILE")
     s0[0]["ModuleVersion"] = MODULE_VERSION
     return {
         "ContractId": "U002_GUI_SAVED_PROFILE",
         "ContractVersion": "0.1",
         "ProfileName": "TC001 H5 Radar-loss Candidate",
-        "SignalProfile": profile["SignalProfile"],
+        # The legacy GUI profile is only a structural template. Its current
+        # SignalProfile may have been changed by an earlier GUI save and must
+        # not control the new, explicitly identified TC001 H5 profile.
+        "SignalProfile": SIGNAL_PROFILE_ID,
         "ModulePlan": plan,
         "PrimaryOutcome": profile["PrimaryOutcome"],
         "CandidatePolicy": profile["CandidatePolicy"],
@@ -200,6 +202,9 @@ def prepare(workspace: Path) -> None:
     destination = prepared_root(workspace)
     if destination.exists():
         shutil.rmtree(destination)
+    obsolete = workspace / "04_TEMP/U2S0H5_V020_PREPARED"
+    if obsolete.exists():
+        shutil.rmtree(obsolete)
     destination.mkdir(parents=True)
     safe_extract(zip_path, destination)
     validate_module_files(prepared_module(workspace))
@@ -208,8 +213,8 @@ def prepare(workspace: Path) -> None:
     print("[CHECK] U002 core and frozen Golden Profile exist | WHY: install must extend the accepted workspace, not invent a new root")
     print("[CHECK] Transfer ZIP inventory and SHA-256 match | WHY: company-side bytes must equal the tested release")
     print("[CHECK] S0 0.2.0 self-test passed: " + capsule + " | WHY: H5 intake is tested before promotion")
-    print("[CHECK] Default profile pins TC001 and S6 0.1.2 | WHY: the new profile changes only the U001 intake boundary")
-    print("S0H5P-N4-S1-X0-C0")
+    print("[CHECK] New profile explicitly pins TC001 and S6 0.1.2 | WHY: a mutable legacy GUI profile must not select the new run identity")
+    print("S0H5P3-N4-S1-X0-C0")
 
 
 def self_test(workspace: Path) -> None:
@@ -218,7 +223,7 @@ def self_test(workspace: Path) -> None:
     plan = saved["ModulePlan"]
     checks = [
         saved["ContractId"] == "U002_GUI_SAVED_PROFILE",
-        saved["SignalProfile"] == "TC001.CAMERA_RADAR.GEOMETRY.WIDTH_V04@0.4.0",
+        saved["SignalProfile"] == SIGNAL_PROFILE_ID,
         len(plan) == 5,
         plan[0]["ModuleVersion"] == "0.2.0",
         any(item["Stage"] == "S6" and item["ModuleVersion"] == "0.1.2" for item in plan),
@@ -229,7 +234,7 @@ def self_test(workspace: Path) -> None:
     print("[CHECK] Saved Profile contract is loadable | WHY: GUI Open Profile must not require manual JSON editing")
     print("[CHECK] TC001 signal profile is unchanged | WHY: only S0 compatibility is under repair")
     print("[CHECK] S0 0.2.0 and S6 0.1.2 are explicit | WHY: Registry discovery never silently upgrades a frozen plan")
-    print("S0H5ST-N6-X0-C0")
+    print("S0H5ST3-N6-X0-C0")
 
 
 def install_module(workspace: Path) -> str:
@@ -286,7 +291,7 @@ def execute(workspace: Path) -> None:
     writing = destination.with_name(destination.name + ".writing")
     writing.write_bytes(data)
     os.replace(writing, destination)
-    receipt_root = workspace / "07_OUTPUT/U2S0H5_V020_INSTALL"
+    receipt_root = workspace / "07_OUTPUT/U2S0H5_V030_INSTALL"
     receipt_root.mkdir(parents=True, exist_ok=True)
     receipt = {
         "ProgramId": PROGRAM_ID,
@@ -302,7 +307,7 @@ def execute(workspace: Path) -> None:
         "Status": "SUCCEEDED",
     }
     (receipt_root / "installation_receipt.json").write_bytes(canonical_bytes(receipt))
-    print("S0H5I-NM1-Q1-P1-S6V012-X0-C0")
+    print("S0H5I3-NM1-Q1-P1-S6V012-X0-C0")
 
 
 def main() -> int:
