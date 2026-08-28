@@ -1,0 +1,69 @@
+U001 H6B4：22信号真实源全量流式解码
+========================================
+
+目标
+----
+使用 H6B3 已编译并通过真实源预检的 Controlled Request，执行第一次完整 H2 解码。
+
+本节点只负责：
+1. 读取原始 CANDump.csv 与对应 DBC；
+2. 解码既定的22个信号；
+3. 保持原始 source row 顺序输出长表；
+4. 验证五文件边界、Hash、FrameCount更新、资源策略与可追溯证据。
+
+本节点明确不做：
+- forward fill / hold；
+- Frame reconstruction；
+- invalid-value business policy；
+- Camera 1/3 arbitration；
+- anomaly analysis。
+
+放置位置
+--------
+将以下两个文件直接放入：
+C-CODE\U-UDP001\04_TEMP
+
+- u001_h6b4_real_h2_decode_v1_0.py.txt
+- U1H6B4_START_HERE_CN_v1_0_2026-08-28.txt
+
+从 C-CODE 目录依次执行（仅三行）
+---------------------------------
+python U-UDP001\04_TEMP\u001_h6b4_real_h2_decode_v1_0.py.txt --prepare
+python U-UDP001\04_TEMP\u001_h6b4_real_h2_decode_v1_0.py.txt --self-test
+python U-UDP001\04_TEMP\u001_h6b4_real_h2_decode_v1_0.py.txt --execute
+
+运行说明
+--------
+- prepare 会清理本节点旧输出、归档已替代的 H6B3 中转文件，并逐项显示检查内容与原因。
+- self-test 会验证 Adapter 自测、22信号配置、FrameCount 与内存/顺序策略。
+- execute 是真实全量解码，可能运行较长时间。
+- execute 每30秒显示一次 elapsed 与当前 update CSV 大小；这不是卡死。
+- 程序采用单读取器、单写入器、逐行流式处理，目标内存上限为512 MB，不会把全量CSV装入内存。
+- 若失败，先不要手工修改结果文件；修正原因后重新从 prepare 开始运行。
+
+成功输出
+--------
+C-CODE\U-UDP001\04_TEMP\U1H6B4_OUTPUT
+
+其中 h2_real 必须恰好包含：
+- u001_adapter_source_updates.csv
+- u001_adapter_signal_catalog.csv
+- u001_adapter_quality.json
+- u001_adapter_run_manifest.json
+- u001_adapter_completion_capsule.txt
+
+需要回传
+--------
+只回传 execute 最后一行：
+
+U1H6B4-R...-U...-N...-F...-K...-G...-W...-X0-C0
+
+字段含义：
+- R：读取的原始 Source Row 数；
+- U：成功写出的信号 Update 数；
+- N：选中信号数（本次应为22）；
+- F：单信号解码失败数；
+- K：FrameCount Update 数；
+- G：实际出现更新的已选 Message Group 数；
+- W：Warning 数；
+- X0-C0：节点成功。
