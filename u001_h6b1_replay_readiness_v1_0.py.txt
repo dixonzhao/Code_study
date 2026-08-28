@@ -1,0 +1,524 @@
+#!/usr/bin/env python3
+"""U001 H6B1 read-only replay-readiness planner.
+
+Consumes the accepted H6B0 inventory, ranks eligible Legacy references, and
+discovers real CAN source sets.  It creates a provisional plan only; it never
+modifies a source/package and never authorizes formal differential replay.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import shutil
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+
+PROGRAM_ID = "U001_H6B1_REPLAY_READINESS"
+PROGRAM_VERSION = "1.0"
+INVENTORY_NAME = "u001_h6b0_package_inventory.json"
+OUTPUT_FOLDER_NAME = "U1H6B1_OUTPUT"
+
+NON_FORMAL_SOURCE_TOKENS = (
+    "a-archive",
+    "archive",
+    "04_temp",
+    "05_tests",
+    "evidence",
+    "fixture",
+    "synthetic",
+    "selftest",
+    "acceptance",
+)
+
+PREFERRED_SOURCE_TOKENS = ("03_cases", "00_source_readonly")
+
+
+class ReadinessError(RuntimeError):
+    """Expected fail-closed readiness error."""
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
+
+
+def integer(value: Any, default: int = -1) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def normalized_path_text(value: str) -> str:
+    return value.replace("\\", "/").lower().replace("-", "_")
+
+
+def contains_any(value: str, tokens: Iterable[str]) -> bool:
+    normalized = normalized_path_text(value)
+    return any(token in normalized for token in tokens)
+
+
+def safe_relative(path: Path, root: Path) -> str:
+    try:
+        value = path.resolve().relative_to(root.resolve()).as_posix()
+    except (OSError, ValueError):
+        return path.name
+    return value or "."
+
+
+def load_inventory(path: Path) -> Dict[str, Any]:
+    if not path.is_file():
+        raise ReadinessError("H6B0_INVENTORY_NOT_FOUND")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ReadinessError("H6B0_INVENTORY_INVALID_JSON") from exc
+    if not isinstance(value, dict):
+        raise ReadinessError("H6B0_INVENTORY_ROOT_NOT_OBJECT")
+    if value.get("ProgramId") != "U001_H6B0_PACKAGE_INVENTORY":
+        raise ReadinessError("H6B0_INVENTORY_PROGRAM_ID")
+    if value.get("ReadOnlyScan") is not True:
+        raise ReadinessError("H6B0_INVENTORY_READ_ONLY_EVIDENCE")
+    candidates = value.get("Candidates")
+    if not isinstance(candidates, list):
+        raise ReadinessError("H6B0_CANDIDATES_NOT_ARRAY")
+    if not all(isinstance(item, dict) for item in candidates):
+        raise ReadinessError("H6B0_CANDIDATE_NOT_OBJECT")
+    return value
+
+
+def parse_time(value: Any) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def legacy_rank_key(row: Dict[str, Any]) -> Tuple[int, int, int, int, float, str]:
+    path = str(row.get("RelativeFolder", ""))
+    normalized = normalized_path_text(path)
+    in_case_tree = int("03_cases" in normalized)
+    named_release = int(any(token in normalized for token in ("release", "final", "accepted")))
+    d2_rows = max(integer(row.get("D2Rows"), 0), 0)
+    d1_rows = max(integer(row.get("D1Rows"), 0), 0)
+    newest = parse_time(row.get("NewestModifiedUtc"))
+    return (in_case_tree, named_release, d2_rows, d1_rows, newest, path.lower())
+
+
+def identity_group_key(row: Dict[str, Any]) -> Tuple[str, str, str, str, int, int]:
+    return (
+        str(row.get("DatasetId", "")),
+        str(row.get("SourceIds", "")),
+        str(row.get("SegmentId", "")),
+        str(row.get("ContractVersion", "")),
+        integer(row.get("D1Rows"), -1),
+        integer(row.get("D2Rows"), -1),
+    )
+
+
+def shortlist_legacy(candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
+    eligible = [
+        dict(row)
+        for row in candidates
+        if row.get("PackageClass") == "LEGACY_REAL"
+        and truthy(row.get("FormalReplayEligible"))
+    ]
+    eligible.sort(key=legacy_rank_key, reverse=True)
+    group_keys = {identity_group_key(row) for row in eligible}
+    for rank, row in enumerate(eligible, start=1):
+        row["RecommendationRank"] = rank
+        row["IdentityGroup"] = "G" + str(
+            sorted(group_keys).index(identity_group_key(row)) + 1
+        ).zfill(2)
+        row["RecommendationBasis"] = (
+            "FORMAL_ELIGIBLE;CASE_TREE_PREFERRED;RELEASE_NAME_PREFERRED;"
+            "LARGER_FRAME_COVERAGE_PREFERRED;NEWER_TIE_BREAK_ONLY"
+        )
+    return eligible, len(group_keys)
+
+
+def discover_source_sets(root: Path, output_root: Path) -> List[Dict[str, Any]]:
+    source_sets: List[Dict[str, Any]] = []
+    output_resolved = output_root.resolve()
+    for current, directory_names, file_names in os.walk(root.resolve()):
+        current_path = Path(current)
+        directory_names[:] = [
+            name
+            for name in directory_names
+            if (current_path / name).resolve() != output_resolved
+        ]
+        by_lower = {name.casefold(): name for name in file_names}
+        if "candump.csv" not in by_lower:
+            continue
+        dbc_names = sorted(name for name in file_names if name.lower().endswith(".dbc"))
+        if not dbc_names:
+            continue
+        relative_folder = safe_relative(current_path, root)
+        non_formal = contains_any(relative_folder, NON_FORMAL_SOURCE_TOKENS)
+        normalized = normalized_path_text(relative_folder)
+        preferred_token_count = sum(token in normalized for token in PREFERRED_SOURCE_TOKENS)
+        preferred = not non_formal and preferred_token_count == len(PREFERRED_SOURCE_TOKENS)
+        candump_path = current_path / by_lower["candump.csv"]
+        total_bytes = candump_path.stat().st_size
+        for name in dbc_names:
+            total_bytes += (current_path / name).stat().st_size
+        source_sets.append(
+            {
+                "SourceSetId": "",
+                "RelativeFolder": relative_folder,
+                "CANDumpFile": by_lower["candump.csv"],
+                "DBCCount": len(dbc_names),
+                "DBCFiles": "|".join(dbc_names),
+                "PreferredSourceSet": int(preferred),
+                "NonFormalPath": int(non_formal),
+                "TotalBytes": total_bytes,
+                "ReasonCodes": (
+                    "PREFERRED_CASE_READONLY_SOURCE"
+                    if preferred
+                    else "NON_FORMAL_SOURCE_PATH"
+                    if non_formal
+                    else "ALTERNATE_REAL_SOURCE_SET"
+                ),
+            }
+        )
+    source_sets.sort(
+        key=lambda row: (
+            int(row["PreferredSourceSet"]),
+            int(not row["NonFormalPath"]),
+            int(row["TotalBytes"]),
+            str(row["RelativeFolder"]).lower(),
+        ),
+        reverse=True,
+    )
+    for index, row in enumerate(source_sets, start=1):
+        row["SourceSetId"] = f"SRC{index:03d}"
+    return source_sets
+
+
+def write_csv(path: Path, rows: List[Dict[str, Any]], columns: Sequence[str]) -> None:
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_outputs(
+    output_root: Path,
+    inventory_path: Path,
+    legacy_rows: List[Dict[str, Any]],
+    group_count: int,
+    source_sets: List[Dict[str, Any]],
+    high_real_count: int,
+) -> str:
+    output_root.mkdir(parents=True, exist_ok=True)
+    legacy_path = output_root / "u001_h6b1_legacy_shortlist.csv"
+    source_path = output_root / "u001_h6b1_source_sets.csv"
+    readiness_path = output_root / "u001_h6b1_replay_readiness.json"
+    selection_path = output_root / "u001_h6b1_provisional_selection.json"
+    capsule_path = output_root / "u001_h6b1_capsule.txt"
+
+    legacy_columns = (
+        "RecommendationRank",
+        "CandidateId",
+        "IdentityGroup",
+        "RelativeFolder",
+        "DatasetId",
+        "RunId",
+        "SegmentId",
+        "SourceIds",
+        "ContractVersion",
+        "D1Rows",
+        "D2Rows",
+        "TotalBytes",
+        "NewestModifiedUtc",
+        "RecommendationBasis",
+    )
+    source_columns = (
+        "SourceSetId",
+        "RelativeFolder",
+        "CANDumpFile",
+        "DBCCount",
+        "DBCFiles",
+        "PreferredSourceSet",
+        "NonFormalPath",
+        "TotalBytes",
+        "ReasonCodes",
+    )
+    write_csv(legacy_path, legacy_rows, legacy_columns)
+    write_csv(source_path, source_sets, source_columns)
+
+    preferred_sources = [row for row in source_sets if row["PreferredSourceSet"]]
+    recommended_legacy = legacy_rows[0] if legacy_rows else None
+    recommended_source = preferred_sources[0] if len(preferred_sources) == 1 else None
+    ambiguity = int(group_count != 1 or len(preferred_sources) != 1)
+    recommendation_id = (
+        str(recommended_legacy.get("CandidateId", "0")).replace("PKG", "")
+        if recommended_legacy
+        else "0"
+    )
+
+    readiness = {
+        "ProgramId": PROGRAM_ID,
+        "ProgramVersion": PROGRAM_VERSION,
+        "GeneratedUtc": utc_now(),
+        "ReadOnlyPlanning": True,
+        "InventoryInputBasename": inventory_path.name,
+        "EligibleLegacyCount": len(legacy_rows),
+        "LegacyIdentityGroupCount": group_count,
+        "RealHighCodeH5Count": high_real_count,
+        "SourceSetCount": len(source_sets),
+        "PreferredSourceSetCount": len(preferred_sources),
+        "AmbiguityFlag": ambiguity,
+        "FormalReplayAuthorized": False,
+        "NextRequiredAction": "GENERATE_REAL_HIGH_CODE_H5_PACKAGE",
+        "RecommendedLegacyCandidateId": recommended_legacy.get("CandidateId")
+        if recommended_legacy
+        else None,
+        "RecommendedSourceSetId": recommended_source.get("SourceSetId")
+        if recommended_source
+        else None,
+    }
+    readiness_path.write_text(
+        json.dumps(readiness, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    provisional = {
+        "SelectionSchema": "U001_H6B1_PROVISIONAL_SELECTION_V1_0",
+        "Status": "PROVISIONAL_NOT_AUTHORIZED",
+        "FormalReplayAuthorized": False,
+        "LegacyReference": {
+            "CandidateId": recommended_legacy.get("CandidateId") if recommended_legacy else None,
+            "RelativeFolder": recommended_legacy.get("RelativeFolder") if recommended_legacy else None,
+            "DatasetId": recommended_legacy.get("DatasetId") if recommended_legacy else None,
+            "RunId": recommended_legacy.get("RunId") if recommended_legacy else None,
+            "SegmentId": recommended_legacy.get("SegmentId") if recommended_legacy else None,
+        },
+        "RealSourceSet": {
+            "SourceSetId": recommended_source.get("SourceSetId") if recommended_source else None,
+            "RelativeFolder": recommended_source.get("RelativeFolder") if recommended_source else None,
+            "CANDumpFile": recommended_source.get("CANDumpFile") if recommended_source else None,
+            "DBCFiles": recommended_source.get("DBCFiles") if recommended_source else None,
+        },
+        "RequiredBeforeUse": [
+            "ENGINEER_CONFIRM_DATASET_IDENTITY",
+            "HASH_SELECTED_LEGACY_D1_D6",
+            "RUN_H2_TO_H5_FROM_REAL_SOURCE",
+            "VALIDATE_HIGH_CODE_H5_PACKAGE",
+        ],
+    }
+    selection_path.write_text(
+        json.dumps(provisional, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    capsule = (
+        f"U1H6B1-L{len(legacy_rows)}-G{group_count}-R{recommendation_id}"
+        f"-S{len(source_sets)}-P{len(preferred_sources)}-H{high_real_count}"
+        f"-A{ambiguity}-X0-C0"
+    )
+    capsule_path.write_text(capsule + "\n", encoding="utf-8")
+    return capsule
+
+
+def write_diagnostic(output_root: Path, exc: Exception) -> None:
+    try:
+        output_root.mkdir(parents=True, exist_ok=True)
+        value = {
+            "ProgramId": PROGRAM_ID,
+            "GeneratedUtc": utc_now(),
+            "Status": "FAILED",
+            "ExceptionType": type(exc).__name__,
+            "Detail": str(exc)[:2000],
+        }
+        (output_root / "u001_h6b1_diagnostic.json").write_text(
+            json.dumps(value, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def resolve_root(argument: Optional[str]) -> Path:
+    if argument:
+        root = Path(argument).expanduser().resolve()
+    else:
+        cwd = Path.cwd().resolve()
+        root = cwd if cwd.name.casefold() == "u-udp001" else cwd / "U-UDP001"
+    if not root.is_dir():
+        raise ReadinessError("U_UDP001_ROOT_NOT_FOUND")
+    return root.resolve()
+
+
+def execute(root_argument: Optional[str], inventory_argument: Optional[str]) -> int:
+    output_root: Optional[Path] = None
+    try:
+        root = resolve_root(root_argument)
+        output_root = root / "04_TEMP" / OUTPUT_FOLDER_NAME
+        inventory_path = (
+            Path(inventory_argument).expanduser().resolve()
+            if inventory_argument
+            else root / "04_TEMP" / "U1H6B0_OUTPUT" / INVENTORY_NAME
+        )
+        inventory = load_inventory(inventory_path)
+        candidates = list(inventory["Candidates"])
+        legacy_rows, group_count = shortlist_legacy(candidates)
+        source_sets = discover_source_sets(root, output_root)
+        high_real_count = sum(
+            row.get("PackageClass") == "HIGH_CODE_H5_REAL"
+            and truthy(row.get("FormalReplayEligible"))
+            for row in candidates
+        )
+        capsule = write_outputs(
+            output_root,
+            inventory_path,
+            legacy_rows,
+            group_count,
+            source_sets,
+            high_real_count,
+        )
+        print(capsule)
+        print("OUTPUT-04_TEMP/U1H6B1_OUTPUT")
+        return 0
+    except Exception as exc:
+        if output_root is None:
+            output_root = Path.cwd() / OUTPUT_FOLDER_NAME
+        write_diagnostic(output_root, exc)
+        print(f"U1H6B1-X1-C7-K{type(exc).__name__.upper()}")
+        return 7
+
+
+def make_package_record(
+    candidate_id: str,
+    folder: str,
+    dataset_id: str,
+    d1_rows: int,
+    d2_rows: int,
+    eligible: int = 1,
+) -> Dict[str, Any]:
+    return {
+        "CandidateId": candidate_id,
+        "RelativeFolder": folder,
+        "PackageClass": "LEGACY_REAL",
+        "FormalReplayEligible": eligible,
+        "DatasetId": dataset_id,
+        "RunId": "RUN_001",
+        "SegmentId": "FULL",
+        "SourceIds": "SOURCE_001",
+        "ContractVersion": "U001_DATA_CONTRACT_V0_1",
+        "D1Rows": d1_rows,
+        "D2Rows": d2_rows,
+        "TotalBytes": 1000,
+        "NewestModifiedUtc": "2026-08-28T00:00:00+00:00",
+    }
+
+
+def self_test() -> int:
+    checks: List[bool] = []
+    temp_root = Path(tempfile.mkdtemp(prefix="u1h6b1_selftest_"))
+    try:
+        u001_root = temp_root / "U-UDP001"
+        inventory_root = u001_root / "04_TEMP" / "U1H6B0_OUTPUT"
+        inventory_root.mkdir(parents=True)
+        records = [
+            make_package_record("PKG001", "03_CASES/TC001/release", "CASE_001", 100, 50),
+            make_package_record("PKG002", "03_CASES/TC001/older", "CASE_001", 90, 40),
+            make_package_record("PKG003", "A-Archive/legacy", "CASE_002", 200, 100, 0),
+            {
+                "CandidateId": "PKG004",
+                "RelativeFolder": "05_TESTS/synthetic",
+                "PackageClass": "HIGH_CODE_H5_SYNTHETIC",
+                "FormalReplayEligible": 0,
+            },
+        ]
+        inventory = {
+            "ProgramId": "U001_H6B0_PACKAGE_INVENTORY",
+            "ProgramVersion": "1.0",
+            "ReadOnlyScan": True,
+            "Candidates": records,
+        }
+        (inventory_root / INVENTORY_NAME).write_text(
+            json.dumps(inventory, indent=2), encoding="utf-8"
+        )
+        source_root = u001_root / "03_CASES" / "TC001" / "00_SOURCE-READONLY"
+        source_root.mkdir(parents=True)
+        (source_root / "CANDump.csv").write_text("A\n1\n", encoding="utf-8")
+        (source_root / "DBC1.dbc").write_text("VERSION \"\"\n", encoding="utf-8")
+        (source_root / "DBC2.dbc").write_text("VERSION \"\"\n", encoding="utf-8")
+
+        loaded = load_inventory(inventory_root / INVENTORY_NAME)
+        checks.append(len(loaded["Candidates"]) == 4)
+        shortlist, groups = shortlist_legacy(list(loaded["Candidates"]))
+        checks.append(len(shortlist) == 2)
+        checks.append(groups == 2)
+        checks.append(shortlist[0]["CandidateId"] == "PKG001")
+        output_root = u001_root / "04_TEMP" / OUTPUT_FOLDER_NAME
+        sources = discover_source_sets(u001_root, output_root)
+        checks.append(len(sources) == 1)
+        checks.append(sources[0]["PreferredSourceSet"] == 1)
+        checks.append(sources[0]["DBCCount"] == 2)
+        capsule = write_outputs(
+            output_root,
+            inventory_root / INVENTORY_NAME,
+            shortlist,
+            groups,
+            sources,
+            0,
+        )
+        checks.append(capsule == "U1H6B1-L2-G2-R001-S1-P1-H0-A1-X0-C0")
+        checks.append((output_root / "u001_h6b1_legacy_shortlist.csv").is_file())
+        checks.append((output_root / "u001_h6b1_source_sets.csv").is_file())
+        checks.append((output_root / "u001_h6b1_replay_readiness.json").is_file())
+        checks.append((output_root / "u001_h6b1_provisional_selection.json").is_file())
+        checks.append((output_root / "u001_h6b1_capsule.txt").is_file())
+        if not all(checks):
+            failed = ".".join(str(index) for index, passed in enumerate(checks, start=1) if not passed)
+            raise ReadinessError("SELFTEST_ASSERTION_FAILED_" + failed)
+        print(f"U1H6B1-ST-PASS-T{len(checks)}-X0-C0")
+        return 0
+    except Exception as exc:
+        print(
+            f"U1H6B1-ST-FAIL-T{sum(checks)}-X1-C7-"
+            f"K{type(exc).__name__.upper()}-D{str(exc)}"
+        )
+        return 7
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(description="U001 H6B1 replay-readiness planner")
+    action = result.add_mutually_exclusive_group(required=True)
+    action.add_argument("--self-test", action="store_true")
+    action.add_argument("--plan", action="store_true")
+    result.add_argument("--root")
+    result.add_argument("--inventory")
+    return result
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = parser().parse_args(argv)
+    if args.self_test:
+        return self_test()
+    return execute(args.root, args.inventory)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
