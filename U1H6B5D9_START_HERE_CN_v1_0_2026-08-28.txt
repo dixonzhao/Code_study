@@ -1,0 +1,78 @@
+U001 H6B5D9 执行指南
+=====================
+
+目的
+----
+
+D8 已确认：274,520 行 0x620 byte 非空，但其中 270,174 行至少包含一个
+不符合 0-255 的 token。新 H2 因此只接受 4,346 行并得到 895 个 FrameCount。
+
+D9 读取 D8 的详细 JSON，自动找出八个 byte 各自最常见的被拒 token，并在同一遍
+流式扫描中同时比较：
+
+1. 当前 H2 的严格八 byte 解码；
+2. 主拒绝 token 表示“沿用上一 byte”的重建；
+3. 任意 invalid/blank 表示“沿用上一 byte”的诊断上界；
+4. 原CSV中是否存在可直接使用的 FrameCount 物理列；
+5. FrameCount 数量、范围、+1连续率、倒退和 Time[us] 分段；
+6. 当前 H2 输出与旧版56,596帧基线的差异。
+
+如果逐 byte 保持状态后恢复约 56,596 个连续 FrameCount，就证明高代码 H2
+缺少针对 retained-buffer snapshot 的 byte-state reconstruction。
+
+本步骤不修改 H2，不把重建数据写入正式 U001 包。
+
+下载位置
+--------
+
+把本程序与本指南直接放在：
+
+  U-UDP001\04_TEMP
+
+不要删除 U1H6B5D8_OUTPUT。
+
+从 C-CODE 目录依次运行三行
+----------------------------
+
+python .\U-UDP001\04_TEMP\u001_h6b5d9_comprehensive_frame_semantics_diagnostic_v1_0.py.txt --prepare
+python .\U-UDP001\04_TEMP\u001_h6b5d9_comprehensive_frame_semantics_diagnostic_v1_0.py.txt --self-test
+python .\U-UDP001\04_TEMP\u001_h6b5d9_comprehensive_frame_semantics_diagnostic_v1_0.py.txt --execute
+
+执行特点
+--------
+
+- prepare 自动检查 D8 JSON、Controlled Request、Adapter Core、原CSV和两个DBC；
+- self-test 显示具体检查项与工程理由；
+- execute 流式扫描，不把完整CSV载入内存；
+- 每50,000行显示一次进度；
+- 详细结果写入JSON，正常只回传最后一行。
+
+需要回传
+--------
+
+只回传 execute 最后一行：
+
+  H6B5D9-K...-Q...-T...-P...-S...-H...-V...-F...-U...-R...-D...-O...-I...-A...-M...-X0-C0
+
+其中：
+
+K = 自动根因分类
+Q = 与旧版最接近的解释策略
+T = 八个 byte 的主拒绝 token；若不同则显示一个短Hash，完整值在JSON
+P = 最低主 token 占比，permille
+S = source rows
+H = 当前 H2 唯一 FrameCount 数
+V = strict / 主token保持 / 任意invalid保持三策略的变化数
+F = 最佳策略下 FrameCount 状态变化数
+U = 唯一 FrameCount 数
+R = min.max
+D = FrameCount decrease数
+O = 正向变化中 +1 的比例，permille
+I = 全部非法 byte cell 数
+A = 不属于主 token 的其他非法 cell 数
+M = 2精确匹配旧版；1近似匹配；0不匹配
+
+停止条件
+--------
+
+任何 C7 都停止，不修改 Adapter，把错误短码原样回传。
