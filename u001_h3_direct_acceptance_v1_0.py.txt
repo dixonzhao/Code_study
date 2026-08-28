@@ -1,0 +1,590 @@
+#!/usr/bin/env python3
+"""U001 direct H3 approved semantic policy and FrameCount compilation.
+
+The node consumes only the accepted direct-H2 five-file package.  It creates an
+explicit project-owned policy for the current 22-signal camera/radar profile,
+runs the high-code H3 engine, and independently validates the resulting H3
+package.  It never fills across frames or performs target arbitration.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+import re
+import shutil
+import subprocess
+import sys
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+
+PROGRAM_ID = "U001_H3_DIRECT_ACCEPTANCE"
+PROGRAM_VERSION = "1.0"
+PREPARED_FOLDER = "U1H3D_PREPARED"
+OUTPUT_FOLDER = "U1H3D_OUTPUT"
+FRAME_CANDIDATE = "CH2_ID620_FrameCount"
+MAX_ASSIGNMENT_AGE_ROWS = 200
+
+POLICY_COLUMNS = (
+    "SourceCanonicalNameCandidate",
+    "CanonicalName",
+    "PolicyStatus",
+    "ValueKind",
+    "SignalRole",
+    "UpdateMode",
+    "StorageDtype",
+    "ValidityRule",
+    "InvalidExactValues",
+    "DBCMinimum",
+    "DBCMaximum",
+    "UserMinimum",
+    "UserMaximum",
+    "InvalidReasonCode",
+    "Required",
+    "Notes",
+)
+
+H3_FILES = {
+    "u001_h3_frame_map.csv",
+    "u001_h3_frame_quality.json",
+    "u001_h3_compiled_signal_policy.csv",
+    "u001_h3_policy_quality.json",
+    "u001_h3_canonical_updates.csv",
+    "u001_h3_canonical_quality.json",
+    "u001_h3_run_manifest.json",
+    "u001_h3_completion_capsule.txt",
+}
+
+SUPERSEDED_TRANSFER_NAMES = (
+    "u001_h6b4_real_h2_decode_v1_0.py.txt",
+    "U1H6B4_START_HERE_CN_v1_0_2026-08-28.txt",
+)
+
+
+class H6B5Error(RuntimeError):
+    """Expected fail-closed H6B5 error."""
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def timestamp_token() -> str:
+    return datetime.now().strftime("%Y%m%dT%H%M%S_%f")
+
+
+def write_json(path: Path, value: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def read_json(path: Path, label: str) -> Dict[str, Any]:
+    if not path.is_file():
+        raise H6B5Error(label + "_NOT_FOUND")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise H6B5Error(label + "_INVALID_JSON") from exc
+    if not isinstance(value, dict):
+        raise H6B5Error(label + "_ROOT_NOT_OBJECT")
+    return value
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(4 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def resolve_root(argument: Optional[str]) -> Path:
+    if argument:
+        root = Path(argument).expanduser().resolve()
+    else:
+        cwd = Path.cwd().resolve()
+        root = cwd if cwd.name.casefold() == "u-udp001" else cwd / "U-UDP001"
+    if not root.is_dir():
+        raise H6B5Error("U_UDP001_ROOT_NOT_FOUND")
+    return root
+
+
+def required_paths(root: Path) -> Dict[str, Path]:
+    core = root / "01_PROGRAMS" / "core"
+    b4 = root / "04_TEMP" / "U1H2D_OUTPUT"
+    return {
+        "H3Engine": core / "u001_h3_sync_semantic_engine_v1_0.py",
+        "FrameCompiler": core / "u001_frame_domain_compiler_v1_0.py",
+        "PolicyCompiler": core / "u001_signal_policy_compiler_v1_0.py",
+        "Projector": core / "u001_canonical_update_projector_v1_0.py",
+        "H2Package": b4 / "h2_package",
+        "B4Result": b4 / "u001_h2_direct_result.json",
+        "B4Capsule": b4 / "u001_h2_direct_capsule.txt",
+    }
+
+
+def archive_path(path: Path, archive_root: Path) -> None:
+    archive_root.mkdir(parents=True, exist_ok=True)
+    destination = archive_root / path.name
+    counter = 1
+    while destination.exists():
+        destination = archive_root / f"{path.stem}_{counter}{path.suffix}"
+        counter += 1
+    shutil.move(str(path), str(destination))
+
+
+def clean_prior_outputs(root: Path, archive_root: Path) -> Tuple[int, List[str]]:
+    # Sprint mode deliberately leaves unrelated historical folders untouched.
+    return 0, []
+
+
+def validate_h2_boundary(h2: Path, b4_result_path: Path, b4_capsule_path: Path) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    expected = {
+        "u001_adapter_source_updates.csv",
+        "u001_adapter_signal_catalog.csv",
+        "u001_adapter_quality.json",
+        "u001_adapter_run_manifest.json",
+        "u001_adapter_completion_capsule.txt",
+    }
+    if not h2.is_dir():
+        raise H6B5Error("H2_PACKAGE_NOT_FOUND")
+    actual = {path.name for path in h2.iterdir() if path.is_file()}
+    if actual != expected:
+        raise H6B5Error("H2_PACKAGE_FILESET")
+    manifest = read_json(h2 / "u001_adapter_run_manifest.json", "H2_MANIFEST")
+    quality = read_json(h2 / "u001_adapter_quality.json", "H2_QUALITY")
+    b4_result = read_json(b4_result_path, "B4_RESULT")
+    b4_capsule = b4_capsule_path.read_text(encoding="utf-8").strip()
+    if not b4_capsule.endswith("C0") or b4_result.get("CompletionCode") != 0:
+        raise H6B5Error("B4_NOT_ACCEPTED")
+    if manifest.get("Status") != "COMPLETE" or manifest.get("CompletionCode") != 0:
+        raise H6B5Error("H2_MANIFEST_STATUS")
+    if manifest.get("OutputBoundary") != "U001_CANONICAL_SOURCE_UPDATES_V0_1":
+        raise H6B5Error("H2_OUTPUT_BOUNDARY")
+    if quality.get("Errors") or int(quality.get("DecodeFailureCount", -1)) != 0:
+        raise H6B5Error("H2_QUALITY")
+    if int(quality.get("SelectedSignalCount", -1)) != 22:
+        raise H6B5Error("H2_SELECTED_SIGNAL_COUNT")
+    if int(b4_result.get("Updates", -1)) != int(quality.get("DecodedUpdateCount", -2)):
+        raise H6B5Error("B4_H2_UPDATE_COUNT")
+    return manifest, quality
+
+
+def dependency_hashes(paths: Dict[str, Path]) -> Dict[str, str]:
+    values: Dict[str, str] = {}
+    for label, path in paths.items():
+        if path.is_file():
+            values[label] = sha256_file(path)
+        elif path.is_dir():
+            for child in sorted(path.iterdir(), key=lambda item: item.name):
+                if child.is_file():
+                    values[f"{label}/{child.name}"] = sha256_file(child)
+    return values
+
+
+def prepare(root_argument: Optional[str]) -> int:
+    try:
+        root = resolve_root(root_argument)
+        temp_root = root / "04_TEMP"
+        prepared_root = temp_root / PREPARED_FOLDER
+        output_root = temp_root / OUTPUT_FOLDER
+        archive_root = root / "A-Archive" / ("UNUSED_" + timestamp_token())
+        print("[PREPARE] U001 direct H3 semantic and FrameCount compilation")
+        print("[PREPARE] Why: consume only the newly accepted direct-H2 package.")
+        if prepared_root.exists():
+            shutil.rmtree(prepared_root)
+            print(f"[CLEAN] 04_TEMP/{PREPARED_FOLDER} | REMOVED | Why: invalidate stale prepare receipts.")
+        if output_root.exists():
+            shutil.rmtree(output_root)
+            print(f"[CLEAN] 04_TEMP/{OUTPUT_FOLDER} | REMOVED | Why: prevent stale H3 evidence reuse.")
+        archive_count, archived = clean_prior_outputs(root, archive_root)
+
+        paths = required_paths(root)
+        reasons = {
+            "H3Engine": "Coordinates frame assignment, policy compilation, and canonical projection.",
+            "FrameCompiler": "Defines FrameCount assignment without sorting or measurement fill.",
+            "PolicyCompiler": "Validates every signal role, type, and intrinsic validity rule.",
+            "Projector": "Projects H2 updates into H3 while preserving source provenance.",
+            "H2Package": "Accepted direct-H2 five-file source-update boundary.",
+            "B4Result": "Machine-readable direct-H2 acceptance counts.",
+            "B4Capsule": "Compact proof that direct H2 completed successfully.",
+        }
+        missing: List[str] = []
+        for label, path in paths.items():
+            found = path.is_dir() if label == "H2Package" else path.is_file()
+            print(f"[CHECK] {label} | {'FOUND' if found else 'MISSING'} | Why: {reasons[label]}")
+            if not found:
+                missing.append(label)
+        print("[KEEP] 04_TEMP/U1H6B3_OUTPUT | Why: exact controlled profile remains active configuration evidence.")
+        print("[KEEP] 04_TEMP/U1H2D_OUTPUT | Why: accepted H2 package is the direct H3 input.")
+        if missing:
+            raise H6B5Error("PREPARE_MISSING:" + ".".join(missing))
+        manifest, quality = validate_h2_boundary(paths["H2Package"], paths["B4Result"], paths["B4Capsule"])
+
+        prepared_root.mkdir(parents=True)
+        receipt = {
+            "PrepareReceiptSchema": "U001_H6B5_PREPARE_RECEIPT_V1_0",
+            "ProgramId": PROGRAM_ID,
+            "ProgramVersion": PROGRAM_VERSION,
+            "PreparedUtc": utc_now(),
+            "ArchivedCount": archive_count,
+            "ArchivedItems": archived,
+            "SelectedSignalCount": int(quality["SelectedSignalCount"]),
+            "DecodedUpdateCount": int(quality["DecodedUpdateCount"]),
+            "DatasetId": manifest.get("DatasetId"),
+            "RunId": manifest.get("RunId"),
+            "SegmentId": manifest.get("SegmentId"),
+            "DependencySHA256": dependency_hashes(paths),
+            "Status": "READY",
+            "CompletionCode": 0,
+        }
+        write_json(prepared_root / "u001_h6b5_prepare_receipt.json", receipt)
+        capsule = f"H3DP-P7-N22-X0-C0"
+        (prepared_root / "u001_h6b5_prepare_capsule.txt").write_text(capsule + "\n", encoding="utf-8")
+        print("[READY] H2 accepted package and all H3 high-code components are frozen for execution.")
+        print(capsule)
+        return 0
+    except Exception as exc:
+        print(f"H3DPE-K{type(exc).__name__.upper()}-D{str(exc)}-X1-C7")
+        return 7
+
+
+def require_prepare(root: Path) -> Dict[str, Any]:
+    receipt = read_json(root / "04_TEMP" / PREPARED_FOLDER / "u001_h6b5_prepare_receipt.json", "PREPARE_RECEIPT")
+    if receipt.get("ProgramId") != PROGRAM_ID or receipt.get("ProgramVersion") != PROGRAM_VERSION:
+        raise H6B5Error("PREPARE_RECEIPT_IDENTITY")
+    if receipt.get("Status") != "READY" or receipt.get("CompletionCode") != 0:
+        raise H6B5Error("PREPARE_RECEIPT_STATUS")
+    if dependency_hashes(required_paths(root)) != receipt.get("DependencySHA256"):
+        raise H6B5Error("PREPARED_DEPENDENCY_CHANGED")
+    return receipt
+
+
+def run_child(command: List[str], cwd: Path, label: str, timeout: int = 1800) -> subprocess.CompletedProcess[str]:
+    completed = subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False)
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "NO_CHILD_OUTPUT")[-1800:]
+        raise H6B5Error(label + "_EXIT:" + detail.replace("\n", " "))
+    return completed
+
+
+def self_test(root_argument: Optional[str]) -> int:
+    try:
+        root = resolve_root(root_argument)
+        require_prepare(root)
+        paths = required_paths(root)
+        tests = (
+            ("Frame compiler", paths["FrameCompiler"], "Frame assignment is deterministic and bounded."),
+            ("Policy compiler", paths["PolicyCompiler"], "Signal roles and validity rules fail closed."),
+            ("Canonical projector", paths["Projector"], "Source values and provenance remain immutable."),
+            ("H3 engine", paths["H3Engine"], "The full H2-to-H3 orchestration and artifact contract work together."),
+        )
+        for label, program, reason in tests:
+            print(f"[SELFTEST] {label} | Why: {reason}")
+            result = run_child([sys.executable, str(program), "--self-test"], program.parent, label.upper().replace(" ", "_"))
+            if "SELFTEST-PASS" not in result.stdout.upper():
+                raise H6B5Error(label.upper().replace(" ", "_") + "_PASS_TOKEN")
+            print(f"[PASS] {label} isolated tests completed.")
+        print("H3DS-T4-X0-C0")
+        return 0
+    except Exception as exc:
+        print(f"H3DSE-K{type(exc).__name__.upper()}-D{str(exc)}-X1-C7")
+        return 7
+
+
+def normalize_signal(value: str) -> str:
+    return "".join(character for character in value.casefold() if character.isalnum())
+
+
+def classify_policy_row(catalog: Dict[str, str]) -> Dict[str, str]:
+    source_name = catalog.get("CanonicalNameCandidate", "").strip()
+    signal_name = catalog.get("SourceSignalName", "").strip()
+    message_id = catalog.get("SourceMessageId", "").strip().casefold()
+    channel = catalog.get("SourceChannel", "").strip()
+    key = normalize_signal(signal_name)
+
+    kind = ""
+    role = ""
+    if key == "framecount" and channel == "2" and message_id == "0x620":
+        kind, role = "INTEGER", "FRAME_KEY"
+    elif key == "messagecounter":
+        kind, role = "INTEGER", "COUNTER"
+    elif key in {"switchingflag"}:
+        kind, role = "BOOLEAN", "EVENT_FLAG"
+    elif key in {"precedingvehicledetectionflag", "precedingvehicledetection"}:
+        kind, role = "BOOLEAN", "VALIDITY_FLAG"
+    elif key in {"objectdetectiontype", "objecttype"}:
+        kind, role = "ENUM", "STATE"
+    elif key in {
+        "distance",
+        "distancetoobject",
+        "relativespeed",
+        "lateralposition",
+        "lateralspeed",
+        "width",
+    }:
+        kind, role = "FLOAT", "MEASUREMENT"
+    else:
+        raise H6B5Error(f"UNCLASSIFIED_SIGNAL:{message_id}:{signal_name}")
+
+    storage = {
+        "FLOAT": "Float64",
+        "INTEGER": "Int64",
+        "BOOLEAN": "boolean",
+        "ENUM": "Int64",
+    }[kind]
+    validity_rule = "NONE"
+    invalid_values = ""
+    invalid_reason = ""
+    note = "Approved Camera-Radar base-profile semantic classification."
+    if key == "distance" and message_id in {"0x221", "0x251"}:
+        validity_rule = "EXACT_VALUES"
+        invalid_values = "327.66"
+        invalid_reason = "USER_INVALID_RULE"
+        note = "Camera no-target distance default confirmed by engineering review."
+    elif key == "distancetoobject" and message_id == "0x380":
+        validity_rule = "EXACT_VALUES"
+        invalid_values = "0"
+        invalid_reason = "USER_INVALID_RULE"
+        note = "Radar no-target distance zero confirmed by engineering review."
+
+    return {
+        "SourceCanonicalNameCandidate": source_name,
+        "CanonicalName": source_name,
+        "PolicyStatus": "APPROVED",
+        "ValueKind": kind,
+        "SignalRole": role,
+        "UpdateMode": "PERIODIC",
+        "StorageDtype": storage,
+        "ValidityRule": validity_rule,
+        "InvalidExactValues": invalid_values,
+        "DBCMinimum": catalog.get("DBCMinimum", ""),
+        "DBCMaximum": catalog.get("DBCMaximum", ""),
+        "UserMinimum": "",
+        "UserMaximum": "",
+        "InvalidReasonCode": invalid_reason,
+        "Required": catalog.get("Required", "0") or "0",
+        "Notes": note,
+    }
+
+
+def build_policy(catalog_path: Path, policy_path: Path) -> Tuple[int, Counter[str], Counter[str], int]:
+    with catalog_path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        if reader.fieldnames is None:
+            raise H6B5Error("H2_CATALOG_HEADER")
+        required = {"CanonicalNameCandidate", "SourceSignalName", "SourceMessageId", "SourceChannel", "DBCMinimum", "DBCMaximum", "Required"}
+        missing = sorted(required - set(reader.fieldnames))
+        if missing:
+            raise H6B5Error("H2_CATALOG_COLUMNS:" + ".".join(missing))
+        rows = [classify_policy_row(row) for row in reader]
+    if len(rows) != 22:
+        raise H6B5Error(f"POLICY_ROW_COUNT:{len(rows)}")
+    if len({row["CanonicalName"] for row in rows}) != len(rows):
+        raise H6B5Error("POLICY_DUPLICATE_CANONICAL")
+    if sum(row["SignalRole"] == "FRAME_KEY" for row in rows) != 1:
+        raise H6B5Error("POLICY_FRAME_KEY_COUNT")
+    policy_path.parent.mkdir(parents=True, exist_ok=True)
+    with policy_path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(POLICY_COLUMNS), lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    role_counts = Counter(row["SignalRole"] for row in rows)
+    kind_counts = Counter(row["ValueKind"] for row in rows)
+    exact_count = sum(row["ValidityRule"] == "EXACT_VALUES" for row in rows)
+    return len(rows), role_counts, kind_counts, exact_count
+
+
+def validate_h3_output(h3: Path, expected_updates: int) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    if not h3.is_dir():
+        raise H6B5Error("H3_OUTPUT_NOT_FOUND")
+    actual = {path.name for path in h3.iterdir() if path.is_file()}
+    if actual != H3_FILES:
+        raise H6B5Error("H3_FILESET")
+    manifest = read_json(h3 / "u001_h3_run_manifest.json", "H3_MANIFEST")
+    frame_quality = read_json(h3 / "u001_h3_frame_quality.json", "H3_FRAME_QUALITY")
+    policy_quality = read_json(h3 / "u001_h3_policy_quality.json", "H3_POLICY_QUALITY")
+    canonical_quality = read_json(h3 / "u001_h3_canonical_quality.json", "H3_CANONICAL_QUALITY")
+    capsule = (h3 / "u001_h3_completion_capsule.txt").read_text(encoding="utf-8").strip()
+    if not capsule.endswith("C0"):
+        raise H6B5Error("H3_CAPSULE")
+    if manifest.get("OutputBoundary") != "U001_H3_CANONICAL_UPDATE_PACKAGE_V1_0":
+        raise H6B5Error("H3_OUTPUT_BOUNDARY")
+    if manifest.get("Status") != "COMPLETE" or manifest.get("CompletionCode") != 0:
+        raise H6B5Error("H3_MANIFEST_STATUS")
+    if manifest.get("Errors") or frame_quality.get("Errors") or policy_quality.get("Errors") or canonical_quality.get("Errors"):
+        raise H6B5Error("H3_ERRORS_NOT_EMPTY")
+    counts = manifest.get("Counts", {})
+    if int(counts.get("InputUpdateRows", -1)) != expected_updates:
+        raise H6B5Error("H3_INPUT_UPDATE_COUNT")
+    if int(counts.get("Signals", -1)) != 22:
+        raise H6B5Error("H3_SIGNAL_COUNT")
+    if not policy_quality.get("formal_ready") or int(policy_quality.get("approved_policy_row_count", -1)) != 22:
+        raise H6B5Error("H3_POLICY_NOT_FORMAL")
+    artifacts = manifest.get("Artifacts")
+    if not isinstance(artifacts, list) or len(artifacts) != 6:
+        raise H6B5Error("H3_ARTIFACT_COUNT")
+    for item in artifacts:
+        if not isinstance(item, dict):
+            raise H6B5Error("H3_ARTIFACT_OBJECT")
+        path = h3 / str(item.get("FileName", ""))
+        if not path.is_file() or path.stat().st_size != int(item.get("SizeBytes", -1)):
+            raise H6B5Error("H3_ARTIFACT_SIZE")
+        if sha256_file(path) != str(item.get("SHA256", "")):
+            raise H6B5Error("H3_ARTIFACT_SHA256")
+    return manifest, frame_quality, canonical_quality
+
+
+def execute(root_argument: Optional[str]) -> int:
+    output_root: Optional[Path] = None
+    try:
+        root = resolve_root(root_argument)
+        receipt = require_prepare(root)
+        paths = required_paths(root)
+        output_root = root / "04_TEMP" / OUTPUT_FOLDER
+        if output_root.exists():
+            raise H6B5Error("OUTPUT_ALREADY_EXISTS_RUN_PREPARE_AGAIN")
+        output_root.mkdir(parents=True)
+        policy_path = output_root / "u001_h6b5_approved_semantic_policy.csv"
+        policy_validation = output_root / "policy_validation"
+        h3_output = output_root / "h3_output"
+        request_path = output_root / "u001_h6b5_h3_request.json"
+
+        print("[EXECUTE] Stage 1/4 | Build the explicit approved policy for all 22 selected signals.")
+        policy_count, role_counts, kind_counts, exact_count = build_policy(
+            paths["H2Package"] / "u001_adapter_signal_catalog.csv", policy_path
+        )
+        policy_validation.mkdir()
+        policy_result = run_child(
+            [
+                sys.executable,
+                str(paths["PolicyCompiler"]),
+                "--compile",
+                "--catalog",
+                str(paths["H2Package"] / "u001_adapter_signal_catalog.csv"),
+                "--policy",
+                str(policy_path),
+                "--output",
+                str(policy_validation / "u001_h6b5_compiled_policy.csv"),
+                "--quality",
+                str(policy_validation / "u001_h6b5_policy_quality.json"),
+                "--frame-signal",
+                FRAME_CANDIDATE,
+                "--mode",
+                "CONTROLLED_PROFILE",
+            ],
+            paths["PolicyCompiler"].parent,
+            "POLICY_VALIDATION",
+        )
+        if "-F1-X0-C0" not in policy_result.stdout:
+            raise H6B5Error("POLICY_FORMAL_READY_TOKEN")
+
+        print("[EXECUTE] Stage 2/4 | Create the immutable H3 request with a 200-source-row assignment limit.")
+        h2_manifest = read_json(paths["H2Package"] / "u001_adapter_run_manifest.json", "H2_MANIFEST")
+        request = {
+            "RequestSchema": "U001_H3_RUN_REQUEST_V1_0",
+            "Mode": "CONTROLLED_PROFILE",
+            "AdapterOutputFolder": str(paths["H2Package"]),
+            "SemanticPolicyPath": str(policy_path),
+            "OutputFolder": str(h3_output),
+            "DatasetId": h2_manifest.get("DatasetId"),
+            "RunId": h2_manifest.get("RunId"),
+            "SegmentId": h2_manifest.get("SegmentId"),
+            "FrameDomain": {
+                "FrameSignalCandidate": FRAME_CANDIDATE,
+                "MaxAssignmentAgeRows": MAX_ASSIGNMENT_AGE_ROWS,
+                "RequireSyncKeyCandidateAgreement": True,
+                "DecreasePolicy": "FAIL",
+            },
+        }
+        write_json(request_path, request)
+
+        print("[EXECUTE] Stage 3/4 | Run the high-code H3 engine over the accepted H2 update stream.")
+        h3_result = run_child(
+            [sys.executable, str(paths["H3Engine"]), "--run", "--request", str(request_path)],
+            paths["H3Engine"].parent,
+            "H3_ENGINE",
+            timeout=3 * 60 * 60,
+        )
+        (output_root / "h3_engine_stdout.txt").write_text(h3_result.stdout, encoding="utf-8")
+
+        print("[EXECUTE] Stage 4/4 | Independently verify H3 artifacts, counts, hashes, and formal policy status.")
+        expected_updates = int(receipt["DecodedUpdateCount"])
+        manifest, frame_quality, canonical_quality = validate_h3_output(h3_output, expected_updates)
+        counts = manifest["Counts"]
+        unassigned = int(frame_quality.get("unassigned_no_prior_source_row_count", 0)) + int(
+            frame_quality.get("unassigned_limit_source_row_count", 0)
+        )
+        result = {
+            "ResultSchema": "U001_H6B5_H3_RESULT_V1_0",
+            "GeneratedUtc": utc_now(),
+            "PolicySignalCount": policy_count,
+            "RoleCounts": dict(sorted(role_counts.items())),
+            "ValueKindCounts": dict(sorted(kind_counts.items())),
+            "ExactInvalidRuleCount": exact_count,
+            "InputUpdateRows": int(counts["InputUpdateRows"]),
+            "DistinctFrames": int(counts["DistinctFrames"]),
+            "ValidUpdates": int(counts["ValidUpdates"]),
+            "InvalidUpdates": int(counts["InvalidUpdates"]),
+            "UnassignedSourceRows": unassigned,
+            "FrameMaxAssignmentAgeRows": MAX_ASSIGNMENT_AGE_ROWS,
+            "NextRequiredAction": "H6B6_BUILD_RAW_FRAME_VIEW_AND_BOUNDED_HOLD",
+            "Status": "ACCEPTED_H3_CANONICAL_UPDATE_PACKAGE",
+            "CompletionCode": 0,
+        }
+        if result["DistinctFrames"] != 56596:
+            raise H6B5Error(f"DISTINCT_FRAME_COUNT_{result['DistinctFrames']}_EXPECTED_56596")
+        write_json(output_root / "u001_h6b5_result.json", result)
+        capsule = (
+            f"H3D-R{result['InputUpdateRows']}-F{result['DistinctFrames']}-S{policy_count}"
+            f"-V{result['ValidUpdates']}-I{result['InvalidUpdates']}"
+            f"-U{unassigned}-E{exact_count}-X0-C0"
+        )
+        (output_root / "u001_h6b5_capsule.txt").write_text(capsule + "\n", encoding="utf-8")
+        print("[COMPLETE] H3 frame-domain and semantic package accepted; no cross-frame hold was applied.")
+        print(capsule)
+        return 0
+    except Exception as exc:
+        if output_root is None:
+            output_root = Path.cwd() / OUTPUT_FOLDER
+        output_root.mkdir(parents=True, exist_ok=True)
+        write_json(
+            output_root / "u001_h6b5_diagnostic.json",
+            {
+                "ProgramId": PROGRAM_ID,
+                "GeneratedUtc": utc_now(),
+                "ExceptionType": type(exc).__name__,
+                "Detail": str(exc)[:4000],
+                "Recovery": "Correct the reported cause and restart from --prepare.",
+            },
+        )
+        print(f"H3DE-K{type(exc).__name__.upper()}-D{str(exc)}-X1-C7")
+        return 7
+
+
+def parser() -> argparse.ArgumentParser:
+    value = argparse.ArgumentParser(description="U001 H6B5 H3 semantic and frame-domain compilation")
+    action = value.add_mutually_exclusive_group(required=True)
+    action.add_argument("--prepare", action="store_true")
+    action.add_argument("--self-test", action="store_true")
+    action.add_argument("--execute", action="store_true")
+    value.add_argument("--root")
+    return value
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = parser().parse_args(argv)
+    if args.prepare:
+        return prepare(args.root)
+    if args.self_test:
+        return self_test(args.root)
+    return execute(args.root)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
