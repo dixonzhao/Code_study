@@ -1,5 +1,5 @@
 U001 H4A Raw Frame View 安装与验收
-版本：v1.0
+版本：v1.1（安装后验收路径修正版）
 日期：2026-08-28
 
 目标
@@ -19,8 +19,8 @@ GUI/Workbench 属于 H7。
 将以下三个文件直接放入：
 C-CODE\U-UDP001\04_TEMP
 
-- UDP001_U1H4A_RAW_FRAME_VIEW_HIGH_CODE_v1_0.zip
-- u001_u1h4a_raw_frame_view_installer_v1_0.py.txt
+- UDP001_U1H4A_RAW_FRAME_VIEW_HIGH_CODE_v1_1.zip
+- u001_u1h4a_raw_frame_view_installer_v1_1.py.txt
 - 本说明文件
 
 执行环境
@@ -29,9 +29,9 @@ C-CODE\U-UDP001\04_TEMP
 
 只执行以下三条命令
 ------------------
-python U-UDP001\04_TEMP\u001_u1h4a_raw_frame_view_installer_v1_0.py.txt --prepare
-python U-UDP001\04_TEMP\u001_u1h4a_raw_frame_view_installer_v1_0.py.txt --self-test
-python U-UDP001\04_TEMP\u001_u1h4a_raw_frame_view_installer_v1_0.py.txt --execute
+python U-UDP001\04_TEMP\u001_u1h4a_raw_frame_view_installer_v1_1.py.txt --prepare
+python U-UDP001\04_TEMP\u001_u1h4a_raw_frame_view_installer_v1_1.py.txt --self-test
+python U-UDP001\04_TEMP\u001_u1h4a_raw_frame_view_installer_v1_1.py.txt --execute
 
 成功标志
 --------
@@ -50,3 +50,9 @@ X0 = 无失败项
 C0 = 完成
 
 本节点安装和验收使用合成数据，不要求立即运行公司全量数据。
+
+v1.1 修正说明
+------------
+安装后的完整 H3→H4A 回放改在系统短临时目录执行，避免 Windows 深层路径或文件占用导致失败。
+项目目录只保留精简验收 receipt/capsule，验证强度不变。
+若仍失败，完整证据自动写入 04_TEMP\U1H4A_FAILURE_DIAGNOSTIC.json，无需手抄长错误。

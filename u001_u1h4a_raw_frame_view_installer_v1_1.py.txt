@@ -15,8 +15,8 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 
-PROGRAM_VERSION = "1.0.0"
-PACKAGE_NAME = "UDP001_U1H4A_RAW_FRAME_VIEW_HIGH_CODE_v1_0.zip"
+PROGRAM_VERSION = "1.1.0"
+PACKAGE_NAME = "UDP001_U1H4A_RAW_FRAME_VIEW_HIGH_CODE_v1_1.zip"
 ACTIVE_NAME = "U001H_ACTIVE"
 PREPARED_NAME = "U1H4A_PREPARED"
 
@@ -26,8 +26,8 @@ EXPECTED_FILES = {
     "01_PROGRAMS/core/u001_h4_raw_frame_view_builder_v1_0.py",
     "02_CONTROL/contracts/u001_h4_frame_policy_schema_v1_0.json",
     "02_CONTROL/contracts/u001_h4_raw_frame_view_contract_v1_0.json",
-    "05_TESTS/tools/u001_h4a_raw_frame_view_acceptance_v1_0.py",
-    "06_DOCS/U001_H4A_RAW_FRAME_VIEW_TECHNICAL_SPEC_v1_0_2026-08-28.txt",
+    "05_TESTS/tools/u001_h4a_raw_frame_view_acceptance_v1_1.py",
+    "06_DOCS/U001_H4A_RAW_FRAME_VIEW_TECHNICAL_SPEC_v1_1_2026-08-28.txt",
 }
 
 FOUNDATION_FILES = {
@@ -47,7 +47,17 @@ OBSOLETE_TRANSFER_NAMES = {
     "UDP001_U1H2B_CATALOG_SELECTION_HIGH_CODE_v1_0.zip",
     "u001_u1h2b_catalog_selection_installer_v1_0.py.txt",
     "U1H2B_START_HERE_CN_v1_0_2026-08-28.txt",
+    "UDP001_U1H4A_RAW_FRAME_VIEW_HIGH_CODE_v1_0.zip",
+    "u001_u1h4a_raw_frame_view_installer_v1_0.py.txt",
+    "U1H4A_START_HERE_CN_v1_0_2026-08-28.txt",
 }
+
+ACTIVE_OBSOLETE_FILES = {
+    "05_TESTS/tools/u001_h4a_raw_frame_view_acceptance_v1_0.py",
+    "06_DOCS/U001_H4A_RAW_FRAME_VIEW_TECHNICAL_SPEC_v1_0_2026-08-28.txt",
+}
+
+LAST_CHILD_EVIDENCE: dict[str, object] = {}
 
 
 class InstallError(RuntimeError):
@@ -153,6 +163,7 @@ def child_environment() -> dict[str, str]:
 
 
 def run_child(command: list[str], label: str, timeout: int = 300) -> str:
+    global LAST_CHILD_EVIDENCE
     try:
         result = subprocess.run(
             command,
@@ -163,14 +174,50 @@ def run_child(command: list[str], label: str, timeout: int = 300) -> str:
             env=child_environment(),
         )
     except subprocess.TimeoutExpired as exc:
+        LAST_CHILD_EVIDENCE = {
+            "Label": label,
+            "Status": "TIMEOUT",
+            "TimeoutSeconds": timeout,
+            "Command": command,
+        }
         raise InstallError(f"{label}_TIMEOUT") from exc
+    LAST_CHILD_EVIDENCE = {
+        "Label": label,
+        "Status": "PASS" if result.returncode == 0 else "FAIL",
+        "ReturnCode": result.returncode,
+        "Command": command,
+        "Stdout": result.stdout,
+        "Stderr": result.stderr,
+    }
     if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip().replace("\n", " | ")[:1600]
-        raise InstallError(f"{label}_EXIT:{result.returncode}:{detail}")
+        raise InstallError(f"{label}_EXIT:{result.returncode}")
     output = result.stdout.strip()
     if not output:
         raise InstallError(f"{label}_NO_OUTPUT")
     return output
+
+
+def write_failure_diagnostic(root: Path, exc: Exception) -> None:
+    """Persist full child evidence so the operator never has to retype a traceback."""
+    diagnostic = {
+        "DiagnosticSchema": "U001_H4A_INSTALL_FAILURE_V1_1",
+        "ProgramVersion": PROGRAM_VERSION,
+        "ErrorType": type(exc).__name__,
+        "Error": str(exc),
+        "LastChildEvidence": LAST_CHILD_EVIDENCE,
+        "CreatedLocal": datetime.now().isoformat(),
+    }
+    path = temp_dir(root) / "U1H4A_FAILURE_DIAGNOSTIC.json"
+    path.write_text(json.dumps(diagnostic, indent=2) + "\n", encoding="utf-8")
+
+
+def archive_active_obsolete(root: Path) -> int:
+    archive_root = root / "A-Archive" / f"U1H4A_V10_REPLACED_{timestamp()}"
+    moved = 0
+    for relative_text in sorted(ACTIVE_OBSOLETE_FILES):
+        relative = Path(relative_text)
+        moved += int(_archive(root / relative, archive_root, relative))
+    return moved
 
 
 def self_test(root: Path) -> None:
@@ -193,7 +240,7 @@ def self_test(root: Path) -> None:
         total += int(marker.rsplit("-", 1)[1])
     print("[CHECK] Independent H3 -> H4A replay, policy gate, determinism and tamper rejection.")
     with tempfile.TemporaryDirectory(prefix="u001_h4a_installer_") as temporary:
-        acceptance = prepared / "05_TESTS" / "tools" / "u001_h4a_raw_frame_view_acceptance_v1_0.py"
+        acceptance = prepared / "05_TESTS" / "tools" / "u001_h4a_raw_frame_view_acceptance_v1_1.py"
         acceptance_output = run_child(
             [
                 sys.executable,
@@ -235,28 +282,42 @@ def copy_payload(prepared: Path, root: Path) -> tuple[int, Path | None]:
 def execute(root: Path) -> None:
     self_test(root)
     prepared = temp_dir(root) / ACTIVE_NAME / PREPARED_NAME
+    archived_obsolete = archive_active_obsolete(root)
     copied, replaced = copy_payload(prepared, root)
-    acceptance = root / "05_TESTS" / "tools" / "u001_h4a_raw_frame_view_acceptance_v1_0.py"
-    acceptance_root = root / "05_TESTS" / f"U1H4A_ACCEPTANCE_{timestamp()}"
-    output = run_child(
-        [
-            sys.executable,
-            str(acceptance),
-            "--validate",
-            "--h4-core-dir",
-            str(root / "01_PROGRAMS" / "core"),
-            "--h3-core-dir",
-            str(root / "01_PROGRAMS" / "core"),
-            "--h3-acceptance",
-            str(root / "05_TESTS" / "tools" / "u001_h3_sync_semantic_acceptance_v1_0.py"),
-            "--output",
-            str(acceptance_root),
-        ],
-        "INSTALLED_H4A_ACCEPTANCE",
-    )
-    if "T18" not in output or "C0" not in output.replace("-", ""):
-        raise InstallError("INSTALLED_ACCEPTANCE_MARKER")
-    receipt = json.loads((acceptance_root / "u001_h4a_acceptance_receipt.json").read_text(encoding="utf-8"))
+    for relative_text in sorted(EXPECTED_FILES):
+        source = prepared / relative_text
+        installed = root / relative_text
+        if source.read_bytes() != installed.read_bytes():
+            raise InstallError(f"INSTALLED_FILE_IDENTITY:{relative_text}")
+
+    acceptance = root / "05_TESTS" / "tools" / "u001_h4a_raw_frame_view_acceptance_v1_1.py"
+    evidence_root = root / "05_TESTS" / "evidence" / f"U1H4A_{timestamp()}"
+    evidence_root.mkdir(parents=True, exist_ok=False)
+    with tempfile.TemporaryDirectory(prefix="u1h4a_post_") as temporary:
+        acceptance_root = Path(temporary) / "acceptance"
+        output = run_child(
+            [
+                sys.executable,
+                str(acceptance),
+                "--validate",
+                "--h4-core-dir",
+                str(root / "01_PROGRAMS" / "core"),
+                "--h3-core-dir",
+                str(root / "01_PROGRAMS" / "core"),
+                "--h3-acceptance",
+                str(root / "05_TESTS" / "tools" / "u001_h3_sync_semantic_acceptance_v1_0.py"),
+                "--output",
+                str(acceptance_root),
+            ],
+            "INSTALLED_H4A_ACCEPTANCE",
+        )
+        if "T18" not in output or "C0" not in output.replace("-", ""):
+            raise InstallError("INSTALLED_ACCEPTANCE_MARKER")
+        receipt_path = acceptance_root / "u001_h4a_acceptance_receipt.json"
+        capsule_path = acceptance_root / "u001_h4a_acceptance_capsule.txt"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        shutil.copy2(receipt_path, evidence_root / receipt_path.name)
+        shutil.copy2(capsule_path, evidence_root / capsule_path.name)
     if receipt.get("Status") != "PASS" or receipt.get("CompletionCode") != 0:
         raise InstallError("INSTALLED_ACCEPTANCE_RECEIPT")
     h3_output = run_child(
@@ -274,6 +335,8 @@ def execute(root: Path) -> None:
         "IndependentAcceptanceCount": 1,
         "H3CompatibilityPassed": True,
         "ReplacedFilesArchived": replaced is not None,
+        "ObsoleteV10FilesArchived": archived_obsolete,
+        "AcceptanceEvidenceFolder": evidence_root.relative_to(root).as_posix(),
         "CompletionCode": 0,
     }
     (temp_dir(root) / "U1H4A_EXECUTION_RESULT.json").write_text(
@@ -294,6 +357,7 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    root: Path | None = None
     try:
         root = resolve_u001_root(args.u001_root)
         if args.prepare:
@@ -304,7 +368,17 @@ def main(argv: list[str] | None = None) -> int:
             execute(root)
         return 0
     except (InstallError, OSError, ValueError, json.JSONDecodeError, zipfile.BadZipFile) as exc:
-        print(f"U1H4AIE-K{type(exc).__name__.upper()}-D{str(exc)}-X1-C7", file=sys.stderr)
+        if root is not None:
+            try:
+                write_failure_diagnostic(root, exc)
+            except Exception:
+                pass
+        short_detail = " ".join(str(exc).split())[-120:] or "NO_DETAIL"
+        print(
+            f"U1H4AIE-K{type(exc).__name__.upper()}-D{short_detail}-"
+            "L04_TEMP/U1H4A_FAILURE_DIAGNOSTIC.json-X1-C7",
+            file=sys.stderr,
+        )
         return 7
 
 
