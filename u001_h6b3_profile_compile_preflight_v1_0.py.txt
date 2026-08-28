@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+"""U001 H6B3 controlled profile compilation and H2 preflight.
+
+User-facing lifecycle: prepare -> self-test -> execute.
+No payload row is decoded in this node.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+
+PROGRAM_ID = "U001_H6B3_PROFILE_COMPILE_PREFLIGHT"
+PROGRAM_VERSION = "1.0"
+PREPARED_FOLDER = "U1H6B3_PREPARED"
+OUTPUT_FOLDER = "U1H6B3_OUTPUT"
+
+SUPERSEDED_TRANSFER_NAMES = (
+    "u001_h6b0_package_inventory_v1_0.py.txt",
+    "U1H6B0_START_HERE_CN_v1_0_2026-08-28.txt",
+    "u001_h6b1_replay_readiness_v1_0.py.txt",
+    "U1H6B1_START_HERE_CN_v1_0_2026-08-28.txt",
+    "u001_h6b2_source_catalog_reconciliation_v1_0.py.txt",
+    "U1H6B2_START_HERE_CN_v1_0_2026-08-28.txt",
+)
+
+
+class PreflightError(RuntimeError):
+    """Expected fail-closed orchestration error."""
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def timestamp_token() -> str:
+    return datetime.now().strftime("%Y%m%dT%H%M%S_%f")
+
+
+def write_json(path: Path, value: Dict[str, Any]) -> None:
+    path.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def read_json(path: Path, label: str) -> Dict[str, Any]:
+    if not path.is_file():
+        raise PreflightError(label + "_NOT_FOUND")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise PreflightError(label + "_INVALID_JSON") from exc
+    if not isinstance(value, dict):
+        raise PreflightError(label + "_ROOT_NOT_OBJECT")
+    return value
+
+
+def resolve_root(argument: Optional[str]) -> Path:
+    if argument:
+        root = Path(argument).expanduser().resolve()
+    else:
+        cwd = Path.cwd().resolve()
+        root = cwd if cwd.name.casefold() == "u-udp001" else cwd / "U-UDP001"
+    if not root.is_dir():
+        raise PreflightError("U_UDP001_ROOT_NOT_FOUND")
+    return root
+
+
+def version_key(path: Path) -> Tuple[int, ...]:
+    values = re.findall(r"\d+", path.name)
+    return tuple(int(value) for value in values) if values else (0,)
+
+
+def locate_adapter(root: Path) -> Path:
+    parent = root / "01_PROGRAMS" / "adapters" / "CameraRadar.U001.MatlabCanCsvDbc"
+    candidates = [
+        folder / "adapter.py"
+        for folder in parent.iterdir()
+        if folder.is_dir() and (folder / "adapter.py").is_file()
+    ] if parent.is_dir() else []
+    if not candidates:
+        raise PreflightError("H2_ADAPTER_NOT_FOUND")
+    return max(candidates, key=lambda path: version_key(path.parent))
+
+
+def required_paths(root: Path) -> Dict[str, Path]:
+    b2 = root / "04_TEMP" / "U1H6B2_OUTPUT"
+    return {
+        "SelectionCompiler": root / "01_PROGRAMS" / "core" / "u001_selection_profile_compiler_v1_0.py",
+        "H2Adapter": locate_adapter(root),
+        "CapabilityCatalog": b2 / "source_inventory" / "u001_source_capability_catalog.csv",
+        "BaseRequest": b2 / "u001_h6b2_real_source_base_request.json",
+        "SelectionRequest": b2 / "u001_h6b2_selection_request.json",
+        "B2Decision": b2 / "u001_h6b2_reconciliation_decision.json",
+        "B2Capsule": b2 / "u001_h6b2_capsule.txt",
+    }
+
+
+def archive_path(path: Path, archive_root: Path) -> None:
+    archive_root.mkdir(parents=True, exist_ok=True)
+    destination = archive_root / path.name
+    counter = 1
+    while destination.exists():
+        destination = archive_root / f"{path.stem}_{counter}{path.suffix}"
+        counter += 1
+    shutil.move(str(path), str(destination))
+
+
+def prepare(root_argument: Optional[str]) -> int:
+    try:
+        root = resolve_root(root_argument)
+        temp_root = root / "04_TEMP"
+        archive_root = root / "A-Archive" / ("U1H6B3_TEMP_HYGIENE_" + timestamp_token())
+        prepared_root = temp_root / PREPARED_FOLDER
+        output_root = temp_root / OUTPUT_FOLDER
+
+        print("[PREPARE] U001 H6B3 controlled profile compilation and H2 preflight")
+        print("[PREPARE] Why: remove stale node-owned evidence before any formal action.")
+
+        if prepared_root.exists():
+            shutil.rmtree(prepared_root)
+            print(f"[CLEAN] 04_TEMP/{PREPARED_FOLDER} | REMOVED | Why: invalidate stale prepare receipts.")
+        if output_root.exists():
+            archive_path(output_root, archive_root)
+            print(f"[CLEAN] 04_TEMP/{OUTPUT_FOLDER} | ARCHIVED | Why: prevent stale result reuse.")
+
+        moved = 0
+        for name in SUPERSEDED_TRANSFER_NAMES:
+            path = temp_root / name
+            if path.exists():
+                archive_path(path, archive_root)
+                moved += 1
+                print(f"[CLEAN] 04_TEMP/{name} | ARCHIVED | Why: superseded transfer file.")
+
+        paths = required_paths(root)
+        checks: Dict[str, Dict[str, Any]] = {}
+        reasons = {
+            "SelectionCompiler": "Compiles the provisional selection into the exact H2 controlled request.",
+            "H2Adapter": "Runs source-format preflight using the accepted production adapter.",
+            "CapabilityCatalog": "Proves every selected signal exists in the actual source definition.",
+            "BaseRequest": "Carries the uniquely resolved real CANDump and DBC inputs.",
+            "SelectionRequest": "Carries the 22-signal provisional Legacy-compatible profile.",
+            "B2Decision": "Carries reconciliation counts and the still-open Legacy ambiguity flag.",
+            "B2Capsule": "Proves H6B2 completed successfully on this host.",
+        }
+        missing: List[str] = []
+        for label, path in paths.items():
+            found = path.is_file()
+            checks[label] = {
+                "Found": found,
+                "RelativePath": path.relative_to(root).as_posix(),
+                "Why": reasons[label],
+            }
+            print(
+                f"[CHECK] {label} | {'FOUND' if found else 'MISSING'} | "
+                f"Why: {reasons[label]}"
+            )
+            if not found:
+                missing.append(label)
+
+        for kept in ("U1H6B0_OUTPUT", "U1H6B1_OUTPUT", "U1H6B2_OUTPUT"):
+            print(f"[KEEP] 04_TEMP/{kept} | Why: accepted upstream evidence required for traceability.")
+
+        if missing:
+            raise PreflightError("PREPARE_MISSING:" + ".".join(missing))
+        b2_capsule = paths["B2Capsule"].read_text(encoding="utf-8").strip()
+        if not b2_capsule.endswith("C0"):
+            raise PreflightError("B2_CAPSULE_NOT_C0")
+        decision = read_json(paths["B2Decision"], "B2_DECISION")
+        if decision.get("PayloadRowsDecoded") != 0:
+            raise PreflightError("B2_PAYLOAD_BOUNDARY")
+
+        prepared_root.mkdir(parents=True)
+        receipt = {
+            "PrepareReceiptSchema": "U001_H6B3_PREPARE_RECEIPT_V1_0",
+            "ProgramId": PROGRAM_ID,
+            "ProgramVersion": PROGRAM_VERSION,
+            "PreparedUtc": utc_now(),
+            "SupersededFilesArchived": moved,
+            "Checks": checks,
+            "B2Capsule": b2_capsule,
+            "Status": "READY",
+            "CompletionCode": 0,
+        }
+        write_json(prepared_root / "u001_h6b3_prepare_receipt.json", receipt)
+        capsule = f"U1H6B3P-C{len(checks)}-A{moved}-K3-X0-C0"
+        (prepared_root / "u001_h6b3_prepare_capsule.txt").write_text(capsule + "\n", encoding="utf-8")
+        print("[READY] All H6B3 dependencies resolved; payload decoding has not started.")
+        print(capsule)
+        return 0
+    except Exception as exc:
+        print(f"U1H6B3P-X1-C7-K{type(exc).__name__.upper()}-D{str(exc)}")
+        return 7
+
+
+def run_child(command: List[str], cwd: Path, label: str, timeout: int = 300) -> subprocess.CompletedProcess[str]:
+    completed = subprocess.run(
+        command,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "NO_CHILD_OUTPUT")[-1200:]
+        raise PreflightError(label + "_EXIT:" + detail.replace("\n", " "))
+    return completed
+
+
+def require_prepare(root: Path) -> Dict[str, Any]:
+    receipt = read_json(
+        root / "04_TEMP" / PREPARED_FOLDER / "u001_h6b3_prepare_receipt.json",
+        "PREPARE_RECEIPT",
+    )
+    if receipt.get("ProgramId") != PROGRAM_ID or receipt.get("ProgramVersion") != PROGRAM_VERSION:
+        raise PreflightError("PREPARE_RECEIPT_IDENTITY")
+    if receipt.get("Status") != "READY" or receipt.get("CompletionCode") != 0:
+        raise PreflightError("PREPARE_RECEIPT_STATUS")
+    return receipt
+
+
+def self_test(root_argument: Optional[str]) -> int:
+    try:
+        root = resolve_root(root_argument)
+        require_prepare(root)
+        paths = required_paths(root)
+        print("[SELFTEST] Selection compiler | Why: verify catalog/profile compilation rules before real preflight.")
+        compiler = run_child(
+            [sys.executable, str(paths["SelectionCompiler"]), "--self-test"],
+            paths["SelectionCompiler"].parent,
+            "SELECTION_COMPILER_SELFTEST",
+        )
+        if "PASS" not in compiler.stdout.upper():
+            raise PreflightError("SELECTION_COMPILER_PASS_TOKEN")
+        print("[PASS] Selection compiler isolated tests completed.")
+
+        print("[SELFTEST] H2 Adapter | Why: verify DBC parsing, byte decoding, streaming, and output contracts.")
+        adapter = run_child(
+            [sys.executable, str(paths["H2Adapter"]), "--self-test"],
+            paths["H2Adapter"].parent,
+            "H2_ADAPTER_SELFTEST",
+        )
+        if "PASS" not in adapter.stdout.upper():
+            raise PreflightError("H2_ADAPTER_PASS_TOKEN")
+        print("[PASS] H2 Adapter isolated tests completed.")
+
+        print("[SELFTEST] B2 artifacts | Why: verify the real-source plan is provisional, complete, and payload-free.")
+        decision = read_json(paths["B2Decision"], "B2_DECISION")
+        selection = read_json(paths["SelectionRequest"], "SELECTION_REQUEST")
+        if decision.get("PayloadRowsDecoded") != 0:
+            raise PreflightError("B2_PAYLOAD_ROWS_DECODED")
+        if selection.get("SelectionRequestSchema") != "U001_SELECTION_PROFILE_REQUEST_V0_1":
+            raise PreflightError("SELECTION_REQUEST_SCHEMA")
+        if selection.get("ProfileStatus") != "PROVISIONAL":
+            raise PreflightError("SELECTION_PROFILE_STATUS")
+        if not selection.get("SelectedCatalogItemIds") or not selection.get("FrameKeyCatalogItemId"):
+            raise PreflightError("SELECTION_PROFILE_CONTENT")
+        print("[PASS] B2 artifact boundary and profile identity verified.")
+
+        print("U1H6B3-ST-T3-X0-C0")
+        return 0
+    except Exception as exc:
+        print(f"U1H6B3-ST-X1-C7-K{type(exc).__name__.upper()}-D{str(exc)}")
+        return 7
+
+
+def execute(root_argument: Optional[str]) -> int:
+    output_root: Optional[Path] = None
+    try:
+        root = resolve_root(root_argument)
+        require_prepare(root)
+        paths = required_paths(root)
+        output_root = root / "04_TEMP" / OUTPUT_FOLDER
+        if output_root.exists():
+            shutil.rmtree(output_root)
+        output_root.mkdir(parents=True)
+        compiled_root = output_root / "compiled_profile"
+        preflight_root = output_root / "h2_preflight"
+
+        print("[EXECUTE] Stage 1/2 | Compile the provisional 22-signal Legacy-compatible profile.")
+        compile_result = run_child(
+            [
+                sys.executable,
+                str(paths["SelectionCompiler"]),
+                "--compile",
+                "--catalog",
+                str(paths["CapabilityCatalog"]),
+                "--base-request",
+                str(paths["BaseRequest"]),
+                "--selection-request",
+                str(paths["SelectionRequest"]),
+                "--out",
+                str(compiled_root),
+            ],
+            paths["SelectionCompiler"].parent,
+            "SELECTION_COMPILE",
+        )
+        (output_root / "selection_compile_stdout.txt").write_text(compile_result.stdout, encoding="utf-8")
+
+        compiled_profile = read_json(
+            compiled_root / "u001_compiled_selection_profile.json",
+            "COMPILED_PROFILE",
+        )
+        controlled_request = read_json(
+            compiled_root / "u001_h2_controlled_request.json",
+            "CONTROLLED_REQUEST",
+        )
+        compiled_count = int(compiled_profile.get("EffectiveSelectedCount", -1))
+        selected_signals = controlled_request.get("Configuration", {}).get("SelectedSignals", [])
+        if not isinstance(selected_signals, list) or len(selected_signals) != compiled_count:
+            raise PreflightError("CONTROLLED_REQUEST_SIGNAL_COUNT")
+
+        print("[EXECUTE] Stage 2/2 | Run H2 source preflight without decoding payload rows.")
+        preflight_result = run_child(
+            [
+                sys.executable,
+                str(paths["H2Adapter"]),
+                "--preflight",
+                "--request",
+                str(compiled_root / "u001_h2_controlled_request.json"),
+                "--out",
+                str(preflight_root),
+            ],
+            paths["H2Adapter"].parent,
+            "H2_PREFLIGHT",
+        )
+        (output_root / "h2_preflight_stdout.txt").write_text(preflight_result.stdout, encoding="utf-8")
+        preflight = read_json(preflight_root / "u001_adapter_preflight.json", "H2_PREFLIGHT")
+        if preflight.get("Status") != "READY" or preflight.get("CompletionCode") != 0:
+            raise PreflightError("H2_PREFLIGHT_STATUS")
+        if int(preflight.get("SelectedSignalCount", -1)) != compiled_count:
+            raise PreflightError("H2_PREFLIGHT_SIGNAL_COUNT")
+        frame_configured = int(preflight.get("FrameKeyConfigured") is True)
+        if not frame_configured:
+            raise PreflightError("H2_PREFLIGHT_FRAME_KEY")
+
+        b2_decision = read_json(paths["B2Decision"], "B2_DECISION")
+        candidate_id = str(b2_decision.get("SelectedLegacyCandidateId", "PKG000")).replace("PKG", "")
+        ambiguity = int(b2_decision.get("AmbiguityFlag", 1))
+        result = {
+            "ResultSchema": "U001_H6B3_PROFILE_PREFLIGHT_RESULT_V1_0",
+            "GeneratedUtc": utc_now(),
+            "PayloadRowsDecoded": 0,
+            "SelectedLegacyCandidateId": b2_decision.get("SelectedLegacyCandidateId"),
+            "CompiledSignalCount": compiled_count,
+            "ControlledRequestSignalCount": len(selected_signals),
+            "FrameKeyConfigured": bool(frame_configured),
+            "H2PreflightStatus": preflight.get("Status"),
+            "LegacyAmbiguityFlag": ambiguity,
+            "FormalReplayAuthorized": False,
+            "NextRequiredAction": "RUN_FULL_H2_DECODE_WITH_COMPILED_REQUEST",
+            "Status": "READY_FOR_CONTROLLED_H2_DECODE",
+            "CompletionCode": 0,
+        }
+        write_json(output_root / "u001_h6b3_result.json", result)
+        capsule = (
+            f"U1H6B3-R{candidate_id}-C{compiled_count}-U{len(selected_signals)}"
+            f"-F{frame_configured}-P1-A{ambiguity}-X0-C0"
+        )
+        (output_root / "u001_h6b3_capsule.txt").write_text(capsule + "\n", encoding="utf-8")
+        print("[COMPLETE] Profile compiled and H2 source preflight passed; payload rows remain undecoded.")
+        print(capsule)
+        return 0
+    except Exception as exc:
+        if output_root is None:
+            output_root = Path.cwd() / OUTPUT_FOLDER
+        output_root.mkdir(parents=True, exist_ok=True)
+        write_json(
+            output_root / "u001_h6b3_diagnostic.json",
+            {
+                "ProgramId": PROGRAM_ID,
+                "GeneratedUtc": utc_now(),
+                "ExceptionType": type(exc).__name__,
+                "Detail": str(exc)[:3000],
+            },
+        )
+        print(f"U1H6B3-X1-C7-K{type(exc).__name__.upper()}-D{str(exc)}")
+        return 7
+
+
+def parser() -> argparse.ArgumentParser:
+    value = argparse.ArgumentParser(description="U001 H6B3 profile compilation and H2 preflight")
+    action = value.add_mutually_exclusive_group(required=True)
+    action.add_argument("--prepare", action="store_true")
+    action.add_argument("--self-test", action="store_true")
+    action.add_argument("--execute", action="store_true")
+    value.add_argument("--root")
+    return value
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = parser().parse_args(argv)
+    if args.prepare:
+        return prepare(args.root)
+    if args.self_test:
+        return self_test(args.root)
+    return execute(args.root)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
