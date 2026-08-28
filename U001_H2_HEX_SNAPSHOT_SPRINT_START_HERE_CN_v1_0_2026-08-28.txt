@@ -1,0 +1,65 @@
+U001 H2 十六进制 / Snapshot 语义修复冲刺
+版本：v1.0
+日期：2026-08-28
+
+目标
+====
+本次不再进行新 Probe，而是直接修复已确认的两个根因：
+
+1. MATLAB CAN CSV 中的 Raw Byte 是十六进制文本；即使没有 0x 前缀，10 也必须解释为 0x10，而不是十进制 10。
+2. 输入 CSV 是 retained-buffer 的宽表快照；相同 Message Payload 在后续行重复出现时，不代表新的 CAN 发送，必须只保留首次状态和 Payload 变化。
+
+本控制器会自动完成：
+
+- 安装 H2 Adapter v1.2.0；
+- 运行十六进制解析与 Snapshot 抑制自测；
+- 使用现有 H6B3 的 22 信号 Profile 全量重跑 H2；
+- 自动继续运行 H3 FrameCount 语义编译；
+- 验证 FrameCount 是否恢复到历史确认的 56,596 个；
+- 成功或失败都保留详细 JSON 诊断。
+
+放置位置
+========
+把以下两个文件直接放入：
+
+C-CODE\U-UDP001\04_TEMP
+
+1. UDP001_H2_HEX_SNAPSHOT_SPRINT_v1_0.zip
+2. u001_h2_hex_snapshot_sprint_installer_v1_0.py.txt
+
+不要解压 ZIP。
+
+运行方法（CMD，从 C-CODE 目录执行）
+=================================
+python U-UDP001\04_TEMP\u001_h2_hex_snapshot_sprint_installer_v1_0.py.txt --prepare
+python U-UDP001\04_TEMP\u001_h2_hex_snapshot_sprint_installer_v1_0.py.txt --self-test
+python U-UDP001\04_TEMP\u001_h2_hex_snapshot_sprint_installer_v1_0.py.txt --execute
+
+运行说明
+========
+- prepare 会清理本任务自己的旧 Prepared/Output，并逐项显示依赖是否存在及检查原因。
+- self-test 应输出 U1SP1S-...-C0。
+- execute 会全量读取公司数据，耗时较长；运行期间终端会定期显示 H2 进度。
+- execute 自动串行完成 H6B4 与 H6B5，不需要再运行其他命令。
+- 不要在运行期间移动 U1H6B3_OUTPUT、源 CSV、DBC 或本次两个传输文件。
+
+只需回传
+========
+成功：只回传最后一行 U1SP1-...-C0。
+
+失败：只回传最后一行 U1SP1E-...-C7；不要手抄长日志。详细原因已自动保存在：
+
+C-CODE\U-UDP001\04_TEMP\U1SP1_OUTPUT\u001_h2_hex_snapshot_sprint_diagnostic.json
+
+成功标准
+========
+- AdapterVersion = 1.2.0
+- RawByteEncoding = HEX_TEXT
+- ObservationSemantics = SNAPSHOT_STATE_CHANGE
+- H2 FrameKeyUpdateCount = 56596
+- H3 DistinctFrames = 56596
+- 最终 C0
+
+本轮边界
+========
+本轮完成 U001 H2 和 H3 的根因修复与重新验收。H4 有界保持、H5 Package 以及 GUI 联动由下一冲刺包继续；当前全量运行期间会并行准备，不再进行逐项 Probe。
