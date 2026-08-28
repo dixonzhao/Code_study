@@ -1,0 +1,39 @@
+U001 H6B5D6 每行FrameCount上下文诊断 - 执行说明
+================================================
+
+目的
+----
+直接使用已由DBC1+DBC2生成的H2 Signal Catalog定义，把原始CSV每行携带的
+CH2 0x620 Byte解码成FrameCount。
+
+它只回答一个问题：原始宽表中持续存在的0x620值，能否作为每行同步上下文。
+程序只读数据，不修改、不排序、不填充。全量扫描时每50000行显示一次进度。
+
+放置位置
+--------
+将两个文件直接放入：
+C-CODE\U-UDP001\04_TEMP
+
+从C-CODE目录执行（仅三行）
+----------------------------
+python U-UDP001\04_TEMP\u001_h6b5d6_row_frame_context_diagnostic_v1_0.py.txt --prepare
+python U-UDP001\04_TEMP\u001_h6b5d6_row_frame_context_diagnostic_v1_0.py.txt --self-test
+python U-UDP001\04_TEMP\u001_h6b5d6_row_frame_context_diagnostic_v1_0.py.txt --execute
+
+需要回传
+--------
+只回传最后一行，约100字符：
+
+H6B5D6-...
+
+字段中：
+- R：成功解码的原始行数；
+- U：不同FrameCount数量；
+- V：最小和最大FrameCount；
+- P：原始Frame payload变化次数；
+- H：H2现有Frame更新数；
+- E：P与H是否一致；
+- D：按源行读取时FrameCount下降次数；
+- Q：正向Frame增量的q50/q95/max。
+
+返回本行后即可决定H2到H3的重构，不再要求长Capsule。
