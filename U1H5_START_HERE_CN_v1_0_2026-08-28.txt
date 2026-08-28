@@ -1,0 +1,36 @@
+U001 H5 最终六文件组装层——公司端执行指南
+版本：v1.0
+
+目的：
+安装 H5 高代码程序，并在不使用公司数据的情况下完成独立多源验收。
+本次合成验收同时包含 CAN 与 GNSS，用于确认未来多源边界不是单 CAN 硬编码。
+
+放置位置：
+请把以下三个下载文件直接放入：
+C-CODE\U-UDP001\04_TEMP
+
+1. UDP001_U1H5_FINAL_PACKAGE_HIGH_CODE_v1_0.zip
+2. u001_u1h5_final_package_installer_v1_0.py.txt
+3. 本说明文件
+
+打开 CMD，进入 C-CODE 根目录，只运行以下三行：
+
+python U-UDP001\04_TEMP\u001_u1h5_final_package_installer_v1_0.py.txt --prepare
+python U-UDP001\04_TEMP\u001_u1h5_final_package_installer_v1_0.py.txt --self-test
+python U-UDP001\04_TEMP\u001_u1h5_final_package_installer_v1_0.py.txt --accept
+
+成功时，只需回传第三行最终机器码，格式应类似：
+U1H5Q-T10-N2-S3-F3-X0-C0
+
+含义：
+T10 = 10项独立验收通过
+N2 = 合成测试包含2个独立Source
+S3 = 3个Frame信号
+F3 = 3个FrameCount
+X0/C0 = 无异常、成功
+
+注意：
+- 不要把 .py.txt 改成 .py；Python可以直接执行该文件。
+- 本次只运行合成数据，不读取公司CAN、DBC、GNSS或视频。
+- 验收证据保存在 U-UDP001\05_TESTS\evidence，不在04_TEMP。
+- 如果失败，回传04_TEMP内 U1H5_DIAGNOSTIC.json 的 ErrorType 和 Error。

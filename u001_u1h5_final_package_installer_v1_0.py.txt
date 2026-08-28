@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""Install and independently accept the U001 H5 high-code package."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+import zipfile
+from pathlib import Path
+
+
+ZIP_NAME = "UDP001_U1H5_FINAL_PACKAGE_HIGH_CODE_v1_0.zip"
+REQUIRED = {
+    "01_PROGRAMS/core/u001_h5_contract_core_v1_0.py",
+    "01_PROGRAMS/core/u001_h5_package_assembler_v1_0.py",
+    "01_PROGRAMS/core/u001_h5_package_validator_v1_0.py",
+    "02_CONTROL/contracts/u001_h5_assembly_request_schema_v1_0.json",
+    "02_CONTROL/contracts/u001_h5_review_profile_schema_v1_0.json",
+    "02_CONTROL/contracts/u001_h5_six_file_package_contract_v1_0.json",
+    "02_CONTROL/contracts/u001_source_set_manifest_schema_v1_0.json",
+    "02_CONTROL/templates/u001_h5_review_profile_template_v1_0.csv",
+    "05_TESTS/tools/u001_h5_package_acceptance_v1_0.py",
+    "06_DOCS/U001_H5_PACKAGE_ASSEMBLY_AND_MULTI_SOURCE_BOUNDARY_TECHNICAL_SPEC_v1_0_2026-08-28.txt",
+}
+
+
+class InstallError(RuntimeError):
+    pass
+
+
+def root_from_cwd() -> Path:
+    root = Path.cwd() / "U-UDP001"
+    if not root.is_dir():
+        raise InstallError("RUN_FROM_C_CODE_ROOT")
+    return root
+
+
+def check(message: str, why: str) -> None:
+    print(f"[CHECK] {message}")
+    print(f"[WHY]  {why}")
+
+
+def _safe_members(archive: zipfile.ZipFile) -> set[str]:
+    names: set[str] = set()
+    for item in archive.infolist():
+        name = item.filename.replace("\\", "/").rstrip("/")
+        if not name:
+            continue
+        parts = Path(name).parts
+        if Path(name).is_absolute() or ".." in parts:
+            raise InstallError(f"ZIP_PATH:{name}")
+        if not item.is_dir():
+            names.add(name)
+    return names
+
+
+def prepare() -> None:
+    root = root_from_cwd()
+    transfer = root / "04_TEMP"
+    archive_path = transfer / ZIP_NAME
+    check(str(archive_path), "The transfer archive must be the approved H5 release, not an older TEMP artifact.")
+    if not archive_path.is_file():
+        raise InstallError("ZIP_MISSING")
+    with zipfile.ZipFile(archive_path) as archive:
+        names = _safe_members(archive)
+        check(f"ZIP inventory: {len(names)} files", "An exact inventory prevents stale or omitted H5 components.")
+        if names != REQUIRED:
+            raise InstallError(f"ZIP_INVENTORY:MISSING={sorted(REQUIRED-names)}:EXTRA={sorted(names-REQUIRED)}")
+        with tempfile.TemporaryDirectory(prefix="u1h5_install_") as temporary:
+            extracted = Path(temporary)
+            archive.extractall(extracted)
+            timestamp = dt.datetime.now().strftime("%Y%m%dT%H%M%S")
+            backup = root / "A-Archive" / f"U1H5_REPLACED_{timestamp}"
+            moved = 0
+            for relative in sorted(REQUIRED):
+                destination = root / relative
+                if destination.exists():
+                    prior = backup / relative
+                    prior.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(destination), str(prior))
+                    moved += 1
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(extracted / relative, destination)
+            check(f"Installed: {len(REQUIRED)}; archived prior files: {moved}", "Only approved H5 paths are promoted; other U001 stages remain untouched.")
+    print(f"U1H5P-N{len(REQUIRED)}-A{moved}-X0-C0")
+
+
+def run_checked(command: list[str], label: str) -> str:
+    result = subprocess.run(command, text=True, capture_output=True, timeout=180)
+    if result.returncode != 0:
+        raise InstallError(f"{label}_EXIT:{result.returncode}:{result.stdout[-300:]}:{result.stderr[-300:]}")
+    return result.stdout.strip()
+
+
+def self_test() -> None:
+    root = root_from_cwd()
+    core = root / "01_PROGRAMS" / "core"
+    tools = root / "05_TESTS" / "tools"
+    programs = [
+        core / "u001_h5_contract_core_v1_0.py",
+        core / "u001_h5_package_assembler_v1_0.py",
+        core / "u001_h5_package_validator_v1_0.py",
+    ]
+    for program in programs:
+        check(program.name, "Each installed component must pass its own contract-level self-test.")
+        output = run_checked([sys.executable, str(program), "--self-test"], program.name)
+        if "PASS" not in output:
+            raise InstallError(f"SELFTEST_CAPSULE:{program.name}")
+    acceptance = tools / "u001_h5_package_acceptance_v1_0.py"
+    check(acceptance.name, "The independent synthetic test covers multi-source packaging, tamper rejection, and source-name collision rejection.")
+    output = run_checked([sys.executable, str(acceptance), "--self-test", "--core-dir", str(core)], "ACCEPTANCE_SELFTEST")
+    if "PASS-10" not in output:
+        raise InstallError("ACCEPTANCE_SELFTEST_CAPSULE")
+    print("U1H5ST-P3-Q10-X0-C0")
+
+
+def accept() -> None:
+    root = root_from_cwd()
+    core = root / "01_PROGRAMS" / "core"
+    acceptance = root / "05_TESTS" / "tools" / "u001_h5_package_acceptance_v1_0.py"
+    evidence = root / "05_TESTS" / "evidence" / ("U1H5_" + dt.datetime.now().strftime("%Y%m%dT%H%M%S"))
+    check(str(evidence), "Acceptance evidence is written outside 04_TEMP so later hygiene does not remove it.")
+    output = run_checked([sys.executable, str(acceptance), "--core-dir", str(core), "--out", str(evidence)], "ACCEPTANCE")
+    if "-C0" not in output:
+        raise InstallError("ACCEPTANCE_CAPSULE")
+    print(output)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--prepare", action="store_true")
+    group.add_argument("--self-test", action="store_true")
+    group.add_argument("--accept", action="store_true")
+    args = parser.parse_args()
+    try:
+        if args.prepare: prepare()
+        elif args.self_test: self_test()
+        else: accept()
+        return 0
+    except Exception as exc:
+        root = Path.cwd() / "U-UDP001"
+        temp = root / "04_TEMP"
+        temp.mkdir(parents=True, exist_ok=True)
+        diagnostic = {"Stage":"U1H5_INSTALL_OR_ACCEPT","ErrorType":type(exc).__name__,"Error":str(exc)}
+        (temp / "U1H5_DIAGNOSTIC.json").write_text(json.dumps(diagnostic, indent=2) + "\n", encoding="utf-8")
+        print(f"U1H5-ERROR-{type(exc).__name__}-{str(exc)[:180]}-X1-C7")
+        return 7
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
