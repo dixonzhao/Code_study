@@ -31,3 +31,12 @@ number in every row.
 - Add a median to the output using `statistics.median`.
 - Try another numeric column in a different CSV file.
 - Group the rows by a category before calculating statistics.
+
+## U-Series architecture and operation reference
+
+Read the data-preparation, analysis and evidence-review workflow, including its
+Module interfaces and configuration examples. The handbook is available in
+Chinese, Japanese and English.
+
+- [Download the three-language handbook](U_SERIES_HANDBOOK_ZH_JA_EN_0_10_15.zip)
+- [Contents and file verification](HANDBOOK_README.md)
